@@ -1,0 +1,251 @@
+# Desired-state model
+
+## Purpose
+
+The canonical source repository stores reviewable Skill content and the
+declarations that decide which Nodes should receive it. Operators maintain
+groups, Node subscriptions, and Target paths. They do not maintain a second
+catalog of individual Skills in YAML.
+
+This document fixes the semantics. Exact YAML field names may change during
+technical design if the meaning remains intact.
+
+## Source layout
+
+```text
+fleet.yml
+groups/
+  definitive/
+    code-review/
+      SKILL.md
+      references/
+    typescript/
+      SKILL.md
+  testing/
+    new-reviewer/
+      SKILL.md
+  in-progress/
+    experimental-agent/
+      SKILL.md
+```
+
+The convention is:
+
+```text
+groups/<group-name>/<skill-name>/
+```
+
+Every immediate child directory of a declared group is a Skill. A group may
+contain one Skill when an Operator needs a narrowly assigned collection.
+
+Group and Skill names use lowercase letters, numbers, and hyphens. This avoids
+case collisions between common macOS and Linux filesystems.
+
+## Skill directory trees
+
+A Skill is its complete directory tree, not only its root `SKILL.md`. The root
+`SKILL.md` is mandatory. Fleet recursively includes nested regular files and
+directories in the Skill's Bundle. File bytes are opaque and may be text or
+binary. A change to any included path, entry type, file content, or executable
+bit changes the Bundle digest.
+
+Fleet does not classify content, scan for secrets, or decide whether a file
+belongs in a Skill. The author controls the source tree and is responsible for
+anything committed to it. Fleet still treats every entry as untrusted input and
+never executes Bundle content.
+
+For the POC, source validation and Agent extraction accept regular files and
+directories. They reject symlinks, hard links, device files, sockets, named
+pipes, absolute paths, parent traversal, and any entry that would escape its
+Skill root. Every path must use portable UTF-8 names. Validation rejects paths
+that collide after Unicode normalization or case-insensitive comparison so one
+Bundle cannot resolve differently on common macOS and Linux filesystems. Limits
+cover tree depth, path length, entry count, individual file size, and total
+uncompressed size.
+
+Bundle construction orders and encodes entries deterministically so the same
+tree produces the same digest on macOS and Linux. It preserves only the regular
+file executable bit. Timestamps, owners, groups, and other host metadata do not
+belong to a Bundle. Git cannot represent empty directories, so Fleet does not
+create or preserve them. Authors can add a regular placeholder file when an
+empty directory matters. The exact Bundle encoding and numeric limits remain
+protocol decisions.
+
+## Conceptual YAML
+
+```yaml
+schema: fleet/v1
+
+groups:
+  - definitive
+  - testing
+  - in-progress
+
+targets:
+  skills:
+    base: home
+    path: .agents/skills
+
+nodes:
+  joan-macbook:
+    id: node_01JMAC
+    targets:
+      skills:
+        groups:
+          - definitive
+          - testing
+
+  linux-workstation:
+    id: node_01JLINUX
+    targets:
+      skills:
+        path: .codex/skills
+        groups:
+          - definitive
+```
+
+The YAML declares group names and order but never lists the Skills inside them.
+The Server discovers Skills from the directories at the exact source revision.
+
+The Server owns the enrolled Node registry. The YAML references stable Node IDs
+and supplies desired configuration for them:
+
+- an enrolled Node missing from the YAML remains registered but receives no new
+  Assignment;
+- an unknown Node ID makes source validation fail; and
+- credentials, enrollment tokens, and mutable Node metadata never enter Git.
+
+## Target resolution
+
+The Target named `skills` has one default descriptor:
+
+```text
+base = home
+path = .agents/skills
+```
+
+A Node may override the relative path. The Agent, not the Server or Fleet CLI,
+resolves `home` through operating-system APIs on that Node.
+
+For the POC:
+
+- `home` is the only allowed base;
+- the path must be relative and non-empty;
+- absolute paths and `..` segments are invalid;
+- the resolved path must remain under the user's home after symlink-aware
+  validation; and
+- the Agent mutates only named Skill directories below the resolved Target.
+
+An initial per-Node override is supported. Changing the path of an already
+active Target is not an implicit move in the POC. The Server rejects that change
+until a later explicit Target-relocation flow defines how to install at the new
+path and clean up the old path safely.
+
+## Group resolution
+
+Groups are source organization and assignment policy. Agents never see them.
+
+For each Node and Target, the Server:
+
+1. selects the groups subscribed by that Node;
+2. orders them by their declaration order in `fleet.yml`;
+3. discovers the Skills in each selected directory;
+4. resolves each Skill to immutable Bundle content; and
+5. produces one flat map of Skill name to Bundle digest.
+
+For the example above:
+
+```text
+joan-macbook:
+  code-review  -> <digest>
+  typescript   -> <digest>
+  new-reviewer -> <digest>
+
+linux-workstation:
+  code-review -> <digest>
+  typescript  -> <digest>
+```
+
+The actual contents depend on the group directories. The Agent receives only
+the flat map and its Target descriptor.
+
+## Duplicate Skill names
+
+A Skill should exist in exactly one group. Duplicates are accepted with warnings
+in the POC so one mistake does not halt every unrelated update.
+
+Resolution is deterministic for each Node Target:
+
+1. consider only groups subscribed by that Node;
+2. process them in the global order declared in `fleet.yml`;
+3. keep the first occurrence of a Skill name; and
+4. skip later occurrences with the same name.
+
+The accepted desired revision records a structured `duplicate_skill_name`
+warning containing the Skill name, every source location in declared order, and
+the effective winner for each affected Node Target. Server logs also include the
+warning, and Fleet CLI status must show it.
+
+Filesystem traversal order never decides the winner. If `definitive` must win,
+it appears before `testing` and `in-progress` in the declared group order.
+There is no hard-coded primary group name. The first declared subscribed group
+has the highest precedence.
+
+## Source polling and publication
+
+The POC Git adapter reads only `main`:
+
+1. scan immediately when the Server starts;
+2. poll the remote on a configurable interval, initially 30 minutes;
+3. compare the exact tip identity with the last observed source revision;
+4. load the complete source tree for a new tip;
+5. validate the complete YAML and every complete discovered Skill tree;
+6. build or reuse Bundles by content digest;
+7. resolve the effective flat Skill map for every configured Node Target;
+8. compare those maps with the last accepted desired revision; and
+9. atomically accept the desired revision and create Assignments for affected
+   Node Targets.
+
+If several commits arrive between scans, the Server may accept only the latest
+tip. Desired state is complete, so intermediate source revisions are not needed
+for correctness.
+
+If the new tip is invalid, the Server records an ingestion failure and keeps the
+previous desired revision current. It never accepts a partial repository state.
+
+A source revision that changes only documentation or other unmanaged files may
+be observed without creating a Rollout. The decision depends on the resolved
+desired state, not on whether the commit ID changed.
+
+## Semantic comparison, not patch delivery
+
+The Server may use Git diffs to avoid re-reading unchanged files, but it must
+validate and resolve a complete desired snapshot before publication. Git text
+diffs are not delivered to Agents.
+
+For each Node Target, correctness comes from comparing maps:
+
+```text
+previous desired state: Skill name -> Bundle digest
+new desired state:      Skill name -> Bundle digest
+```
+
+Only Node Targets whose effective map or Target descriptor changed need a new
+Assignment. Unchanged Bundles retain their digest, so Agents download only
+missing content even though the Assignment describes the complete desired set.
+
+## Removal semantics
+
+The Assignment is the complete Fleet-owned desired state for one Target:
+
+- a desired Skill absent locally is created;
+- a desired Skill with a different digest is updated;
+- a Fleet-owned local Skill absent from desired state is removed; and
+- an unowned local Skill is left untouched.
+
+Removing a Skill directory, removing a group subscription, or moving a Skill to
+a group that the Node does not receive can therefore remove Fleet-owned content.
+
+Removing a Node from YAML stops new assignment. It does not implicitly erase
+content from that Node in the POC. Decommissioning and remote uninstall require
+an explicit future design because a removed Node may remain offline forever.
