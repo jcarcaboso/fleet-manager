@@ -6,7 +6,7 @@ Node runs an Agent that polls the Server over mutual TLS and reconciles its own
 filesystem. Nodes need no inbound listener, SSH access, Git checkout, or source
 repository credentials.
 
-Version 0.3.0 contains three parts:
+Version 0.4.0 contains three parts:
 
 - The .NET Server scans the canonical Git source, validates desired state,
   publishes immutable assignments, serves the Operator dashboard and API, and
@@ -31,10 +31,9 @@ migrations with Docker Compose. The dashboard is part of the Server image, so
 it does not need a separate container. Follow the
 [homelab setup](deploy/homelab/README.md) for a first installation.
 
-The published amd64 Server image is `skorcius/fleet-manager:0.3.0`, with digest
-`sha256:6f8428ff067234e936f0f7468e4e2d6d457c53f5b57e76ee73037d6c17eb3c7d`.
+The amd64 Server image is `skorcius/fleet-manager:0.4.0`.
 For an existing installation, back up PostgreSQL and private configuration,
-replace `compose.yaml` with the 0.3 copy, and preserve `.env`, `secrets/`,
+replace `compose.yaml` with the current release copy, and preserve `.env`, `secrets/`,
 `operator.env`, `ssh/`, and Docker volumes. Set the image in `.env`, then run:
 
 ```sh
@@ -62,8 +61,7 @@ credentials, assignments, attempts, and enrollment delivery data. The alias
 becomes available again. Audit history and shared release data remain.
 Neither action deletes files on the machine. Stop its Agent and remove the
 `fleet.yml` entry unless you intend to enroll a replacement for that alias.
-These two Node actions are in the current checkout and require a server image
-newer than `0.3.0`.
+These Node actions are available in Server `0.4.0`.
 
 ## Install the clients with Homebrew
 
@@ -185,6 +183,7 @@ The main design references are:
 - [Implementation status](docs/implementation-status.md)
 - [Operations hardening](docs/technical-design/operations-hardening.md)
 - [Engineering standards](docs/engineering-standards.md)
+- [Fleet Manager 0.4.0 release notes](docs/releases/0.4.0.md)
 - [Fleet Manager 0.3.0 release notes](docs/releases/0.3.0.md)
 
 The [original handoff](successor-poc-handoff.md) remains as historical input.

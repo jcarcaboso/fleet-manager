@@ -83,7 +83,7 @@ Stop the Agent on the machine. Neither action remotely uninstalls Skills or
 erases its local state. Remove the source's `fleet.yml` entry unless reusing the
 alias deliberately. A replacement Node needs fresh enrollment, and ownership
 conflicts on old Skill directories still require local resolution. The Node
-actions require a server build newer than `0.3.0`.
+actions are available in Server `0.4.0`.
 
 ### Browser sessions
 
