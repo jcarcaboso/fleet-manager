@@ -29,10 +29,10 @@ jobs:
         os: [ubuntu-latest, macos-latest]
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
-      - run: rustup show active-toolchain
-      - run: cargo fmt --manifest-path clients/Cargo.toml --all -- --check
-      - run: cargo clippy --manifest-path clients/Cargo.toml --workspace --all-targets --locked -- -D warnings
-      - run: cargo test --manifest-path clients/Cargo.toml --workspace --locked
+      - run: rustup toolchain install 1.95.0 --profile minimal --component rustfmt,clippy
+      - run: cargo +1.95.0 fmt --manifest-path clients/Cargo.toml --all -- --check
+      - run: cargo +1.95.0 clippy --manifest-path clients/Cargo.toml --workspace --all-targets --locked -- -D warnings
+      - run: cargo +1.95.0 test --manifest-path clients/Cargo.toml --workspace --locked
 
   docs:
     name: Documentation links
