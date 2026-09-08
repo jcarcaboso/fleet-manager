@@ -18,7 +18,8 @@ async function api(path, body) {
       invalid_csrf: 'Your session changed. Refresh the page and try again.',
       node_alias_in_use: 'That alias is already in use.', invalid_node_name: 'Choose a nonblank alias of at most 200 characters.',
       invalid_alias: 'Choose a nonblank alias of at most 200 characters.', node_not_found: 'That node no longer exists.',
-      node_revoked: 'That node has been revoked.', invalid_expiry: 'Choose an expiry between 1 and 60 minutes.'
+      node_revoked: 'That node has been revoked.', invalid_expiry: 'Choose an expiry between 1 and 60 minutes.',
+      node_alias_changed: 'This Node was renamed. Refresh the list before removing it.'
     };
     throw new Error(known[error.code] || `Request failed (${response.status}). Refresh and try again.`);
   }
@@ -51,7 +52,26 @@ async function nodes(append) {
       try { await api('/nodes/rename', { currentAlias, alias }); message('Alias changed. Update its entry in fleet.yml too.'); await nodes(false); }
       catch (error) { message(error.message); }
     });
-    actions.append(rename); row.append(actions); $('#nodes').append(row);
+    const revoke = document.createElement('button');
+    revoke.textContent = 'Revoke'; revoke.className = 'secondary'; revoke.disabled = Boolean(node.revoked);
+    revoke.addEventListener('click', async () => {
+      if (!confirm(`Revoke access for "${node.name}"? Its certificates will stop working. The Node record and installed files will remain.`)) return;
+      revoke.disabled = true;
+      try { await api('/nodes/' + encodeURIComponent(node.nodeId) + '/revoke', {}); message('Node access revoked. Stop its Agent on the machine.'); await nodes(false); }
+      catch (error) { revoke.disabled = false; message(error.message); }
+    });
+    const remove = document.createElement('button');
+    remove.textContent = 'Remove'; remove.className = 'secondary';
+    remove.addEventListener('click', async () => {
+      const alias = prompt(`Permanently remove "${node.name}" and its server credentials and assignment history? Its alias will be free. Audit history stays. This does not erase files on the machine. Stop its Agent and remove its fleet.yml entry unless you plan to enroll a replacement.\n\nType the exact alias to confirm:`);
+      if (alias === null) return;
+      if (alias !== node.name) { message('Alias did not match. Node was not removed.'); return; }
+      remove.disabled = true;
+      try { await api('/nodes/' + encodeURIComponent(node.nodeId) + '/remove', { alias }); message('Node removed. Its alias is available for a new enrollment.'); await nodes(false); }
+      catch (error) { remove.disabled = false; message(error.message); }
+    });
+    actions.append(rename, document.createTextNode(' '), revoke, document.createTextNode(' '), remove);
+    row.append(actions); $('#nodes').append(row);
   }
   nextCursor = page.nextCursor;
   $('#more').hidden = !nextCursor; $('#nodes-empty').hidden = $('#nodes').children.length !== 0;

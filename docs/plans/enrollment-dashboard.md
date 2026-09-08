@@ -68,6 +68,25 @@ revoke endpoint can revoke an authorization if its ID was retained.
 
 ## Sessions and deployment
 
+### Revoke or remove a Node
+
+The Node table provides **Revoke** and **Remove** actions. Revocation invalidates
+all Node certificates and retains its record and alias. Removal requires typing
+the exact alias and deletes the Node, credentials, assignments, attempts, and
+enrollment delivery records in one transaction. It works on active or revoked
+Nodes and frees the alias. Audit events and shared rollout/bundle data remain.
+A changed alias or missing Node causes the request to fail rather than target a
+replacement. The existing database foreign keys provide cleanup; no new migration
+is required for these actions.
+
+Stop the Agent on the machine. Neither action remotely uninstalls Skills or
+erases its local state. Remove the source's `fleet.yml` entry unless reusing the
+alias deliberately. A replacement Node needs fresh enrollment, and ownership
+conflicts on old Skill directories still require local resolution. The Node
+actions require a server build newer than `0.3.0`.
+
+### Browser sessions
+
 Operator tokens create 30-minute Secure, HttpOnly, SameSite=Strict browser
 sessions. Mutations require an antiforgery token and the configured Origin.
 Removing or rotating an Operator credential invalidates its sessions. Restarting

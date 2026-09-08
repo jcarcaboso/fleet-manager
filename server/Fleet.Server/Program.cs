@@ -128,7 +128,7 @@ app.Use(async (context, next) =>
         {
             "unauthorized" or "invalid_credential" or "node_unauthorized" or "bundle_not_authorized" => 403,
             "not_found" or "node_not_found" or "credential_not_found" or "attempt_not_found" => 404,
-            "node_alias_in_use" or "node_revoked" => 409,
+            "node_alias_in_use" or "node_revoked" or "node_alias_changed" => 409,
             _ => 400
         };
         await context.Response.WriteAsJsonAsync(new { code = exception.Code });

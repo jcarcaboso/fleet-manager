@@ -133,6 +133,16 @@ public static class DashboardEndpoints
             await coordinator.GetNodesAsync(new(100, after), time.GetUtcNow(), TimeSpan.FromSeconds(settings.StaleAfterSeconds), ct));
         authenticated.MapPost("/nodes/rename", async (RenameRequest request, HttpContext http, IFleetCoordinator coordinator, CancellationToken ct) =>
             await coordinator.RenameNodeAliasAsOperatorAsync(new(request.CurrentAlias, request.Alias, Actor(http)), ct));
+        authenticated.MapPost("/nodes/{id:guid}/revoke", async (Guid id, HttpContext http, IFleetCoordinator coordinator, CancellationToken ct) =>
+        {
+            await coordinator.RevokeNodeAsync(new(id), Actor(http), ct);
+            return Results.Ok(new { revoked = true });
+        });
+        authenticated.MapPost("/nodes/{id:guid}/remove", async (Guid id, RemoveNodeRequest request, HttpContext http, IFleetCoordinator coordinator, CancellationToken ct) =>
+        {
+            await coordinator.RemoveNodeAsync(new(id), request.Alias, Actor(http), ct);
+            return Results.Ok(new { removed = true });
+        });
         authenticated.MapPost("/enrollment-links", async (LinkRequest request, HttpContext http, IFleetCoordinator coordinator, TimeProvider time, CancellationToken ct) =>
         {
             if (request.ExpiresInSeconds is < 60 or > 3600) return Results.BadRequest(new { code = "invalid_expiry" });
@@ -167,5 +177,6 @@ public static class DashboardEndpoints
     }
     public sealed record LoginRequest(string Token);
     public sealed record RenameRequest(string CurrentAlias, string Alias);
+    public sealed record RemoveNodeRequest(string Alias);
     public sealed record LinkRequest(string Alias, int ExpiresInSeconds = 900);
 }

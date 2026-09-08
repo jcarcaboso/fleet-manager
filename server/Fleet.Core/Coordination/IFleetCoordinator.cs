@@ -25,6 +25,12 @@ public interface IFleetCoordinator
         string revokedBy,
         CancellationToken cancellationToken = default);
 
+    Task RemoveNodeAsync(
+        NodeId nodeId,
+        string expectedAlias,
+        string removedBy,
+        CancellationToken cancellationToken = default);
+
     Task RenewCredentialAsync(
         RenewNodeCredential command,
         CancellationToken cancellationToken = default);

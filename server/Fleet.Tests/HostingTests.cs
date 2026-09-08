@@ -138,6 +138,71 @@ public sealed class HostingTests : IAsyncLifetime
     }
 
     [Fact]
+    public async Task Dashboard_revoke_and_remove_block_access_delete_owned_records_and_free_alias()
+    {
+        using var browser = _factory.CreateClient(new() { BaseAddress = new Uri("https://localhost") });
+        browser.DefaultRequestHeaders.Add("Origin", "https://localhost");
+        await DashboardCsrf(browser);
+        (await browser.PostAsJsonAsync("/dashboard/api/login", new { token = Token })).EnsureSuccessStatusCode();
+        await DashboardCsrf(browser);
+        var authorization = await _operator.PostAsJsonAsync("/operator/v1/enrollment-tokens", new { expiresInSeconds = 900 });
+        var token = (await authorization.Content.ReadFromJsonAsync<JsonElement>()).GetProperty("token").GetString();
+        using var key = ECDsa.Create(ECCurve.NamedCurves.nistP256);
+        var csr = new CertificateRequest("CN=ignored", key, HashAlgorithmName.SHA256).CreateSigningRequestPem();
+        var enrollmentBody = new { token, nodeName = "remove-me", platform = "linux", certificateRequestPem = csr };
+        var enrollment = await browser.PostAsJsonAsync("/agent/v1/enroll", enrollmentBody);
+        enrollment.EnsureSuccessStatusCode();
+        var identity = await enrollment.Content.ReadFromJsonAsync<JsonElement>();
+        var id = identity.GetProperty("nodeId").GetGuid();
+        using var certificate = X509Certificate2.CreateFromPem(identity.GetProperty("certificatePem").GetString()!);
+        var route = $"/dashboard/api/nodes/{id}";
+        using var anonymous = _factory.CreateClient(new() { BaseAddress = new Uri("https://localhost") });
+        Assert.Equal(HttpStatusCode.Unauthorized, (await anonymous.PostAsJsonAsync(route + "/remove", new { alias = "remove-me" })).StatusCode);
+        Assert.Equal(HttpStatusCode.Unauthorized, (await anonymous.PostAsJsonAsync(route + "/revoke", new { })).StatusCode);
+        browser.DefaultRequestHeaders.Remove("X-Fleet-CSRF");
+        Assert.Equal(HttpStatusCode.BadRequest, (await browser.PostAsJsonAsync(route + "/remove", new { alias = "remove-me" })).StatusCode);
+        Assert.Equal(HttpStatusCode.BadRequest, (await browser.PostAsJsonAsync(route + "/revoke", new { })).StatusCode);
+        await DashboardCsrf(browser);
+        Assert.Equal(HttpStatusCode.Conflict, (await browser.PostAsJsonAsync(route + "/remove", new { alias = "different" })).StatusCode);
+        using (var scope = _factory.Services.CreateScope())
+        {
+            var coordinator = scope.ServiceProvider.GetRequiredService<IFleetCoordinator>();
+            var bytes = Encoding.UTF8.GetBytes("shared bundle");
+            var digest = Convert.ToHexStringLower(SHA256.HashData(bytes));
+            await coordinator.AcceptSourceSnapshotAsync(new("remove-test", [new(digest, "fleet.bundle/v1", bytes.Length, bytes)],
+                [new(new(id), "skills", new("home", ".agents/skills"), [new("test", digest)])], [], DateTimeOffset.UtcNow));
+        }
+        Assert.Equal(200, (await SendNodeAsync("/agent/v1/poll", certificate)).Response.StatusCode);
+        (await browser.PostAsJsonAsync(route + "/revoke", new { })).EnsureSuccessStatusCode();
+        Assert.Equal(401, (await SendNodeAsync("/agent/v1/poll", certificate)).Response.StatusCode);
+        var nodes = await browser.GetFromJsonAsync<JsonElement>("/dashboard/api/nodes");
+        Assert.True(Assert.Single(nodes.GetProperty("items").EnumerateArray()).GetProperty("revoked").GetBoolean());
+        (await browser.PostAsJsonAsync(route + "/remove", new { alias = "remove-me" })).EnsureSuccessStatusCode();
+        Assert.Equal(401, (await SendNodeAsync("/agent/v1/poll", certificate)).Response.StatusCode);
+        Assert.Equal(HttpStatusCode.BadRequest, (await browser.PostAsJsonAsync("/agent/v1/enroll", enrollmentBody)).StatusCode);
+        Assert.Equal(HttpStatusCode.NotFound, (await browser.PostAsJsonAsync(route + "/remove", new { alias = "remove-me" })).StatusCode);
+        using (var scope = _factory.Services.CreateScope())
+        {
+            var db = scope.ServiceProvider.GetRequiredService<FleetDbContext>();
+            Assert.False(await db.Nodes.AnyAsync(x => x.Id == id));
+            Assert.False(await db.Credentials.AnyAsync(x => x.NodeId == id));
+            Assert.False(await db.Assignments.AnyAsync(x => x.NodeId == id));
+            Assert.False(await db.Attempts.AnyAsync(x => x.NodeId == id));
+            Assert.False(await db.Enrollments.AnyAsync(x => x.NodeId == id));
+            Assert.True(await db.Bundles.AnyAsync());
+            Assert.True(await db.AuditEvents.AnyAsync(x => x.NodeId == id && x.Action == "node_removed"));
+        }
+        var freshTokenResponse = await _operator.PostAsJsonAsync("/operator/v1/enrollment-tokens", new { expiresInSeconds = 900 });
+        var freshToken = (await freshTokenResponse.Content.ReadFromJsonAsync<JsonElement>()).GetProperty("token").GetString();
+        var replacement = await browser.PostAsJsonAsync("/agent/v1/enroll", new { token = freshToken, nodeName = "remove-me", platform = "linux", certificateRequestPem = csr });
+        replacement.EnsureSuccessStatusCode();
+        var replacementId = (await replacement.Content.ReadFromJsonAsync<JsonElement>()).GetProperty("nodeId").GetGuid();
+        Assert.NotEqual(id, replacementId);
+        // Direct removal also disables an active Node without a separate revoke click.
+        (await browser.PostAsJsonAsync($"/dashboard/api/nodes/{replacementId}/remove", new { alias = "remove-me" })).EnsureSuccessStatusCode();
+    }
+
+    [Fact]
     public async Task Operator_and_node_credentials_cannot_cross_interfaces()
     {
         using var anonymous = _factory.CreateClient(new() { BaseAddress = new Uri("https://localhost") });

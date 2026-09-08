@@ -264,6 +264,30 @@ public sealed class PostgresFleetCoordinator(
         await transaction.CommitAsync(cancellationToken);
     }
 
+    public async Task RemoveNodeAsync(NodeId nodeId, string expectedAlias, string removedBy, CancellationToken cancellationToken = default)
+    {
+        var alias = Required(expectedAlias, 200, "node_alias");
+        var actor = Required(removedBy, 200, "removed_by");
+        await EnsureWorkspace(cancellationToken);
+        await using var transaction = await db.Database.BeginTransactionAsync(IsolationLevel.ReadCommitted, cancellationToken);
+        // Serialize with source publication so it cannot assign work to a disappearing Node.
+        await db.Database.ExecuteSqlRawAsync("SELECT pg_advisory_xact_lock(1179403596)", cancellationToken);
+        var id = nodeId.Value;
+        var row = await db.Nodes.FromSqlInterpolated($"SELECT * FROM nodes WHERE \"Id\" = {id} FOR UPDATE")
+            .SingleOrDefaultAsync(cancellationToken)
+            ?? throw Error("node_not_found", "Node was not found.");
+        if (row.WorkspaceId != options.WorkspaceId.Value) throw Error("node_not_found", "Node was not found.");
+        if (!string.Equals(row.Name, alias, StringComparison.Ordinal))
+            throw Error("node_alias_changed", "Node alias changed; refresh before removing it.");
+        // Enrollment delivery is not a foreign key and must not replay deleted credentials.
+        await db.Enrollments.Where(x => x.WorkspaceId == row.WorkspaceId && x.NodeId == id)
+            .ExecuteDeleteAsync(cancellationToken);
+        db.Nodes.Remove(row); // FK cascades remove credentials, assignments, Skills, and attempts.
+        db.AuditEvents.Add(Audit("node_removed", actor, clock.GetUtcNow(), id));
+        await db.SaveChangesAsync(cancellationToken);
+        await transaction.CommitAsync(cancellationToken);
+    }
+
     public async Task<NodeAuthentication?> FindActiveNodeByCertificateAsync(string certificateSha256, CancellationToken cancellationToken = default)
     {
         await EnsureWorkspace(cancellationToken);

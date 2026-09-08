@@ -55,6 +55,16 @@ before use. Treat it as a secret until it expires or enrollment succeeds. The
 [dashboard enrollment guide](docs/plans/enrollment-dashboard.md) explains its
 trust checks and session behavior.
 
+The dashboard's Node actions distinguish revocation from removal. **Revoke**
+blocks all of the Node's certificates and keeps its record visible. **Remove**
+asks for its exact alias, then permanently deletes the server record,
+credentials, assignments, attempts, and enrollment delivery data. The alias
+becomes available again. Audit history and shared release data remain.
+Neither action deletes files on the machine. Stop its Agent and remove the
+`fleet.yml` entry unless you intend to enroll a replacement for that alias.
+These two Node actions are in the current checkout and require a server image
+newer than `0.3.0`.
+
 ## Install the clients with Homebrew
 
 This repository is also the Homebrew tap. The v0.3 release automation publishes
