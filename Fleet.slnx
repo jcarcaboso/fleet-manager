@@ -1,0 +1,7 @@
+<Solution>
+  <Folder Name="/server/">
+    <Project Path="server/Fleet.Core/Fleet.Core.csproj" />
+    <Project Path="server/Fleet.Server/Fleet.Server.csproj" />
+    <Project Path="server/Fleet.Tests/Fleet.Tests.csproj" />
+  </Folder>
+</Solution>

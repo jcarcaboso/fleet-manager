@@ -1,0 +1,14 @@
+**/bin/
+**/obj/
+clients/target/
+.local/
+.env
+*.user
+*.pfx
+*.key
+__pycache__/
+/artifacts/
+/deploy/homelab/.env
+/deploy/homelab/secrets/
+/deploy/homelab/operator.env
+/deploy/homelab/ssh/

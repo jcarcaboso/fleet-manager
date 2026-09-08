@@ -1,0 +1,22 @@
+# syntax=docker/dockerfile:1.7
+FROM rust:1.95.0-alpine AS builder
+
+RUN apk add --no-cache musl-dev
+
+WORKDIR /src
+COPY clients/Cargo.toml clients/Cargo.lock ./clients/
+COPY clients/bins/fleet/Cargo.toml clients/bins/fleet/Cargo.toml
+COPY clients/bins/fleet/src clients/bins/fleet/src
+COPY contracts/operator/nodes-page.json contracts/operator/nodes-page.json
+COPY contracts/operator/enrollment-token-response.json contracts/operator/enrollment-token-response.json
+
+WORKDIR /src/clients
+
+RUN --mount=type=cache,target=/usr/local/cargo/registry,sharing=locked \
+    --mount=type=cache,target=/src/clients/target,sharing=locked \
+    cargo test --workspace --locked && \
+    cargo build --package fleet --release --locked && \
+    cp target/release/fleet /fleet
+
+FROM scratch AS export
+COPY --from=builder /fleet /fleet

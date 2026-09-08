@@ -1,0 +1,103 @@
+name: fleet-manager
+
+x-server: &server
+  image: ${FLEET_IMAGE:-skorcius/fleet-manager:0.1.0-poc.20260908}
+  user: "1654:1654"
+  read_only: true
+  cap_drop: [ALL]
+  security_opt: [no-new-privileges:true]
+  environment:
+    Source__Remote: ${FLEET_SOURCE_REMOTE:-}
+    ASPNETCORE_CONTENTROOT: /run/fleet
+    HOME: /home/app
+  volumes:
+    - runtime-config:/run/fleet:ro
+    - runtime-config:/home/app:ro
+  tmpfs:
+    - /tmp:rw,noexec,nosuid,nodev,size=64m,mode=1777
+    - /var/lib/fleet:rw,noexec,nosuid,nodev,size=768m,mode=0700,uid=1654,gid=1654
+  networks: [backend, outbound]
+  mem_limit: 2g
+  pids_limit: 256
+  logging:
+    driver: json-file
+    options:
+      max-size: "10m"
+      max-file: "3"
+
+services:
+  configure:
+    image: ${FLEET_IMAGE:-skorcius/fleet-manager:0.1.0-poc.20260908}
+    user: "0:0"
+    entrypoint: [/bin/sh, -ec]
+    command:
+      - |
+        mkdir -p /runtime/tls /runtime/.ssh
+        cp /input/server.json /runtime/appsettings.Production.json
+        cp /input/tls/* /runtime/tls/
+        cp -R /input-ssh/. /runtime/.ssh/
+        chown -R 1654:1654 /runtime
+        find /runtime -type d -exec chmod 0700 {} +
+        find /runtime -type f -exec chmod 0600 {} +
+    read_only: true
+    network_mode: none
+    cap_drop: [ALL]
+    cap_add: [CHOWN, DAC_OVERRIDE, FOWNER]
+    security_opt: [no-new-privileges:true]
+    volumes:
+      - ./secrets:/input:ro
+      - ./ssh:/input-ssh:ro
+      - runtime-config:/runtime
+    restart: "no"
+
+  postgres:
+    image: postgres:17.6-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: fleet
+      POSTGRES_DB: fleet
+      POSTGRES_PASSWORD_FILE: /run/secrets/postgres-password
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+      - ./secrets/postgres-password:/run/secrets/postgres-password:ro
+    networks: [backend]
+    healthcheck:
+      test: [CMD-SHELL, "pg_isready -U fleet -d fleet"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+    logging:
+      driver: json-file
+      options: {max-size: "10m", max-file: "3"}
+
+  migrate:
+    <<: *server
+    command: [--migrate]
+    restart: "no"
+    depends_on:
+      postgres: {condition: service_healthy}
+      configure: {condition: service_completed_successfully}
+
+  server:
+    <<: *server
+    restart: unless-stopped
+    ports:
+      - "${FLEET_BIND_IP:-127.0.0.1}:${FLEET_PORT:-7443}:7443"
+    depends_on:
+      postgres: {condition: service_healthy}
+      migrate: {condition: service_completed_successfully}
+    healthcheck:
+      test: [CMD, curl, --fail, --silent, --show-error, --max-time, "3", --cacert, /run/fleet/tls/ca.pem, https://localhost:7443/health/ready]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
+
+networks:
+  backend:
+    internal: true
+  outbound: {}
+
+volumes:
+  postgres-data: {}
+  runtime-config: {}

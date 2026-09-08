@@ -1,0 +1,12 @@
+{
+  "items": [
+    {
+      "nodeId": "00000000-0000-0000-0000-000000000001",
+      "name": "linux-example",
+      "revoked": false,
+      "lastContactAt": null,
+      "freshness": "never_contacted"
+    }
+  ],
+  "nextCursor": null
+}

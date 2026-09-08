@@ -1,0 +1,15 @@
+**
+!Dockerfile
+!global.json
+!Directory.Build.props
+!LICENSE
+!server/
+!server/Fleet.Core/
+!server/Fleet.Core/**
+!server/Fleet.Server/
+!server/Fleet.Server/**
+**/bin/
+**/obj/
+**/*.key
+**/*.pfx
+**/appsettings.*.json

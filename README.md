@@ -5,8 +5,15 @@ Linux machines. Each managed Node runs an Agent that initiates outbound
 communication, receives declarative desired state, and reconciles its own local
 filesystem.
 
-The POC architecture and core implementation stack are agreed. There is no
-application code yet.
+The repository now contains the .NET Server, PostgreSQL coordination module,
+Git source ingestion, and Rust Operator CLI. The managed Agent and local Target
+reconciliation are the next implementation stages.
+
+Start with [the local HTTPS setup](docs/technical-design/server-development.md).
+For a homelab deployment, use the [Docker Compose setup](deploy/homelab/README.md)
+and the [standalone CLI installation guide](docs/technical-design/cli-installation.md).
+Run `make restore`, `make format`, `make check`, and `make test` for the shared
+development checks. PostgreSQL integration tests require Docker.
 
 ## Living documentation
 
@@ -30,6 +37,14 @@ application code yet.
   release questions that must still be resolved.
 - [Architecture decisions](docs/adr/) record accepted choices that would be
   expensive or confusing to reverse.
+- [Implementation status](docs/implementation-status.md) distinguishes the
+  working Server and CLI from the remaining POC and release work.
+- [Operations hardening](docs/technical-design/operations-hardening.md) covers
+  listener validation, metrics, cleanup, Operator identities, and backup/restore.
+- [Threat model](docs/technical-design/threat-model.md),
+  [data inventory](docs/technical-design/data-inventory.md), and
+  [dependency inventory](docs/technical-design/dependencies.md) document the
+  current implementation's boundaries.
 
 The [original handoff](successor-poc-handoff.md) is retained as historical input.
 The living documents above take precedence where later architecture discussions
@@ -37,7 +52,10 @@ resolved or changed an earlier assumption.
 
 ## Current phase
 
-The next task is the Server foundation. Before its public Agent interface is
-fixed, the project must define its remaining operating envelope, validate the
-accepted Node authentication against the threat model, and set its privacy,
-deployment, protocol, and measurable performance budgets.
+The Server and CLI are under development. Operator authentication uses separately
+configured bearer-token digests. The project uses the MIT license.
+
+The Agent protocol is provisional. Recovery reporting, local reconciliation,
+Linux/macOS end-to-end scenarios, measured performance budgets, retention, and
+backup/restore still need implementation or release decisions. A private
+security-reporting contact and contribution attestation policy remain open.

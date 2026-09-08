@@ -50,7 +50,9 @@ fit the intended community?
 
 ### Answer
 
-Open. Resolve before accepting external contributions.
+The owner selected MIT for the implementation on 2026-09-07. The repository now
+contains `LICENSE`. Contribution attestation, maintainer policy, and release
+ownership remain open before accepting external contributions.
 
 ## #3: Threat model
 
@@ -103,9 +105,11 @@ model later support browser sessions and an external identity provider?
 
 ### Answer
 
-Partly resolved. Every POC Operator has full administrative authority. The
-authentication mechanism remains open and must later support browser sessions
-without mixing Operator and Node identities.
+The owner selected separately configured Operator bearer tokens for the POC on
+2026-09-07. The Server stores their SHA-256 digests and requires HTTPS. Every POC
+Operator has full administrative authority. Browser sessions and external
+identity-provider integration remain deferred and must keep Operator and Node
+identities separate.
 
 ## #6: Privacy inventory and retention
 

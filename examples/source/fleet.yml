@@ -1,0 +1,19 @@
+schema: fleet/v1
+
+groups:
+  - definitive
+  - testing
+
+targets:
+  skills:
+    base: home
+    path: .agents/skills
+
+nodes:
+  example-node:
+    id: 00000000-0000-0000-0000-000000000000
+    targets:
+      skills:
+        groups:
+          - definitive
+          - testing
