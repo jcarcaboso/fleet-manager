@@ -6,8 +6,8 @@ communication, receives declarative desired state, and reconciles its own local
 filesystem.
 
 The repository now contains the .NET Server, PostgreSQL coordination module,
-Git source ingestion, and Rust Operator CLI. The managed Agent and local Target
-reconciliation are the next implementation stages.
+Git source ingestion, Rust Operator CLI, and a Rust Node Agent with local Skill
+reconciliation. See the [Agent installation guide](deploy/agent/README.md).
 
 Start with [the local HTTPS setup](docs/technical-design/server-development.md).
 For a homelab deployment, use the [Docker Compose setup](deploy/homelab/README.md)
@@ -52,10 +52,9 @@ resolved or changed an earlier assumption.
 
 ## Current phase
 
-The Server and CLI are under development. Operator authentication uses separately
+The Server, Operator CLI, and Node Agent are under development. Operator authentication uses separately
 configured bearer-token digests. The project uses the MIT license.
 
-The Agent protocol is provisional. Recovery reporting, local reconciliation,
-Linux/macOS end-to-end scenarios, measured performance budgets, retention, and
-backup/restore still need implementation or release decisions. A private
+The Agent protocol is provisional. Full recovery reporting, real macOS deployment, measured performance budgets,
+and operational release policies remain open. A private
 security-reporting contact and contribution attestation policy remain open.

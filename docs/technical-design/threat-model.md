@@ -28,3 +28,25 @@ Node keys, production secret distribution, and protection from a compromised
 Server OS are outside this POC. Open release work includes issuing-key rotation,
 backup/restore drills, private security reporting, deletion policy, dependency
 review ownership, measured load limits, and the complete Agent recovery protocol.
+
+## Node Agent implementation boundary
+
+The Agent authenticates the Server with TLS and uses locally generated P-256
+credentials for mTLS. Enrollment tokens come from a private file or environment,
+never a command-line token argument. Credential and report state use bounded
+regular files in a private directory with atomic replacement and fsync.
+
+Bundle digests, sizes, schemas, paths, file types, and executable flags are
+validated before activation. The Agent never executes installed content.
+Unowned Skill directories cause conflicts; only receipt-owned names can be
+replaced or removed. Local observations also enforce file, depth, and byte
+limits, so a large drifted file fails safely. Journals restore observed previous
+content after interrupted activation. Agent-state and Target locks serialize
+normal concurrent processes.
+
+An attacker already running as the same operating-system user can change its
+files and race path checks; this POC does not claim containment against that
+attacker. Observed symlinks and hard links are rejected. Corrupt receipts fail
+closed. The Server 0.2.0 protocol cannot record a separate post-success drift or
+recovery condition; the Agent repairs cached active state and reports this limit
+in its installation guide.

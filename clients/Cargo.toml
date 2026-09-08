@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["bins/fleet"]
+members = ["bins/fleet", "bins/fleet-agent", "crates/fleet-reconcile"]
 
 [workspace.package]
 edition = "2024"
@@ -13,5 +13,5 @@ clap = { version = "4.5.48", features = ["derive", "env"] }
 reqwest = { version = "0.12.23", default-features = false, features = ["json", "rustls-tls"] }
 serde = { version = "1.0.228", features = ["derive"] }
 serde_json = "1.0.145"
-tokio = { version = "1.47.1", features = ["macros", "rt-multi-thread"] }
-uuid = { version = "1.18.1", features = ["serde"] }
+tokio = { version = "1.47.1", features = ["macros", "rt-multi-thread", "time", "signal"] }
+uuid = { version = "1.18.1", features = ["serde", "v4"] }

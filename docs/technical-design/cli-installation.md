@@ -47,7 +47,8 @@ The build requires Docker with BuildKit support. From the repository root, run:
 
 The script builds locked dependencies from `clients/Cargo.lock`, runs the Rust
 workspace tests, and writes the archive and its checksum under `artifacts/`.
-The script creates a temporary build context containing the client workspace and
+It also builds `fleet-agent-linux-amd64.tar.gz`. The script creates a temporary
+build context containing the client workspace and
 the two contract fixtures used by its tests. Server files and local configuration
 are not sent to the builder.
 

@@ -25,3 +25,22 @@ Upstream compatibility information is available in the
 CSR loading uses the platform's signature verification with default options,
 as documented by
 [CertificateRequest.LoadSigningRequestPem](https://learn.microsoft.com/en-us/dotnet/api/system.security.cryptography.x509certificates.certificaterequest.loadsigningrequestpem?view=net-10.0).
+
+## Node Agent dependencies
+
+The Agent adds these direct dependencies to the Rust workspace. Versions below
+are the resolved versions in `Cargo.lock`; manifests constrain their compatible
+release lines. Each lists `MIT OR Apache-2.0` in its upstream crate metadata.
+
+| Package | Purpose |
+|---|---|
+| rcgen 0.14.10, ring backend | Standard P-256 key and CSR generation without an OpenSSL executable. |
+| time 0.3.55 | Parse certificate expiration and schedule renewal. |
+| dirs 6.0.0 | Resolve the local user's home directory. |
+| sha2 0.10.9 | Verify Bundle and observed Skill-tree digests. |
+| unicode-normalization 0.1.25 | Reject noncanonical and colliding portable Bundle paths. |
+
+`tempfile` is test-only. The Agent uses standard-library file locks and filesystem
+operations. The RustSec audit on 2026-09-08 loaded 1,242 advisories and reported no
+vulnerabilities across the 193 locked packages. The separate crates.io index
+refresh emitted a local registry warning; the advisory database fetch succeeded.

@@ -3,7 +3,6 @@ set -eu
 
 repo_dir=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
 output_dir="$repo_dir/artifacts"
-archive_name=fleet-linux-amd64.tar.gz
 work_dir=$(mktemp -d)
 
 cleanup() {
@@ -27,6 +26,11 @@ install -m 0644 \
     "$repo_dir/clients/bins/fleet/Cargo.toml" \
     "$work_dir/context/clients/bins/fleet/Cargo.toml"
 cp -R "$repo_dir/clients/bins/fleet/src" "$work_dir/context/clients/bins/fleet/src"
+mkdir -p "$work_dir/context/clients/bins/fleet-agent" "$work_dir/context/clients/crates/fleet-reconcile"
+for client_dir in bins/fleet-agent crates/fleet-reconcile; do
+    install -m 0644 "$repo_dir/clients/$client_dir/Cargo.toml" "$work_dir/context/clients/$client_dir/Cargo.toml"
+    cp -R "$repo_dir/clients/$client_dir/src" "$work_dir/context/clients/$client_dir/src"
+done
 install -m 0644 \
     "$repo_dir/contracts/operator/nodes-page.json" \
     "$work_dir/context/contracts/operator/nodes-page.json"
@@ -40,26 +44,21 @@ docker build \
     --output "type=local,dest=$work_dir/export" \
     "$work_dir/context"
 
-install -m 0755 "$work_dir/export/fleet" "$work_dir/package/fleet"
-install -m 0644 "$repo_dir/LICENSE" "$work_dir/package/LICENSE"
-
-(
-    cd "$work_dir/package"
-    sha256sum fleet LICENSE > SHA256SUMS
-    TZ=UTC tar \
-        --sort=name \
-        --owner=0 \
-        --group=0 \
-        --numeric-owner \
-        --mtime='1970-01-01 00:00:00Z' \
-        -cf - \
-        LICENSE SHA256SUMS fleet | gzip -n > "$output_dir/$archive_name"
-)
-
-(
-    cd "$output_dir"
-    sha256sum "$archive_name" > "$archive_name.sha256"
-)
-
-printf 'Built %s\n' "$output_dir/$archive_name"
-printf 'Checksum: %s\n' "$output_dir/$archive_name.sha256"
+for binary in fleet fleet-agent; do
+    archive_name="$binary-linux-amd64.tar.gz"
+    package_dir="$work_dir/package/$binary"
+    mkdir -p "$package_dir"
+    install -m 0755 "$work_dir/export/$binary" "$package_dir/$binary"
+    install -m 0644 "$repo_dir/LICENSE" "$package_dir/LICENSE"
+    (
+        cd "$package_dir"
+        sha256sum "$binary" LICENSE > SHA256SUMS
+        TZ=UTC tar --sort=name --owner=0 --group=0 --numeric-owner \
+            --mtime='1970-01-01 00:00:00Z' -cf - LICENSE SHA256SUMS "$binary" | gzip -n > "$output_dir/$archive_name"
+    )
+    (
+        cd "$output_dir"
+        sha256sum "$archive_name" > "$archive_name.sha256"
+    )
+    printf 'Built %s\n' "$output_dir/$archive_name"
+done

@@ -7,6 +7,8 @@ WORKDIR /src
 COPY clients/Cargo.toml clients/Cargo.lock ./clients/
 COPY clients/bins/fleet/Cargo.toml clients/bins/fleet/Cargo.toml
 COPY clients/bins/fleet/src clients/bins/fleet/src
+COPY clients/bins/fleet-agent clients/bins/fleet-agent
+COPY clients/crates clients/crates
 COPY contracts/operator/nodes-page.json contracts/operator/nodes-page.json
 COPY contracts/operator/enrollment-token-response.json contracts/operator/enrollment-token-response.json
 
@@ -15,8 +17,10 @@ WORKDIR /src/clients
 RUN --mount=type=cache,target=/usr/local/cargo/registry,sharing=locked \
     --mount=type=cache,target=/src/clients/target,sharing=locked \
     cargo test --workspace --locked && \
-    cargo build --package fleet --release --locked && \
-    cp target/release/fleet /fleet
+    cargo build --workspace --release --locked && \
+    cp target/release/fleet /fleet && \
+    cp target/release/fleet-agent /fleet-agent
 
 FROM scratch AS export
 COPY --from=builder /fleet /fleet
+COPY --from=builder /fleet-agent /fleet-agent

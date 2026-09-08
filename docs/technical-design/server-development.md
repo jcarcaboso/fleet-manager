@@ -1,8 +1,8 @@
 # Run the development server
 
 The Server is a .NET 10 process backed by PostgreSQL. The `fleet` Rust binary
-administers it. Managed Agents and local Target reconciliation are not included
-yet. The current Agent routes support a fake Agent for testing the Server.
+administers it. The Rust `fleet-agent` binary enrolls Nodes and reconciles local
+Skills. See the [Agent setup guide](../../deploy/agent/README.md).
 
 Install .NET SDK 10.0.302, a Rust 2024 toolchain, Git, Docker with Compose,
 OpenSSL, Python 3, and Make. Run from the repository root:

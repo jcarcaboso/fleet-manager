@@ -45,14 +45,15 @@ The published `0.1.0` release predates this change. UUID-based manifests must
 remove `id` and use each Node's current enrollment name as the key. Internal Node
 IDs, certificates, and existing Assignments remain stable.
 
+The first Node Agent implements P-256 enrollment, real mTLS, certificate renewal,
+polling, bounded Bundle downloads, receipt-based ownership, journaled filesystem
+activation and rollback, cached drift repair, and durable terminal report retry.
+The [Agent setup guide](../deploy/agent/README.md) covers the Linux amd64 binary
+and user service. It works with the deployed Server 0.2.0 API.
+
 Still required for the full POC:
 
-- the `fleet-agent` binary and complete Agent protocol integration, including
-  Rust certificate enrollment/renewal interoperability. The Python HTTPS smoke
-  script already exercises the Server's real mTLS path;
-- local Target reconciliation, ownership receipts, atomic activation, rollback,
-  and recovery journal behavior;
-- macOS/Linux end-to-end scenarios and failure exercises;
+- a real macOS deployment, macOS service packaging, and broader failure exercises;
 - the full Agent recovery/reporting conversation and Operator-authorized
   replacement of a lost Node key while preserving its stable identity;
 - measured polling, publication, and Bundle throughput budgets. A 1,000-Node

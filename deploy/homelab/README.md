@@ -56,8 +56,8 @@ On the homelab host, after extracting the binary:
 For a separate client machine, securely copy `operator.env` and the public
 `secrets/tls/ca.pem` certificate there. Use their local paths in the command above.
 The Operator token grants administrative access. Keep it private; never copy the
-CA private key to clients. The CLI is the Operator tool; a continuously running
-Node Agent is still pending implementation.
+CA private key to clients. The CLI is the Operator tool. Install the separate `fleet-agent` binary on each
+Node using the Agent deployment guide in the repository.
 
 With Server and CLI version `0.2.0`, Operators can rename
 a Node with `fleet nodes rename <current-alias> <new-alias>`. Update its key in

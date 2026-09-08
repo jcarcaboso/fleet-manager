@@ -1,0 +1,16 @@
+[Unit]
+Description=Fleet Manager Node Agent
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart=%h/.local/bin/fleet-agent run
+Restart=on-failure
+RestartSec=15
+UMask=0077
+NoNewPrivileges=true
+PrivateTmp=true
+
+[Install]
+WantedBy=default.target
