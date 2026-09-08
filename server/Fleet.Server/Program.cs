@@ -8,6 +8,7 @@ using Fleet.Server.Persistence;
 using Fleet.Server.Security;
 using Fleet.Server.Source;
 using Fleet.Server.Transport;
+using Fleet.Server.Dashboard;
 using Microsoft.AspNetCore.Authentication;
 using Microsoft.AspNetCore.Server.Kestrel.Https;
 using Microsoft.EntityFrameworkCore;
@@ -28,6 +29,7 @@ builder.Services.AddHostedService<MaintenanceService>();
 builder.Services.AddOptions<FleetOptions>().BindConfiguration("Fleet").ValidateDataAnnotations()
     .Validate(x => x.WorkspaceId != Guid.Empty, "A stable WorkspaceId is required.")
     .Validate(x => x.HasValidOperators(), "Configure 1 to 100 uniquely named Operators with distinct SHA-256 token digests.")
+    .Validate(x => x.HasValidPublicUrl(), "Fleet:PublicUrl must be an HTTPS origin without a path, credentials, query, or fragment.")
     .ValidateOnStart();
 builder.Services.AddSingleton<NodeCertificateIssuer>();
 builder.Services.AddDbContext<FleetDbContext>((services, options) => options.UseNpgsql(
@@ -40,7 +42,8 @@ builder.Services.AddSingleton<IEnrolledNodeSource, RegisteredNodeSource>();
 builder.Services.AddSingleton<SourcePollingService>();
 builder.Services.AddHostedService(services => services.GetRequiredService<SourcePollingService>());
 builder.Services.ConfigureHttpJsonOptions(options => WireJson.Configure(options.SerializerOptions));
-builder.Services.AddAuthentication()
+builder.Services.AddFleetDashboard();
+builder.Services.AddAuthentication(options => options.DefaultAuthenticateScheme = DashboardEndpoints.Scheme)
     .AddScheme<AuthenticationSchemeOptions, FleetAuthenticationHandler>("Operator", _ => { })
     .AddScheme<AuthenticationSchemeOptions, FleetAuthenticationHandler>("Node", _ => { });
 builder.Services.AddAuthorizationBuilder()
@@ -165,6 +168,7 @@ app.MapGet("/health/ready", async (FleetDbContext database, IOptions<FleetOption
     catch (Exception) { return Results.StatusCode(503); }
 });
 app.MapFleetEndpoints();
+app.MapFleetDashboard();
 app.MapGet("/operator/v1/metrics", (FleetMetrics metrics) => Results.Ok(metrics.Snapshot()))
     .RequireAuthorization("Operator").WithGroupName("operator");
 app.MapPost("/operator/v1/source/rescan", async (SourcePollingService source, HttpContext context, CancellationToken ct) =>

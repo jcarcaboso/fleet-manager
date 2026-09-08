@@ -15,6 +15,14 @@ public sealed class FleetOptions
     [Range(10, 3600)] public int PollIntervalSeconds { get; set; } = 60;
     [Range(60, 86400)] public int StaleAfterSeconds { get; set; } = 300;
     public bool AllowLoopbackHttp { get; set; }
+    // Empty disables the browser dashboard. Never derive enrollment origins from Host headers.
+    public string PublicUrl { get; set; } = "";
+    public string EnrollmentCaCertificatePath { get; set; } = "";
+
+    public bool HasValidPublicUrl() => PublicUrl.Length == 0 ||
+        (Uri.TryCreate(PublicUrl, UriKind.Absolute, out var uri) && uri.Scheme == "https" &&
+         uri.Host.Length > 0 && uri.UserInfo.Length == 0 && uri.AbsolutePath == "/" &&
+         uri.Query.Length == 0 && uri.Fragment.Length == 0);
 
     public IEnumerable<KeyValuePair<string, string>> OperatorCredentials()
     {

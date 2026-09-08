@@ -47,6 +47,7 @@ public sealed class HostingTests : IAsyncLifetime
                 ["Fleet:OperatorTokenSha256"] = Convert.ToHexStringLower(SHA256.HashData(Encoding.UTF8.GetBytes(Token))),
                 ["Fleet:IssuerCertificatePath"] = certificatePath,
                 ["Fleet:IssuerKeyPath"] = keyPath,
+                ["Fleet:PublicUrl"] = "https://localhost",
                 ["Source:Remote"] = "",
                 ["urls"] = "https://localhost:7443",
                 ["Fleet:Operators:second-admin"] = Convert.ToHexStringLower(SHA256.HashData(Encoding.UTF8.GetBytes(Token + "-second")))
@@ -55,6 +56,85 @@ public sealed class HostingTests : IAsyncLifetime
         _operator.DefaultRequestHeaders.Authorization = new("Bearer", Token);
         using var scope = _factory.Services.CreateScope();
         await scope.ServiceProvider.GetRequiredService<FleetDbContext>().Database.MigrateAsync();
+    }
+
+    [Fact]
+    public async Task Dashboard_sessions_require_csrf_and_cannot_authenticate_as_operators_or_nodes()
+    {
+        using var browser = _factory.CreateClient(new() { BaseAddress = new Uri("https://localhost") });
+        browser.DefaultRequestHeaders.Add("Origin", "https://localhost");
+        var page = await browser.GetAsync("/dashboard");
+        page.EnsureSuccessStatusCode();
+        Assert.Contains("frame-ancestors 'none'", page.Headers.GetValues("Content-Security-Policy").Single());
+        Assert.Equal("no-referrer", page.Headers.GetValues("Referrer-Policy").Single());
+        Assert.Equal(HttpStatusCode.Unauthorized, (await browser.GetAsync("/dashboard/api/nodes")).StatusCode);
+        Assert.Equal(HttpStatusCode.BadRequest, (await browser.PostAsJsonAsync("/dashboard/api/login", new { token = Token })).StatusCode);
+        await DashboardCsrf(browser);
+        var login = await browser.PostAsJsonAsync("/dashboard/api/login", new { token = Token });
+        login.EnsureSuccessStatusCode();
+        var sessionCookie = login.Headers.GetValues("Set-Cookie").Single(x => x.StartsWith("__Host-Fleet-Session=", StringComparison.Ordinal));
+        Assert.Contains("secure", sessionCookie);
+        Assert.Contains("httponly", sessionCookie);
+        Assert.Contains("samesite=strict", sessionCookie);
+        Assert.DoesNotContain(Token, sessionCookie);
+        Assert.Equal(HttpStatusCode.OK, (await browser.GetAsync("/dashboard/api/nodes")).StatusCode);
+        Assert.Equal(HttpStatusCode.Unauthorized, (await browser.GetAsync("/operator/v1/nodes")).StatusCode);
+        Assert.Equal(HttpStatusCode.Unauthorized, (await browser.PostAsync("/agent/v1/poll", null)).StatusCode);
+        await DashboardCsrf(browser);
+        browser.DefaultRequestHeaders.Remove("Origin");
+        browser.DefaultRequestHeaders.Add("Origin", "https://attacker.invalid");
+        Assert.Equal(HttpStatusCode.BadRequest, (await browser.PostAsJsonAsync("/dashboard/api/enrollment-links", new { alias = "blocked" })).StatusCode);
+        browser.DefaultRequestHeaders.Remove("Origin");
+        browser.DefaultRequestHeaders.Add("Origin", "https://localhost");
+        (await browser.PostAsJsonAsync("/dashboard/api/logout", new { })).EnsureSuccessStatusCode();
+        Assert.Equal(HttpStatusCode.Unauthorized, (await browser.GetAsync("/dashboard/api/session")).StatusCode);
+    }
+
+    [Fact]
+    public async Task Dashboard_links_embed_public_trust_bind_alias_and_support_revocation()
+    {
+        using var browser = _factory.CreateClient(new() { BaseAddress = new Uri("https://localhost") });
+        browser.DefaultRequestHeaders.Add("Origin", "https://localhost");
+        await DashboardCsrf(browser);
+        (await browser.PostAsJsonAsync("/dashboard/api/login", new { token = Token })).EnsureSuccessStatusCode();
+        await DashboardCsrf(browser);
+        var response = await browser.PostAsJsonAsync("/dashboard/api/enrollment-links", new { alias = "link-node", expiresInSeconds = 900 });
+        response.EnsureSuccessStatusCode();
+        var linkResponse = await response.Content.ReadFromJsonAsync<JsonElement>();
+        var link = new Uri(linkResponse.GetProperty("link").GetString()!);
+        Assert.Equal("https://localhost/enroll", link.GetLeftPart(UriPartial.Path));
+        Assert.Empty(link.Query);
+        Assert.StartsWith("#fleet-v1=", link.Fragment);
+        var payload = JsonSerializer.Deserialize<JsonElement>(Microsoft.AspNetCore.WebUtilities.WebEncoders.Base64UrlDecode(link.Fragment[10..]));
+        Assert.Equal(1, payload.GetProperty("version").GetInt32());
+        Assert.Equal("https://localhost", payload.GetProperty("serverUrl").GetString());
+        Assert.Equal("link-node", payload.GetProperty("alias").GetString());
+        Assert.DoesNotContain("PRIVATE KEY", payload.GetProperty("caPem").GetString());
+        using var ca = X509Certificate2.CreateFromPem(payload.GetProperty("caPem").GetString()!);
+        using var expectedCa = X509Certificate2.CreateFromPem(await File.ReadAllTextAsync(Path.Combine(_directory, "ca.pem")));
+        Assert.Equal(expectedCa.RawData, ca.RawData);
+        using var key = ECDsa.Create(ECCurve.NamedCurves.nistP256);
+        var csr = new CertificateRequest("CN=ignored", key, HashAlgorithmName.SHA256).CreateSigningRequestPem();
+        var token = payload.GetProperty("token").GetString();
+        var mismatch = await browser.PostAsJsonAsync("/agent/v1/enroll", new { token, nodeName = "wrong-node", platform = "linux", certificateRequestPem = csr });
+        Assert.Equal(HttpStatusCode.BadRequest, mismatch.StatusCode);
+        var body = new { token, nodeName = "link-node", platform = "linux", certificateRequestPem = csr };
+        var enrolled = await browser.PostAsJsonAsync("/agent/v1/enroll", body);
+        enrolled.EnsureSuccessStatusCode();
+        Assert.Equal(await enrolled.Content.ReadAsStringAsync(), await (await browser.PostAsJsonAsync("/agent/v1/enroll", body)).Content.ReadAsStringAsync());
+        using var otherKey = ECDsa.Create(ECCurve.NamedCurves.nistP256);
+        var otherCsr = new CertificateRequest("CN=ignored", otherKey, HashAlgorithmName.SHA256).CreateSigningRequestPem();
+        Assert.Equal(HttpStatusCode.BadRequest, (await browser.PostAsJsonAsync("/agent/v1/enroll", new { token, nodeName = "link-node", platform = "linux", certificateRequestPem = otherCsr })).StatusCode);
+        (await browser.PostAsJsonAsync($"/dashboard/api/enrollment-links/{linkResponse.GetProperty("id").GetGuid()}/revoke", new { })).EnsureSuccessStatusCode();
+        Assert.Equal(HttpStatusCode.BadRequest, (await browser.PostAsJsonAsync("/agent/v1/enroll", body)).StatusCode);
+        Assert.DoesNotContain(token!, await _operator.GetStringAsync("/operator/v1/audit"));
+    }
+
+    private static async Task DashboardCsrf(HttpClient browser)
+    {
+        var response = await browser.GetFromJsonAsync<JsonElement>("/dashboard/api/csrf");
+        browser.DefaultRequestHeaders.Remove("X-Fleet-CSRF");
+        browser.DefaultRequestHeaders.Add("X-Fleet-CSRF", response.GetProperty("token").GetString());
     }
 
     [Fact]

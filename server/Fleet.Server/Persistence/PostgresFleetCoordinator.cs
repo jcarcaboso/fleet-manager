@@ -22,18 +22,21 @@ public sealed class PostgresFleetCoordinator(
 
         await EnsureWorkspace(cancellationToken);
         var token = Base64Url(RandomNumberGenerator.GetBytes(32));
+        var id = Guid.NewGuid();
+        var boundAlias = command.BoundAlias is null ? null : Required(command.BoundAlias, 200, "node_alias");
         db.Enrollments.Add(new EnrollmentRow
         {
-            Id = Guid.NewGuid(),
+            Id = id,
             WorkspaceId = options.WorkspaceId.Value,
             TokenSha256 = TokenDigest(token),
             CreatedBy = Required(command.CreatedBy, 200, "created_by"),
+            BoundAlias = boundAlias,
             ExpiresAt = command.ExpiresAt,
             RetryWindowTicks = command.RetryWindow.Ticks,
         });
         db.AuditEvents.Add(Audit("enrollment_authorization_created", command.CreatedBy, now));
         await db.SaveChangesAsync(cancellationToken);
-        return new(token, command.ExpiresAt);
+        return new(token, command.ExpiresAt, id, boundAlias);
     }
 
     public async Task<EnrollmentResult> CompleteEnrollmentAsync(
@@ -42,6 +45,7 @@ public sealed class PostgresFleetCoordinator(
         await EnsureWorkspace(cancellationToken);
         ValidateSha256(command.CertificateRequestSha256, "certificate_request_sha256");
         ValidateSha256(command.IssuedCredential.CertificateSha256, "certificate_sha256");
+        var nodeAlias = Required(command.NodeName, 200, "node_alias");
         if (command.IssuedCredential.DeliveryPayload.Length is 0 or > 64 * 1024)
             throw Error("invalid_delivery_payload", "Credential delivery payload must contain at most 64 KiB.");
 
@@ -52,7 +56,8 @@ public sealed class PostgresFleetCoordinator(
             .SingleOrDefaultAsync(cancellationToken)
             ?? throw Error("invalid_enrollment", "Enrollment authorization is invalid.");
 
-        if (row.WorkspaceId != options.WorkspaceId.Value)
+        if (row.WorkspaceId != options.WorkspaceId.Value || row.RevokedAt is not null ||
+            row.BoundAlias is not null && !string.Equals(row.BoundAlias, nodeAlias, StringComparison.Ordinal))
             throw Error("invalid_enrollment", "Enrollment authorization is invalid.");
 
         if (row.ConsumedAt is not null)
@@ -73,7 +78,7 @@ public sealed class PostgresFleetCoordinator(
         {
             Id = command.IssuedCredential.NodeId.Value,
             WorkspaceId = row.WorkspaceId,
-            Name = Required(command.NodeName, 200, "node_name"),
+            Name = nodeAlias,
             Platform = Required(command.Platform, 100, "platform"),
             EnrolledAt = now,
         });
@@ -105,6 +110,26 @@ public sealed class PostgresFleetCoordinator(
         await transaction.CommitAsync(cancellationToken);
         return new(EnrollmentOutcome.Enrolled, command.IssuedCredential.NodeId,
             command.IssuedCredential.CredentialId, command.IssuedCredential.DeliveryPayload);
+    }
+
+    public async Task RevokeEnrollmentAuthorizationAsync(
+        Guid id, string actor, CancellationToken cancellationToken = default)
+    {
+        await EnsureWorkspace(cancellationToken);
+        var validatedActor = Required(actor, 200, "actor");
+        await using var transaction = await db.Database.BeginTransactionAsync(IsolationLevel.ReadCommitted, cancellationToken);
+        var row = await db.Enrollments.FromSqlInterpolated($"SELECT * FROM enrollment_authorizations WHERE \"Id\" = {id} FOR UPDATE")
+            .SingleOrDefaultAsync(cancellationToken);
+        if (row is null || row.WorkspaceId != options.WorkspaceId.Value)
+            throw Error("enrollment_not_found", "Enrollment authorization was not found.");
+        if (row.RevokedAt is null)
+        {
+            row.RevokedAt = clock.GetUtcNow();
+            row.RevokedBy = validatedActor;
+            db.AuditEvents.Add(Audit("enrollment_authorization_revoked", validatedActor, row.RevokedAt.Value));
+            await db.SaveChangesAsync(cancellationToken);
+        }
+        await transaction.CommitAsync(cancellationToken);
     }
 
     public async Task RenewCredentialAsync(RenewNodeCredential command, CancellationToken cancellationToken = default)

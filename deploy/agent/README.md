@@ -23,7 +23,21 @@ required on the Node. Keep the Agent binary outside managed Skill directories.
 
 ## Enroll the machine
 
-Using the Operator CLI, create a short-lived enrollment token. For a homelab
+The upgraded Server's dashboard can generate a short-lived enrollment link.
+This needs a Server build newer than the deployed `0.2.0` image. See the
+[dashboard guide](../../docs/plans/enrollment-dashboard.md). On the Node, run:
+
+```sh
+~/.local/bin/fleet-agent enroll --link
+```
+
+Paste the link at the prompt. The link includes the Node alias, one-time token,
+Server address, and public CA certificate. The Agent checks the link's HTTPS
+origin and expiry before connecting. Treat the link as a secret until it expires
+or enrollment succeeds.
+
+For enrollment without the dashboard, create a short-lived token using the
+Operator CLI. For a homelab
 setup, `operator.env` and the public CA certificate come from Server setup:
 
 ```sh
@@ -103,19 +117,29 @@ For a foreground process:
 ~/.local/bin/fleet-agent run
 ```
 
-For a Linux user service, copy `fleet-agent.service` from this directory:
+Install and start a background service for the current user:
 
 ```sh
-mkdir -p ~/.config/systemd/user
-cp fleet-agent.service ~/.config/systemd/user/
-systemctl --user daemon-reload
-systemctl --user enable --now fleet-agent.service
+~/.local/bin/fleet-agent service install
+~/.local/bin/fleet-agent service start
+```
+
+The install command records the absolute executable and state-directory paths.
+Run it again after moving the binary. The `status`, `stop`, `restart`, and
+`uninstall` service commands handle the rest of the lifecycle. Uninstall removes
+the service definition but keeps credentials and other agent state.
+
+Linux uses a `systemd --user` unit. Distributions without a systemd user manager
+are not supported. For startup during boot before login, an administrator must
+enable lingering explicitly:
+
+```sh
+sudo loginctl enable-linger "$USER"
 journalctl --user -u fleet-agent.service -f
 ```
 
-The service uses the default state directory. Edit `ExecStart` if you chose a
-custom location. To run the user service after logout, enable user lingering
-with your homelab's system administrator. The Agent does not need root.
+macOS uses a LaunchAgent in `~/Library/LaunchAgents`, which starts when that user
+logs in. The Agent does not install a system LaunchDaemon or elevate privileges.
 
 The run loop follows the Server's polling delay, bounded to 5 to 3,600 seconds, and
 retries transient failures after 30 seconds. It renews certificates with less
@@ -164,5 +188,5 @@ cargo build --manifest-path clients/Cargo.toml --package fleet-agent --release -
 ```
 
 macOS service installation and a macOS release binary are not included in the
-Linux package. Cross-platform tests in CI exercise the Rust workspace, but a real
-macOS deployment still needs validation.
+Linux package. Native macOS installation and login-startup validation remain
+pending; see the [client update design](../../docs/technical-design/client-updates.md).

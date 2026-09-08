@@ -1,13 +1,14 @@
 name: fleet-manager
 
 x-server: &server
-  image: ${FLEET_IMAGE:-skorcius/fleet-manager:0.2.0}
+  image: ${FLEET_IMAGE:-skorcius/fleet-manager:0.3.0}
   user: "1654:1654"
   read_only: true
   cap_drop: [ALL]
   security_opt: [no-new-privileges:true]
   environment:
     Source__Remote: ${FLEET_SOURCE_REMOTE:-}
+    Fleet__PublicUrl: ${FLEET_PUBLIC_URL:-https://${FLEET_HOSTNAME:-localhost}:${FLEET_PORT:-7443}}
     ASPNETCORE_CONTENTROOT: /run/fleet
     HOME: /home/app
   volumes:
@@ -27,7 +28,7 @@ x-server: &server
 
 services:
   configure:
-    image: ${FLEET_IMAGE:-skorcius/fleet-manager:0.2.0}
+    image: ${FLEET_IMAGE:-skorcius/fleet-manager:0.3.0}
     user: "0:0"
     entrypoint: [/bin/sh, -ec]
     command:

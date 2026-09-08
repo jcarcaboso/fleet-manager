@@ -99,6 +99,7 @@ public sealed class EnrollmentRow
     public Guid WorkspaceId { get; set; }
     public required string TokenSha256 { get; set; }
     public required string CreatedBy { get; set; }
+    public string? BoundAlias { get; set; }
     public DateTimeOffset ExpiresAt { get; set; }
     public long RetryWindowTicks { get; set; }
     public DateTimeOffset? ConsumedAt { get; set; }
@@ -107,6 +108,8 @@ public sealed class EnrollmentRow
     public Guid? NodeId { get; set; }
     public Guid? CredentialId { get; set; }
     public byte[]? DeliveryPayload { get; set; }
+    public DateTimeOffset? RevokedAt { get; set; }
+    public string? RevokedBy { get; set; }
 }
 public sealed class BundleRow
 {

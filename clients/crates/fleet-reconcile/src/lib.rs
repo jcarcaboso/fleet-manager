@@ -1334,7 +1334,7 @@ mod tests {
     struct TestDir(PathBuf);
     impl TestDir {
         fn new() -> io::Result<Self> {
-            let p = std::env::temp_dir().join(format!(
+            let p = std::env::temp_dir().canonicalize().unwrap().join(format!(
                 "fleet-reconcile-test-{}-{}",
                 std::process::id(),
                 NEXT.fetch_add(1, Ordering::Relaxed)

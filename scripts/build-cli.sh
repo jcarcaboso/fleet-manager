@@ -3,6 +3,11 @@ set -eu
 
 repo_dir=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
 output_dir="$repo_dir/artifacts"
+release_commit=$(git -C "$repo_dir" rev-parse HEAD)
+release_dirty=false
+if [ -n "$(git -C "$repo_dir" status --porcelain)" ]; then
+    release_dirty=true
+fi
 work_dir=$(mktemp -d)
 
 cleanup() {
@@ -49,12 +54,19 @@ for binary in fleet fleet-agent; do
     package_dir="$work_dir/package/$binary"
     mkdir -p "$package_dir"
     install -m 0755 "$work_dir/export/$binary" "$package_dir/$binary"
+    binary_version=$("$work_dir/export/$binary" --version)
+    if [ -n "${FLEET_RELEASE_VERSION:-}" ] && [ "$binary_version" != "$binary ${FLEET_RELEASE_VERSION#v}" ]; then
+        printf 'Expected %s %s, got %s\n' "$binary" "${FLEET_RELEASE_VERSION#v}" "$binary_version" >&2
+        exit 1
+    fi
     install -m 0644 "$repo_dir/LICENSE" "$package_dir/LICENSE"
+    printf '{"version":"%s","gitCommit":"%s","dirty":%s,"platform":"linux-amd64"}\n' \
+        "$binary_version" "$release_commit" "$release_dirty" > "$package_dir/BUILD.json"
     (
         cd "$package_dir"
-        sha256sum "$binary" LICENSE > SHA256SUMS
+        sha256sum "$binary" LICENSE BUILD.json > SHA256SUMS
         TZ=UTC tar --sort=name --owner=0 --group=0 --numeric-owner \
-            --mtime='1970-01-01 00:00:00Z' -cf - LICENSE SHA256SUMS "$binary" | gzip -n > "$output_dir/$archive_name"
+            --mtime='1970-01-01 00:00:00Z' -cf - BUILD.json LICENSE SHA256SUMS "$binary" | gzip -n > "$output_dir/$archive_name"
     )
     (
         cd "$output_dir"

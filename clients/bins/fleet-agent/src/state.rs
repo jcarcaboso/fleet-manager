@@ -122,7 +122,10 @@ mod tests {
 
     #[test]
     fn private_state_rejects_links_and_concurrent_processes() {
-        let root = std::env::temp_dir().join(format!("fleet-state-test-{}", Uuid::new_v4()));
+        let root = std::env::temp_dir()
+            .canonicalize()
+            .unwrap()
+            .join(format!("fleet-state-test-{}", Uuid::new_v4()));
         private_directory(&root).unwrap();
         let first = lock(&root).unwrap();
         assert!(lock(&root).is_err());
@@ -142,7 +145,10 @@ mod tests {
 
     #[test]
     fn corrupt_or_oversized_state_is_not_treated_as_fresh_state() {
-        let root = std::env::temp_dir().join(format!("fleet-state-test-{}", Uuid::new_v4()));
+        let root = std::env::temp_dir()
+            .canonicalize()
+            .unwrap()
+            .join(format!("fleet-state-test-{}", Uuid::new_v4()));
         private_directory(&root).unwrap();
         let path = root.join("run.json");
         write_bytes(&path, b"{broken").unwrap();

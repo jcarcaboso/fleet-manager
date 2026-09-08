@@ -10,6 +10,11 @@ public interface IFleetCoordinator
         CompleteEnrollment command,
         CancellationToken cancellationToken = default);
 
+    Task RevokeEnrollmentAuthorizationAsync(
+        Guid id,
+        string actor,
+        CancellationToken cancellationToken = default);
+
     Task RevokeCredentialAsync(
         CredentialId credentialId,
         string revokedBy,

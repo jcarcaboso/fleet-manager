@@ -12,7 +12,12 @@ const MAX_RESPONSE_BYTES: usize = 1024 * 1024;
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 
 #[derive(Debug, Parser)]
-#[command(name = "fleet", version, about = "Fleet Manager operator CLI")]
+#[command(
+    name = "fleet",
+    version,
+    about = "Fleet Manager operator CLI",
+    after_help = "Examples:\n  fleet nodes list\n  fleet nodes rename old-alias new-alias\n  fleet enrollment create --expires-in-seconds 3600\n\nSet FLEET_SERVER_URL and FLEET_OPERATOR_TOKEN before running API commands. Help does not require either variable."
+)]
 struct Cli {
     /// Fleet Server base URL. Defaults to FLEET_SERVER_URL.
     #[arg(long, env = "FLEET_SERVER_URL")]
@@ -32,11 +37,17 @@ struct Cli {
 
 #[derive(Debug, Subcommand)]
 enum Command {
+    /// List or rename nodes.
     Nodes(NodesArgs),
+    /// Inspect rollouts.
     Rollouts(ListArgs),
+    /// Inspect warnings.
     Warnings(ListArgs),
+    /// Create one-time enrollment tokens.
     Enrollment(EnrollmentCommand),
+    /// Revoke Operator credentials.
     Credentials(CredentialsCommand),
+    /// Rescan the configured source.
     Source(SourceCommand),
 }
 
@@ -385,9 +396,24 @@ async fn main() -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use clap::error::ErrorKind;
     use std::io::{Read, Write};
     use std::net::TcpListener;
     use std::thread;
+
+    #[test]
+    fn help_forms_do_not_need_runtime_configuration() {
+        for arguments in [
+            vec!["fleet", "--help"],
+            vec!["fleet", "-h"],
+            vec!["fleet", "help"],
+            vec!["fleet", "nodes", "--help"],
+            vec!["fleet", "help", "nodes", "rename"],
+        ] {
+            let error = Cli::try_parse_from(&arguments).unwrap_err();
+            assert_eq!(error.kind(), ErrorKind::DisplayHelp, "{arguments:?}");
+        }
+    }
 
     #[test]
     fn accepts_https_and_loopback_http_only_with_flag() {

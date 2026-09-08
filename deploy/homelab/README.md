@@ -3,6 +3,21 @@
 This stack runs the amd64 Server with PostgreSQL, database migrations, and direct
 HTTPS. Docker Compose v2, Python 3, and OpenSSL are required for setup.
 
+## Dashboard and enrollment links
+
+After upgrading to Server `0.3.0`, open
+`https://FLEET_HOSTNAME:FLEET_PORT/dashboard` and sign in with the Operator token
+from `operator.env`. Your browser must trust the homelab CA. Create a link for
+the Node's alias, then run `fleet-agent enroll --link` on that Node and paste it.
+The link carries public CA trust, so the Node needs no separate CA or JSON file.
+
+Compose supplies `Fleet__PublicUrl` from `FLEET_HOSTNAME` and `FLEET_PORT`.
+`FLEET_PUBLIC_URL` overrides that origin, useful for an IPv6 URL. Keep it aligned
+with DNS and the existing TLS certificate. Upgrading from `0.2.0` requires the
+new Compose file, image, and database migration. Keep your existing secrets.
+See the [dashboard guide](../../docs/plans/enrollment-dashboard.md) for expiry,
+revocation, session behavior, and custom CA settings.
+
 ## First start
 
 Copy this directory to your homelab. From that directory:
@@ -103,11 +118,17 @@ The Server terminates HTTPS itself to validate Node client certificates. A proxy
 in front must preserve TLS with TCP passthrough; ordinary HTTP termination does
 not preserve this authentication.
 
-The pinned POC image tag is `skorcius/fleet-manager:0.2.0`. To upgrade,
+The pinned POC image tag is `skorcius/fleet-manager:0.3.0`. To upgrade,
 back up PostgreSQL and the private configuration, change `FLEET_IMAGE` in `.env`,
 then run `docker compose pull` and `docker compose up -d --force-recreate --wait`.
 Migrations run before the Server starts. Do not run `docker compose down -v` on
 an installation whose database or configuration you want to retain.
+
+When upgrading from `0.2.0`, first replace `compose.yaml` with this release's
+copy so it supplies the dashboard's public URL. Preserve `.env`, `secrets/`,
+`operator.env`, `ssh/`, and Docker volumes. Set `FLEET_IMAGE` to
+`skorcius/fleet-manager:0.3.0` in `.env`. Do not rerun `setup.py` on an existing
+installation. The dashboard uses the existing Operator token and CA.
 
 From the source repository, build and publish a new server tag with:
 

@@ -45,6 +45,14 @@ The command prints the renamed node as JSON. It reports an unknown current alias
 with HTTP 404. HTTP 409 means the new alias is already in use or the node is
 revoked.
 
+`fleet --help`, `fleet -h`, and `fleet help` show the top-level help. Append
+`--help` to a command or use `fleet help <command>`, for example `fleet nodes
+--help` or `fleet help nodes rename`. Help works before `FLEET_SERVER_URL` or
+`FLEET_OPERATOR_TOKEN` is set.
+
+For PATH setup, binary archive installation, and pinned source installation of
+both commands, see the [command-line installation guide](../docs/technical-design/cli-installation.md).
+
 ## Node Agent
 
 The separate `fleet-agent` binary enrolls and reconciles this machine using Node

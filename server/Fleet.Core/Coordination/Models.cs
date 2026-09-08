@@ -47,11 +47,14 @@ public sealed record PublicationResult(
 public sealed record CreateEnrollmentAuthorization(
     string CreatedBy,
     DateTimeOffset ExpiresAt,
-    TimeSpan RetryWindow);
+    TimeSpan RetryWindow,
+    string? BoundAlias = null);
 
 public sealed record EnrollmentAuthorization(
     string Token,
-    DateTimeOffset ExpiresAt);
+    DateTimeOffset ExpiresAt,
+    Guid Id = default,
+    string? BoundAlias = null);
 
 public sealed record IssuedNodeCredential(
     NodeId NodeId,

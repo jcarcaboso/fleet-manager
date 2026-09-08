@@ -239,7 +239,12 @@ mod tests {
 
     impl TestDirectory {
         fn new() -> Self {
-            Self(std::env::temp_dir().join(format!("fleet-credential-test-{}", Uuid::new_v4())))
+            Self(
+                std::env::temp_dir()
+                    .canonicalize()
+                    .unwrap()
+                    .join(format!("fleet-credential-test-{}", Uuid::new_v4())),
+            )
         }
     }
 

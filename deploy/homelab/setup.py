@@ -71,14 +71,15 @@ token = secrets.token_urlsafe(32)
 config = {
     'ConnectionStrings': {'Fleet': 'Host=postgres;Database=fleet;Username=fleet;Password=' + password},
     'Fleet': {'WorkspaceId': str(uuid.uuid4()), 'Operators': {'homelab-admin': hashlib.sha256(token.encode()).hexdigest()},
+              'PublicUrl': f'https://{url_host}:{args.port}',
               'IssuerCertificatePath': '/run/fleet/tls/ca.pem', 'IssuerKeyPath': '/run/fleet/tls/ca.key'},
     'Kestrel': {'Certificates': {'Default': {'Path': '/run/fleet/tls/server.pem', 'KeyPath': '/run/fleet/tls/server.key'}}},
     'Source': {'MirrorPath': '/var/lib/fleet/source.git'},
 }
 (private / 'server.json').write_text(json.dumps(config, indent=2) + '\n')
 bind = '[' + args.bind_ip + ']' if ':' in args.bind_ip else args.bind_ip
-(root / '.env').write_text('FLEET_IMAGE=skorcius/fleet-manager:0.2.0\n'
-                           + f'FLEET_HOSTNAME={args.host}\nFLEET_BIND_IP={bind}\nFLEET_PORT={args.port}\nFLEET_SOURCE_REMOTE=\n')
+(root / '.env').write_text('FLEET_IMAGE=skorcius/fleet-manager:0.3.0\n'
+                           + f'FLEET_HOSTNAME={args.host}\nFLEET_PUBLIC_URL=https://{url_host}:{args.port}\nFLEET_BIND_IP={bind}\nFLEET_PORT={args.port}\nFLEET_SOURCE_REMOTE=\n')
 (root / 'operator.env').write_text('export FLEET_SERVER_URL=' + shlex.quote(f'https://{url_host}:{args.port}') + '\n'
                                    + 'export FLEET_OPERATOR_TOKEN=' + shlex.quote(token) + '\n')
 print('Created private homelab configuration. Keep secrets/ and operator.env out of source control.')
