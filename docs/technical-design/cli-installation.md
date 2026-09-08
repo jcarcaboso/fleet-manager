@@ -16,9 +16,9 @@ The repository is also its own Homebrew tap. After a release has published its
 Linux amd64 and macOS archives, install either command with:
 
 ```sh
-brew tap jcarcaboso/fleet-manager https://github.com/jcarcaboso/fleet-manager
-brew install fleet
-brew install fleet-agent
+brew tap jcarcaboso/fleet https://github.com/jcarcaboso/fleet-manager
+brew install jcarcaboso/fleet/fleet
+brew install jcarcaboso/fleet/fleet-agent
 fleet --version
 fleet-agent --version
 ```
@@ -42,6 +42,24 @@ selects another absolute path. Do not run the Homebrew service and the service
 installed by `fleet-agent service install` at the same time. To migrate an
 existing Agent after stopping it, run `fleet-agent service uninstall` and then
 `brew services start fleet-agent`.
+
+If an older Agent runs in a terminal, stop that process instead. An already
+enrolled Node does not need enrollment again. Preserve its state directory.
+If you used a custom `--state-dir`, migrate the service settings explicitly;
+the Homebrew service uses the default state directory.
+
+Earlier manual installations may leave `~/.local/bin/fleet-agent` or
+`~/.cargo/bin/fleet-agent` ahead of Homebrew on PATH. Check `command -v fleet-agent`
+and `fleet-agent --version`. Remove or rename only the old executable after
+stopping it, or use the Homebrew binary explicitly during the transition:
+
+```sh
+"$(brew --prefix fleet-agent)/bin/fleet-agent" --version
+"$(brew --prefix fleet-agent)/bin/fleet-agent" enroll --link
+```
+
+Use the enrollment command only for a new Node. Homebrew services already use
+the Homebrew binary's stable path.
 
 ## Put user-installed commands on PATH
 

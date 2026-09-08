@@ -1,60 +1,184 @@
-# Fleet Manager successor
+# Fleet Manager
 
-Fleet Manager distributes reviewable Skill content to user-owned macOS and
-Linux machines. Each managed Node runs an Agent that initiates outbound
-communication, receives declarative desired state, and reconciles its own local
-filesystem.
+Fleet Manager distributes reviewable Skill directories from Git to user-owned
+macOS and Linux machines. Operators declare assignments in `fleet.yml`. Each
+Node runs an Agent that polls the Server over mutual TLS and reconciles its own
+filesystem. Nodes need no inbound listener, SSH access, Git checkout, or source
+repository credentials.
 
-The repository now contains the .NET Server, PostgreSQL coordination module,
-Git source ingestion, Rust Operator CLI, and a Rust Node Agent with local Skill
-reconciliation. See the [Agent installation guide](deploy/agent/README.md).
+Version 0.3.0 contains three parts:
 
-Start with [the local HTTPS setup](docs/technical-design/server-development.md).
-For a homelab deployment, use the [Docker Compose setup](deploy/homelab/README.md)
-and the [standalone CLI installation guide](docs/technical-design/cli-installation.md).
+- The .NET Server scans the canonical Git source, validates desired state,
+  publishes immutable assignments, serves the Operator dashboard and API, and
+  coordinates Node enrollment and polling through PostgreSQL.
+- `fleet` is the Operator CLI. It creates enrollment authorizations, lists and
+  renames Nodes, revokes credentials, rescans the source, and reads rollout
+  status and diagnostics.
+- `fleet-agent` enrolls one Node, installs its assigned Skills, repairs managed
+  files from verified cached bundles, and reports results. Its private key and
+  state stay on the Node.
+
+The Server trusts configured Operator bearer tokens. Enrolled Agents use their
+own P-256 keys and client certificates. A local network or private overlay
+supplies reachability; it does not replace HTTPS or Fleet authentication. See
+the [architecture overview](docs/architecture/overview.md) and
+[threat model](docs/technical-design/threat-model.md) for the boundaries.
+
+## Run the Server and dashboard
+
+The homelab deployment runs the Server, dashboard, PostgreSQL, and database
+migrations with Docker Compose. The dashboard is part of the Server image, so
+it does not need a separate container. Follow the
+[homelab setup](deploy/homelab/README.md) for a first installation.
+
+The published amd64 Server image is `skorcius/fleet-manager:0.3.0`, with digest
+`sha256:6f8428ff067234e936f0f7468e4e2d6d457c53f5b57e76ee73037d6c17eb3c7d`.
+For an existing installation, back up PostgreSQL and private configuration,
+replace `compose.yaml` with the 0.3 copy, and preserve `.env`, `secrets/`,
+`operator.env`, `ssh/`, and Docker volumes. Set the image in `.env`, then run:
+
+```sh
+docker compose pull
+docker compose up -d --force-recreate --wait
+```
+
+The migration container updates the database before the Server starts. Do not
+rerun setup or remove volumes during an upgrade. Compose derives the dashboard
+origin from `FLEET_HOSTNAME` and `FLEET_PORT`; set `FLEET_PUBLIC_URL` when the
+public HTTPS origin differs. The browser must trust the Server CA.
+
+Open `https://YOUR_SERVER/dashboard` and sign in with an Operator token. The
+dashboard lists Nodes, changes aliases, creates enrollment links, and revokes
+those links. Each link is bound to its chosen alias, includes the public CA, and
+expires after 15 minutes by default, with a maximum lifetime of one hour. It can be revoked
+before use. Treat it as a secret until it expires or enrollment succeeds. The
+[dashboard enrollment guide](docs/plans/enrollment-dashboard.md) explains its
+trust checks and session behavior.
+
+## Install the clients with Homebrew
+
+This repository is also the Homebrew tap. The v0.3 release automation publishes
+formulas only after all Linux and native macOS archives exist and both formulas
+pass Apple silicon and Intel Homebrew tests.
+
+```sh
+brew tap jcarcaboso/fleet https://github.com/jcarcaboso/fleet-manager
+brew install jcarcaboso/fleet/fleet
+brew install jcarcaboso/fleet/fleet-agent
+fleet --version
+fleet-agent --version
+```
+
+The formulas install prebuilt clients for Linux amd64 and macOS 13 or newer on
+Apple silicon or Intel. Homebrew verifies the selected archive checksum. The
+[CLI installation guide](docs/technical-design/cli-installation.md) also covers
+direct archives and Cargo builds from a release tag.
+
+To enroll a Node, create a link for its alias in the dashboard, then run:
+
+```sh
+agent_bin="$(brew --prefix jcarcaboso/fleet/fleet-agent)/bin/fleet-agent"
+"$agent_bin" enroll --link
+brew services start jcarcaboso/fleet/fleet-agent
+```
+
+Paste the link at the prompt. The Agent generates its private key locally and
+stores state under `~/.local/state/fleet-agent` by default. Homebrew services use
+the stable `opt` path across upgrades. Do not run this service alongside one
+created by `fleet-agent service install`. To migrate an existing service, stop
+it, run `fleet-agent service uninstall`, then start the Homebrew service.
+
+An already enrolled Node does not need another enrollment. If the old Agent
+runs in a terminal, stop that process instead. A custom `--state-dir` requires
+corresponding service configuration; Homebrew defaults to the usual state path.
+
+An older direct installation may still take precedence because earlier guides
+put `~/.local/bin` first on `PATH`. Check before enrolling or upgrading:
+
+```sh
+command -v fleet-agent
+fleet-agent --version
+"$(brew --prefix jcarcaboso/fleet/fleet-agent)/bin/fleet-agent" --version
+```
+
+After stopping the old process and uninstalling its service definition, rename
+or remove only the old `~/.local/bin/fleet-agent` executable. Keep
+`~/.local/state/fleet-agent`; it contains the Node identity, credentials, and
+reconciliation state.
+
+On macOS the user service starts at login. Linux uses `systemd --user`; an
+administrator must enable lingering if the Agent needs to start during boot
+before that user logs in:
+
+```sh
+sudo loginctl enable-linger "$USER"
+```
+
+Install and run the Agent as the user whose home contains the managed Skills.
+The [Agent guide](deploy/agent/README.md) covers enrollment without the dashboard,
+custom state paths, foreground operation, service commands, and recovery limits.
+
+## Publish Skills from Git
+
+The Server reads the `main` branch of one canonical repository. `fleet.yml`
+maps stable Node aliases to Skill groups and target paths. Skill content stays
+reviewable in Git; credentials and mutable Node metadata do not belong there.
+The [desired-state design](docs/architecture/desired-state.md) defines the
+manifest and repository layout.
+
+For a private source, use SSH with a dedicated read-only deploy key, a verified
+`known_hosts`, and an explicit SSH configuration under the homelab deployment's
+`ssh/` directory. Fleet rejects credentials embedded in HTTPS URLs. See the
+[homelab Git source instructions](deploy/homelab/README.md#git-source) and
+[source hardening notes](docs/technical-design/source-hardening.md).
+
+An alias is the exact, case-sensitive Node name used by `fleet.yml`. Rename one
+through the dashboard, from its Agent, or with the Operator CLI:
+
+```sh
+fleet nodes rename old-alias new-alias
+```
+
+Then change the key in `fleet.yml`, commit it, and run `fleet source rescan`.
+The Node keeps its internal identity and credentials.
+
+## Roll out updates
+
+Preserve the Agent state directory across upgrades. Update one Node first,
+confirm the new version and successful contact and sync in the dashboard, then
+continue in stages:
+
+```sh
+brew services stop jcarcaboso/fleet/fleet-agent
+brew update
+brew upgrade jcarcaboso/fleet/fleet-agent
+brew services start jcarcaboso/fleet/fleet-agent
+```
+
+Agent self-update is not implemented. Keep the previous executable available
+for rollback and read the [client update runbook](docs/technical-design/client-updates.md)
+before a larger rollout. The macOS binaries are not signed or notarized, and
+login-startup behavior still needs validation on the target Macs.
+
+## Develop and inspect the design
+
 Run `make restore`, `make format`, `make check`, and `make test` for the shared
-development checks. PostgreSQL integration tests require Docker.
+development checks. PostgreSQL integration tests require Docker. Start local
+Server work with the [HTTPS development setup](docs/technical-design/server-development.md).
 
-## Living documentation
+The main design references are:
 
-- [Domain language](CONTEXT.md) defines the terms used by the product and code.
-- [Architecture overview](docs/architecture/overview.md) records the system
-  shape, ownership, module seams, and trust model.
-- [Desired state](docs/architecture/desired-state.md) defines the source layout,
-  Skill groups, Node subscriptions, Target paths, and automatic publication.
-- [Agent reconciliation](docs/architecture/agent-reconciliation.md) defines how
-  Agents report local state, receive desired state, and recover from failures.
-- [POC scope](docs/poc-scope.md) states what the first implementation must prove
-  and what it deliberately excludes.
-- [Accepted stack](docs/technical-design/stack.md) records the approved .NET,
-  PostgreSQL, and Rust choices and the dependency rule.
-- [Engineering standards](docs/engineering-standards.md) make security, privacy,
-  performance, and open-source contribution requirements part of completion.
-- [Server development plan](docs/plans/server-development.md) sequences the
-  Server-first implementation and its quality gates.
-- [Server foundations decision map](docs/decision-maps/server-foundations.md)
-  tracks authentication, threat-model, privacy, performance, deployment, and
-  release questions that must still be resolved.
-- [Architecture decisions](docs/adr/) record accepted choices that would be
-  expensive or confusing to reverse.
-- [Implementation status](docs/implementation-status.md) distinguishes the
-  working Server and CLI from the remaining POC and release work.
-- [Operations hardening](docs/technical-design/operations-hardening.md) covers
-  listener validation, metrics, cleanup, Operator identities, and backup/restore.
-- [Threat model](docs/technical-design/threat-model.md),
-  [data inventory](docs/technical-design/data-inventory.md), and
-  [dependency inventory](docs/technical-design/dependencies.md) document the
-  current implementation's boundaries.
+- [Domain language](CONTEXT.md)
+- [Architecture overview](docs/architecture/overview.md)
+- [Desired state](docs/architecture/desired-state.md)
+- [Agent reconciliation](docs/architecture/agent-reconciliation.md)
+- [Implementation status](docs/implementation-status.md)
+- [Operations hardening](docs/technical-design/operations-hardening.md)
+- [Engineering standards](docs/engineering-standards.md)
+- [Fleet Manager 0.3.0 release notes](docs/releases/0.3.0.md)
 
-The [original handoff](successor-poc-handoff.md) is retained as historical input.
-The living documents above take precedence where later architecture discussions
-resolved or changed an earlier assumption.
-
-## Current phase
-
-The Server, Operator CLI, and Node Agent are under development. Operator authentication uses separately
-configured bearer-token digests. The project uses the MIT license.
-
-The Agent protocol is provisional. Full recovery reporting, real macOS deployment, measured performance budgets,
-and operational release policies remain open. A private
-security-reporting contact and contribution attestation policy remain open.
+The [original handoff](successor-poc-handoff.md) remains as historical input.
+Later architecture and technical design documents take precedence. Fleet
+Manager is licensed under the [MIT license](LICENSE). Full Agent recovery
+reporting, measured release performance budgets, signing and notarization,
+automated certificate recovery, and final public release policies remain open.
