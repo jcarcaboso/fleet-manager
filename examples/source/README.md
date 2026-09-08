@@ -1,9 +1,10 @@
 # Example source repository
 
 Copy this directory into a Git repository whose default branch is `main`.
-Enroll a Node first, then replace `00000000-0000-0000-0000-000000000000` in
-`fleet.yml` with the Node ID returned by Fleet. Source ingestion rejects the
-placeholder because every configured Node ID must already exist in the Server.
+Enroll a Node first, then replace `example-node` in `fleet.yml` with its exact
+enrollment name. That name is the Node alias, unique within the Workspace. The
+Server resolves it to the internal Node ID. Unknown aliases fail validation.
+Aliases are case-sensitive and remain reserved after revocation.
 
 The `definitive` group has precedence over `testing` because it appears first.
 Each immediate child below a group is a Skill, and each Skill requires a root

@@ -24,7 +24,8 @@ ENV ASPNETCORE_URLS=https://0.0.0.0:7443 \
     HOME=/home/app
 LABEL org.opencontainers.image.title="Fleet Manager Server" \
       org.opencontainers.image.description="Self-hosted Skill distribution server. Requires PostgreSQL and mounted TLS configuration." \
-      org.opencontainers.image.licenses="MIT"
+      org.opencontainers.image.licenses="MIT" \
+      org.opencontainers.image.version="0.2.0"
 USER app
 EXPOSE 7443
 ENTRYPOINT ["dotnet", "Fleet.Server.dll"]

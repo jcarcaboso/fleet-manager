@@ -86,7 +86,7 @@ not disappear.
 - [ ] Group subscriptions resolve to the expected flat Skill set for each Node.
 - [ ] The global Target path and per-Node override resolve under each Node's
       actual home directory.
-- [ ] An unknown Node ID or unsafe Target descriptor makes publication fail.
+- [ ] An unknown Node alias or unsafe Target descriptor makes publication fail.
 - [ ] Assignments contain no group or Git repository concepts.
 
 ### Reconciliation

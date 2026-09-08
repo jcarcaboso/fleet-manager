@@ -89,6 +89,19 @@ public sealed record RenewNodeCredential(
     NodeAuthentication Authentication,
     IssuedNodeCredential IssuedCredential);
 
+public sealed record RenameNodeAlias(
+    NodeAuthentication Authentication,
+    string Alias);
+
+public sealed record NodeAliasResult(
+    NodeId NodeId,
+    string Alias);
+
+public sealed record OperatorRenameNodeAlias(
+    string CurrentAlias,
+    string Alias,
+    string RequestedBy);
+
 public enum ConvergenceState
 {
     Pending,

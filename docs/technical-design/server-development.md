@@ -36,7 +36,8 @@ The Compose password and loopback port are for development only.
 ## Source configuration
 
 Prepare a separate Git repository from [the example](../../examples/source/README.md).
-Enroll Nodes first, then replace its placeholder Node IDs and commit to `main`.
+Enroll Nodes first, then replace its example Node aliases with their exact
+enrollment names and commit to `main`.
 Set the following before starting the Server:
 
 ```sh
@@ -61,6 +62,36 @@ Kestrel terminates TLS directly and optionally requests a client certificate.
 Every Node operation requires that certificate, a chain to the configured issuer,
 and a current credential record. Proxy certificate headers are not trusted.
 Operator routes require their bearer token and do not accept Node certificates.
+
+## Node aliases
+
+The enrollment request's `nodeName` is the Node alias. It is unique within the
+Workspace, case-sensitive, nonblank, and at most 200 characters. Use simple names
+such as `homelab-mini`. `fleet nodes list` exposes it as `name`. Source manifests
+use that exact name as the key under `nodes`, without an `id` field.
+
+An enrolled Node can change its own alias using its active client certificate:
+
+```sh
+curl --cacert ca.pem --cert node.pem --key node.key \
+  --request PUT https://fleet.home.arpa:7443/agent/v1/alias \
+  --header 'Content-Type: application/json' \
+  --data '{"alias":"homelab-mini"}'
+```
+
+The response contains `nodeId` and `alias`. An occupied alias returns HTTP 409
+with `node_alias_in_use`; invalid input returns HTTP 400. Repeating the current
+alias succeeds without creating another audit event. Credentials and existing
+Assignments remain attached to the same Node ID. Revoked credentials cannot
+rename a Node, and an Operator bearer token cannot call this Node endpoint.
+
+After renaming, update the key in `fleet.yml`, commit it, and run
+`fleet source rescan`. The old alias becomes available again, so update the
+source before assigning it to another Node. A revoked Node's current alias stays
+reserved. Operators can rename a Node using their bearer token with
+`fleet nodes rename <current-alias> <new-alias>`. The CLI calls the separate
+Operator endpoint and does not need a Node certificate. See the
+[Operator protocol](operator-protocol.md) for errors and retry behavior.
 
 Use explicit HTTPS listening addresses and a Server certificate valid for the
 configured hostname. The example certificate is valid for localhost only. The

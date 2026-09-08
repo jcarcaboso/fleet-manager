@@ -67,6 +67,8 @@ public sealed class HostingTests : IAsyncLifetime
             Assert.Equal(HttpStatusCode.OK, (await _operator.GetAsync("/operator/v1/" + route)).StatusCode);
         }
         Assert.Equal(HttpStatusCode.Unauthorized, (await _operator.PostAsync("/agent/v1/poll", null)).StatusCode);
+        Assert.Equal(HttpStatusCode.Unauthorized, (await _operator.PutAsJsonAsync("/agent/v1/alias", new { alias = "operator-alias" })).StatusCode);
+        Assert.Equal(HttpStatusCode.Unauthorized, (await anonymous.PutAsJsonAsync("/agent/v1/alias", new { alias = "anonymous-alias" })).StatusCode);
         Assert.Equal(HttpStatusCode.BadRequest, (await _operator.GetAsync("/operator/v1/nodes?limit=201")).StatusCode);
         using var http = _factory.CreateClient(new() { BaseAddress = new Uri("http://localhost") });
         http.DefaultRequestHeaders.Authorization = new("Bearer", Token);
@@ -122,6 +124,11 @@ public sealed class HostingTests : IAsyncLifetime
         var nodeId = new NodeId(issued.GetProperty("nodeId").GetGuid());
         var credentialId = issued.GetProperty("credentialId").GetGuid();
         using var certificate = X509Certificate2.CreateFromPem(issued.GetProperty("certificatePem").GetString()!);
+        var rename = await SendNodeAsync("/agent/v1/alias", certificate, new { alias = "Renamed-Node" }, "PUT");
+        Assert.Equal(200, rename.Response.StatusCode);
+        var renamed = await JsonSerializer.DeserializeAsync<JsonElement>(rename.Response.Body);
+        Assert.Equal(nodeId.Value, renamed.GetProperty("nodeId").GetGuid());
+        Assert.Equal("Renamed-Node", renamed.GetProperty("alias").GetString());
         var content = Encoding.UTF8.GetBytes("opaque test bundle");
         var digest = Convert.ToHexStringLower(SHA256.HashData(content));
         using (var scope = _factory.Services.CreateScope())
@@ -146,6 +153,55 @@ public sealed class HostingTests : IAsyncLifetime
         Assert.Equal(401, (await SendNodeAsync("/operator/v1/nodes", certificate, method: "GET")).Response.StatusCode);
         (await _operator.PostAsync($"/operator/v1/credentials/{credentialId:D}/revoke", null)).EnsureSuccessStatusCode();
         Assert.Equal(401, (await SendNodeAsync("/agent/v1/poll", certificate)).Response.StatusCode);
+        Assert.Equal(401, (await SendNodeAsync("/agent/v1/alias", certificate, new { alias = "revoked" }, "PUT")).Response.StatusCode);
+    }
+
+    [Fact]
+    public async Task Operator_alias_changes_validate_names_preserve_identity_and_audit_the_operator()
+    {
+        using var anonymous = _factory.CreateClient(new() { BaseAddress = new Uri("https://localhost") });
+        async Task<JsonElement> Enroll(string alias)
+        {
+            var authorization = await _operator.PostAsJsonAsync("/operator/v1/enrollment-tokens", new { expiresInSeconds = 900 });
+            var token = (await authorization.Content.ReadFromJsonAsync<JsonElement>()).GetProperty("token").GetString();
+            using var key = ECDsa.Create(ECCurve.NamedCurves.nistP256);
+            var csr = new CertificateRequest("CN=ignored", key, HashAlgorithmName.SHA256).CreateSigningRequestPem();
+            var response = await anonymous.PostAsJsonAsync("/agent/v1/enroll", new { token, certificateRequestPem = csr, nodeName = alias, platform = "linux" });
+            response.EnsureSuccessStatusCode();
+            return await response.Content.ReadFromJsonAsync<JsonElement>();
+        }
+        var node = await Enroll("before/with space");
+        await Enroll("occupied");
+        const string route = "/operator/v1/nodes/rename";
+        var request = new { currentAlias = "before/with space", alias = "after?#" };
+        Assert.Equal(HttpStatusCode.Unauthorized, (await anonymous.PostAsJsonAsync(route, request)).StatusCode);
+        using var certificate = X509Certificate2.CreateFromPem(node.GetProperty("certificatePem").GetString()!);
+        Assert.Equal(401, (await SendNodeAsync(route, certificate, request)).Response.StatusCode);
+        Assert.Equal(HttpStatusCode.NotFound, (await _operator.PostAsJsonAsync(route, new { currentAlias = "missing", alias = "new" })).StatusCode);
+        Assert.Equal(HttpStatusCode.BadRequest, (await _operator.PostAsJsonAsync(route, new { currentAlias = request.currentAlias, alias = " " })).StatusCode);
+        var collision = await _operator.PostAsJsonAsync(route, new { currentAlias = request.currentAlias, alias = "occupied" });
+        Assert.Equal(HttpStatusCode.Conflict, collision.StatusCode);
+        Assert.Equal("node_alias_in_use", (await collision.Content.ReadFromJsonAsync<JsonElement>()).GetProperty("code").GetString());
+        var changed = await _operator.PostAsJsonAsync(route, request);
+        changed.EnsureSuccessStatusCode();
+        var result = await changed.Content.ReadFromJsonAsync<JsonElement>();
+        Assert.Equal(node.GetProperty("nodeId").GetGuid(), result.GetProperty("nodeId").GetGuid());
+        Assert.Equal(request.alias, result.GetProperty("alias").GetString());
+        Assert.Equal(200, (await SendNodeAsync("/agent/v1/poll", certificate)).Response.StatusCode);
+        Assert.Equal(HttpStatusCode.OK, (await _operator.PostAsJsonAsync(route, new { currentAlias = request.alias, alias = request.alias })).StatusCode);
+        Assert.Equal(HttpStatusCode.NotFound, (await _operator.PostAsJsonAsync(route, request)).StatusCode);
+        using (var scope = _factory.Services.CreateScope())
+        {
+            var db = scope.ServiceProvider.GetRequiredService<FleetDbContext>();
+            var audit = Assert.Single(await db.AuditEvents.Where(x => x.Action == "node_alias_changed").ToListAsync());
+            Assert.Equal("operator", audit.Actor);
+            Assert.Equal(node.GetProperty("nodeId").GetGuid(), audit.NodeId);
+            Assert.Null(audit.CredentialId);
+        }
+        (await _operator.PostAsync($"/operator/v1/nodes/{node.GetProperty("nodeId").GetGuid()}/revoke", null)).EnsureSuccessStatusCode();
+        var revoked = await _operator.PostAsJsonAsync(route, new { currentAlias = request.alias, alias = "reused" });
+        Assert.Equal(HttpStatusCode.Conflict, revoked.StatusCode);
+        Assert.Equal("node_revoked", (await revoked.Content.ReadFromJsonAsync<JsonElement>()).GetProperty("code").GetString());
     }
 
     [Fact]

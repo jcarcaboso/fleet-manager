@@ -33,10 +33,17 @@ backup/restore tool.
 
 The [homelab Compose stack](../deploy/homelab/README.md) packages the Server,
 PostgreSQL, migrations, and private TLS configuration. The amd64 Server image is
-published to `skorcius/fleet-manager:0.1.0-poc.20260908`. A static Linux amd64
+published to `skorcius/fleet-manager:0.2.0`. A static Linux amd64
 [Operator CLI archive](technical-design/cli-installation.md) is built locally.
 Container HTTPS/mTLS smoke tests and a CLI request against the packaged Server
 passed; artifact signing and automated certificate renewal remain open.
+
+Server 0.2.0 uses unique Node aliases as source manifest keys and
+supports authenticated self-service alias changes through `PUT /agent/v1/alias`
+and Operator changes through `fleet nodes rename <current-alias> <new-alias>`.
+The published `0.1.0` release predates this change. UUID-based manifests must
+remove `id` and use each Node's current enrollment name as the key. Internal Node
+IDs, certificates, and existing Assignments remain stable.
 
 Still required for the full POC:
 

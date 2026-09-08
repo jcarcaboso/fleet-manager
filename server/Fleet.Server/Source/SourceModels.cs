@@ -20,7 +20,7 @@ public interface ISourceScanner
 
 public interface IEnrolledNodeSource
 {
-    Task<IReadOnlySet<NodeId>> GetNodeIdsAsync(CancellationToken cancellationToken);
+    Task<IReadOnlyDictionary<string, NodeId>> GetNodeAliasesAsync(CancellationToken cancellationToken);
 }
 
 public sealed record SourceLimits(

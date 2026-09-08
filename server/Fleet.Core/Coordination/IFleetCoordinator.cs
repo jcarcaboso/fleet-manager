@@ -24,6 +24,14 @@ public interface IFleetCoordinator
         RenewNodeCredential command,
         CancellationToken cancellationToken = default);
 
+    Task<NodeAliasResult> RenameNodeAliasAsync(
+        RenameNodeAlias command,
+        CancellationToken cancellationToken = default);
+
+    Task<NodeAliasResult> RenameNodeAliasAsOperatorAsync(
+        OperatorRenameNodeAlias command,
+        CancellationToken cancellationToken = default);
+
     Task<NodeAuthentication?> FindActiveNodeByCertificateAsync(
         string certificateSha256,
         CancellationToken cancellationToken = default);

@@ -68,7 +68,9 @@ public sealed class GitSourceScanner(
                 return Invalid(revision, "invalid_manifest", "fleet.yml does not match the fleet/v1 schema.", "fleet.yml");
             }
 
-            ValidateManifest(manifest, await nodes.GetNodeIdsAsync(scanToken), diagnostics);
+            var nodeAliases = (await nodes.GetNodeAliasesAsync(scanToken))
+                .ToDictionary(pair => pair.Key, pair => pair.Value, StringComparer.Ordinal);
+            ValidateManifest(manifest, nodeAliases, diagnostics);
             if (diagnostics.Any)
                 return new SourceScanResult.Invalid(revision, diagnostics.Items);
             var skillsByGroup = await BuildSkillsAsync(entries, manifest.Groups ?? [], diagnostics, scanToken);
@@ -77,10 +79,10 @@ public sealed class GitSourceScanner(
 
             var bundles = skillsByGroup.Values.SelectMany(x => x.Values).Select(x => x.Bundle)
                 .DistinctBy(x => x.Digest, StringComparer.Ordinal).OrderBy(x => x.Digest, StringComparer.Ordinal).ToArray();
-            var warnings = BuildWarnings(manifest, skillsByGroup, diagnostics, scanToken);
+            var warnings = BuildWarnings(manifest, nodeAliases, skillsByGroup, diagnostics, scanToken);
             if (diagnostics.Any)
                 return new SourceScanResult.Invalid(revision, diagnostics.Items);
-            var targets = BuildTargets(manifest, skillsByGroup);
+            var targets = BuildTargets(manifest, nodeAliases, skillsByGroup);
             return new SourceScanResult.Snapshot(new AcceptedSourceSnapshot(revision, bundles, targets, warnings, DateTimeOffset.UtcNow));
         }
         catch (Exception exception) when (exception is GitSourceException or IOException or UnauthorizedAccessException or DecoderFallbackException or FormatException or OverflowException)
@@ -188,7 +190,7 @@ public sealed class GitSourceScanner(
         if (total > _limits.MaxTotalBytes) diagnostics.Add("source_too_large", "Repository file bytes exceed the total size limit.");
     }
 
-    private static void ValidateManifest(FleetManifest manifest, IReadOnlySet<NodeId> enrolled, DiagnosticBag diagnostics)
+    private static void ValidateManifest(FleetManifest manifest, IReadOnlyDictionary<string, NodeId> nodeAliases, DiagnosticBag diagnostics)
     {
         if (manifest is null) { diagnostics.Add("invalid_manifest", "fleet.yml must contain a mapping."); return; }
         if (manifest.Schema != "fleet/v1") diagnostics.Add("unsupported_schema", "schema must be fleet/v1.", "fleet.yml");
@@ -202,16 +204,14 @@ public sealed class GitSourceScanner(
         ValidateTarget(defaultTarget?.Base, defaultTarget?.Path, diagnostics);
         if (manifest.Nodes is null) { diagnostics.Add("missing_nodes", "nodes is required.", "fleet.yml"); return; }
         if (manifest.Nodes.Count > 10_000) { diagnostics.Add("too_many_nodes", "nodes contains more than 10000 entries.", "fleet.yml"); return; }
-        var ids = new HashSet<string>(StringComparer.Ordinal);
-        foreach (var (name, node) in manifest.Nodes)
+        foreach (var (alias, node) in manifest.Nodes)
         {
-            if (node is null || !Guid.TryParse(node.Id, out var parsedId) || !enrolled.Contains(new NodeId(parsedId))) diagnostics.Add("unknown_node", $"Node '{name}' references an unknown Node ID.", "fleet.yml");
-            else if (!ids.Add(node.Id)) diagnostics.Add("duplicate_node_id", $"Node ID '{node.Id}' is referenced more than once.", "fleet.yml");
+            if (!nodeAliases.ContainsKey(alias)) diagnostics.Add("unknown_node", $"Node alias '{alias}' is not enrolled.", "fleet.yml");
             var target = node?.Targets?.Skills;
-            if (target is null) { diagnostics.Add("missing_node_target", $"Node '{name}' must configure the skills Target.", "fleet.yml"); continue; }
+            if (target is null) { diagnostics.Add("missing_node_target", $"Node '{alias}' must configure the skills Target.", "fleet.yml"); continue; }
             ValidateTarget(defaultTarget?.Base, target.Path ?? defaultTarget?.Path, diagnostics);
-            if (target.Groups is null) diagnostics.Add("missing_node_groups", $"Node '{name}' must declare its groups list.", "fleet.yml");
-            else foreach (var group in target.Groups) if (!(manifest.Groups?.Contains(group, StringComparer.Ordinal) ?? false)) diagnostics.Add("unknown_group", $"Node '{name}' subscribes to undeclared group '{group}'.", "fleet.yml");
+            if (target.Groups is null) diagnostics.Add("missing_node_groups", $"Node '{alias}' must declare its groups list.", "fleet.yml");
+            else foreach (var group in target.Groups) if (!(manifest.Groups?.Contains(group, StringComparer.Ordinal) ?? false)) diagnostics.Add("unknown_group", $"Node '{alias}' subscribes to undeclared group '{group}'.", "fleet.yml");
         }
     }
 
@@ -228,7 +228,8 @@ public sealed class GitSourceScanner(
             diagnostics.Add($"invalid_{kind}_name", $"{kind} names must use lowercase letters, numbers, and interior hyphens.", path);
     }
 
-    private static IReadOnlyList<SnapshotTarget> BuildTargets(FleetManifest manifest, Dictionary<string, Dictionary<string, BuiltSkill>> groups)
+    private static IReadOnlyList<SnapshotTarget> BuildTargets(FleetManifest manifest, IReadOnlyDictionary<string, NodeId> nodeAliases,
+        Dictionary<string, Dictionary<string, BuiltSkill>> groups)
         => manifest.Nodes.OrderBy(x => x.Key, StringComparer.Ordinal).Select(pair =>
         {
             var target = pair.Value.Targets.Skills;
@@ -236,11 +237,11 @@ public sealed class GitSourceScanner(
             foreach (var group in manifest.Groups.Where(g => target.Groups!.Contains(g, StringComparer.Ordinal)))
                 foreach (var skill in groups[group].OrderBy(x => x.Key, StringComparer.Ordinal))
                     skills.TryAdd(skill.Key, new SnapshotSkill(skill.Key, skill.Value.Bundle.Digest));
-            return new SnapshotTarget(new NodeId(Guid.Parse(pair.Value.Id)), "skills", new TargetDescriptor("home", target.Path ?? manifest.Targets.Skills.Path!), skills.Values.ToArray());
+            return new SnapshotTarget(nodeAliases[pair.Key], "skills", new TargetDescriptor("home", target.Path ?? manifest.Targets.Skills.Path!), skills.Values.ToArray());
         }).ToArray();
 
-    private IReadOnlyList<SourceWarning> BuildWarnings(FleetManifest manifest, Dictionary<string, Dictionary<string, BuiltSkill>> groups,
-        DiagnosticBag diagnostics, CancellationToken cancellationToken)
+    private IReadOnlyList<SourceWarning> BuildWarnings(FleetManifest manifest, IReadOnlyDictionary<string, NodeId> nodeAliases,
+        Dictionary<string, Dictionary<string, BuiltSkill>> groups, DiagnosticBag diagnostics, CancellationToken cancellationToken)
     {
         var locations = groups.SelectMany(g => g.Value.Select(s => (s.Key, s.Value.Location))).GroupBy(x => x.Key, StringComparer.Ordinal)
             .Where(x => x.Skip(1).Any()).ToDictionary(x => x.Key,
@@ -259,7 +260,7 @@ public sealed class GitSourceScanner(
                 .Select(node =>
                 {
                     cancellationToken.ThrowIfCancellationRequested();
-                    return (node.Value.Id, Groups: manifest.Groups.Where(g => node.Value.Targets.Skills.Groups!.Contains(g, StringComparer.Ordinal) && groups[g].ContainsKey(duplicate.Key)).ToArray());
+                    return (Id: nodeAliases[node.Key].Value.ToString(), Groups: manifest.Groups.Where(g => node.Value.Targets.Skills.Groups!.Contains(g, StringComparer.Ordinal) && groups[g].ContainsKey(duplicate.Key)).ToArray());
                 })
                 .Where(x => x.Groups.Length > 1)
                 .OrderBy(x => x.Id, StringComparer.Ordinal)

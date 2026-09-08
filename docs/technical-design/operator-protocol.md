@@ -45,6 +45,35 @@ content into diagnostics.
 
 ## Mutations
 
+`fleet nodes rename <current-alias> <new-alias>` sends:
+
+```http
+POST /operator/v1/nodes/rename
+Content-Type: application/json
+```
+
+```json
+{"currentAlias":"homelab","alias":"homelab-mini"}
+```
+
+The response contains the unchanged `nodeId` and the new `alias`. The Server
+resolves the exact, case-sensitive current alias in the Operator's Workspace and
+records the Operator identity in the audit event. Both aliases must be nonblank
+and at most 200 characters. Aliases travel in JSON so punctuation is not treated
+as a URL path. Quote aliases with spaces when using the CLI.
+
+Unknown current aliases return HTTP 404 with `node_not_found`. An occupied new
+alias returns HTTP 409 with `node_alias_in_use`; a revoked Node returns HTTP 409
+with `node_revoked`. Invalid aliases return HTTP 400. A Node certificate alone
+cannot authorize this endpoint. Renaming to the current alias succeeds without
+an extra audit event. After a successful rename, retrying with the old alias
+returns 404 unless that alias has since been assigned to another Node. If the
+response is lost, run `fleet nodes list` and verify the Node ID before retrying.
+
+Update the alias key in `fleet.yml`, commit, and run `fleet source rescan` after
+renaming. UUIDs, certificates, and existing Assignments remain unchanged. The
+old alias becomes available again; update the source before reusing it.
+
 `fleet enrollment create --expires-in-seconds 900` sends:
 
 ```http

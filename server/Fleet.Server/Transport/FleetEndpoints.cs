@@ -13,6 +13,9 @@ public static class FleetEndpoints
     public static void MapFleetEndpoints(this WebApplication app)
     {
         var operators = app.MapGroup("/operator/v1").RequireAuthorization("Operator").WithGroupName("operator");
+        operators.MapPost("/nodes/rename", async (OperatorRenameAliasRequest request, HttpContext context,
+            IFleetCoordinator coordinator, CancellationToken ct) =>
+            await coordinator.RenameNodeAliasAsOperatorAsync(new(request.CurrentAlias, request.Alias, OperatorName(context)), ct));
         operators.MapGet("/nodes", async (int? limit, string? after, IFleetCoordinator coordinator,
             IOptions<FleetOptions> options, TimeProvider time, CancellationToken ct) =>
             await coordinator.GetNodesAsync(new(limit ?? 100, after), time.GetUtcNow(), TimeSpan.FromSeconds(options.Value.StaleAfterSeconds), ct));
@@ -103,6 +106,8 @@ public static class FleetEndpoints
             context.Response.Headers.CacheControl = "no-store";
             return Results.Ok(response);
         }).RequireRateLimiting("enrollment");
+        agents.MapPut("/alias", async (AliasRequest request, HttpContext context, IFleetCoordinator coordinator,
+            CancellationToken ct) => Results.Ok(await coordinator.RenameNodeAliasAsync(new(Node(context), request.Alias), ct)));
     }
 
     private static NodeAuthentication Node(HttpContext context) =>

@@ -1,23 +1,24 @@
 using Fleet.Core.Coordination;
+using Fleet.Server.Persistence;
+using Fleet.Server.Security;
 using Fleet.Server.Source;
+using Microsoft.EntityFrameworkCore;
+using Microsoft.Extensions.Options;
 
 namespace Fleet.Server.Hosting;
 
 public sealed class RegisteredNodeSource(IServiceScopeFactory scopes) : IEnrolledNodeSource
 {
-    public async Task<IReadOnlySet<NodeId>> GetNodeIdsAsync(CancellationToken cancellationToken)
+    public async Task<IReadOnlyDictionary<string, NodeId>> GetNodeAliasesAsync(CancellationToken cancellationToken)
     {
         using var scope = scopes.CreateScope();
-        var coordinator = scope.ServiceProvider.GetRequiredService<IFleetCoordinator>();
-        HashSet<NodeId> ids = [];
-        string? cursor = null;
-        do
-        {
-            var page = await coordinator.GetNodesAsync(new(200, cursor), DateTimeOffset.UtcNow, TimeSpan.FromMinutes(5), cancellationToken);
-            foreach (var node in page.Items) ids.Add(node.NodeId);
-            cursor = page.NextCursor;
-        } while (cursor is not null);
-        return ids;
+        var database = scope.ServiceProvider.GetRequiredService<FleetDbContext>();
+        var workspaceId = scope.ServiceProvider.GetRequiredService<IOptions<FleetOptions>>().Value.WorkspaceId;
+        var aliases = await database.Nodes.AsNoTracking()
+            .Where(node => node.WorkspaceId == workspaceId)
+            .Select(node => new { node.Name, node.Id })
+            .ToListAsync(cancellationToken);
+        return aliases.ToDictionary(node => node.Name, node => new NodeId(node.Id), StringComparer.Ordinal);
     }
 }
 
@@ -58,7 +59,7 @@ public sealed class SourcePollingService(
             };
             var scanner = new GitSourceScanner(remote, configuration["Source:MirrorPath"] ?? ".local/source.git", nodes, limits);
             // Operator scans re-read the same commit because registry changes can make a
-            // previously invalid Node reference valid without a new Git commit.
+            // previously invalid Node alias valid without a new Git commit.
             var result = await scanner.ScanAsync(requestedBy is null ? _lastObserved : null, cancellationToken);
             using var scope = scopes.CreateScope();
             var coordinator = scope.ServiceProvider.GetRequiredService<IFleetCoordinator>();

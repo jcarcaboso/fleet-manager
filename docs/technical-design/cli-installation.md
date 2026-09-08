@@ -24,7 +24,15 @@ Set the Server URL and Operator token before running a command:
 export FLEET_SERVER_URL=https://fleet.example.com
 export FLEET_OPERATOR_TOKEN='replace-with-an-operator-token'
 fleet nodes list
+fleet nodes rename old-alias new-alias
 ```
+
+`nodes rename` prints the node ID and new alias as JSON. An HTTP 404 response
+means no node has the current alias. HTTP 409 means the new alias is already in
+use or the node is revoked. The rename command requires Server 0.2.0 or later.
+After renaming a
+source-managed node, change its key in `fleet.yml`, commit the change, and
+rescan the source. The old alias is then available for reuse.
 
 Use `--ca-cert FILE` when the Server uses a private certificate authority. Plain
 HTTP is accepted only for a loopback Server and requires `--allow-http`.

@@ -88,7 +88,6 @@ targets:
 
 nodes:
   joan-macbook:
-    id: node_01JMAC
     targets:
       skills:
         groups:
@@ -96,7 +95,6 @@ nodes:
           - testing
 
   linux-workstation:
-    id: node_01JLINUX
     targets:
       skills:
         path: .codex/skills
@@ -107,13 +105,24 @@ nodes:
 The YAML declares group names and order but never lists the Skills inside them.
 The Server discovers Skills from the directories at the exact source revision.
 
-The Server owns the enrolled Node registry. The YAML references stable Node IDs
-and supplies desired configuration for them:
+The Server owns the enrolled Node registry. Keys under `nodes` are unique Node
+aliases, resolved by the Server to stable internal Node IDs. The alias is the
+exact, case-sensitive name supplied at enrollment. The YAML supplies desired
+configuration without an `id` field:
 
 - an enrolled Node missing from the YAML remains registered but receives no new
   Assignment;
-- an unknown Node ID makes source validation fail; and
+- an unknown Node alias makes source validation fail;
+- aliases remain reserved after revocation and cannot identify a replacement
+  Node; and
 - credentials, enrollment tokens, and mutable Node metadata never enter Git.
+
+An authenticated Node may change its alias to a free name. The old alias becomes
+available again. Update its YAML key and commit the change before reusing that
+old alias for a different Node. Previously published Assignments retain their
+resolved Node IDs; an alias change does not rewrite an accepted revision.
+Existing UUID-based manifests must remove each `id` field and use the enrolled
+Node's current name as the mapping key. Certificate identities do not change.
 
 ## Target resolution
 

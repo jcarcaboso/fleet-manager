@@ -1,7 +1,7 @@
 name: fleet-manager
 
 x-server: &server
-  image: ${FLEET_IMAGE:-skorcius/fleet-manager:0.1.0-poc.20260908}
+  image: ${FLEET_IMAGE:-skorcius/fleet-manager:0.2.0}
   user: "1654:1654"
   read_only: true
   cap_drop: [ALL]
@@ -27,7 +27,7 @@ x-server: &server
 
 services:
   configure:
-    image: ${FLEET_IMAGE:-skorcius/fleet-manager:0.1.0-poc.20260908}
+    image: ${FLEET_IMAGE:-skorcius/fleet-manager:0.2.0}
     user: "0:0"
     entrypoint: [/bin/sh, -ec]
     command:

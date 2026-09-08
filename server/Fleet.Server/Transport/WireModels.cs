@@ -6,6 +6,8 @@ namespace Fleet.Server.Transport;
 
 public sealed record EnrollmentRequest(string Token, string CertificateRequestPem, string NodeName, string Platform);
 public sealed record RenewalRequest(string CertificateRequestPem);
+public sealed record OperatorRenameAliasRequest(string CurrentAlias, string Alias);
+public sealed record AliasRequest(string Alias);
 public sealed record EnrollmentTokenRequest(int ExpiresInSeconds = 900);
 public sealed record EnrollmentResponse(Guid WorkspaceId, Guid NodeId, Guid CredentialId, string CertificatePem,
     DateTimeOffset ExpiresAt, int PollIntervalSeconds);

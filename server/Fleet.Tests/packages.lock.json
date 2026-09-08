@@ -593,7 +593,7 @@
       "fleet.server": {
         "type": "Project",
         "dependencies": {
-          "Fleet.Core": "[1.0.0, )",
+          "Fleet.Core": "[0.2.0, )",
           "Microsoft.AspNetCore.OpenApi": "[10.0.10, )",
           "Microsoft.EntityFrameworkCore": "[10.0.10, )",
           "Microsoft.EntityFrameworkCore.Relational": "[10.0.10, )",

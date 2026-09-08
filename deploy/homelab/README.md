@@ -59,6 +59,14 @@ The Operator token grants administrative access. Keep it private; never copy the
 CA private key to clients. The CLI is the Operator tool; a continuously running
 Node Agent is still pending implementation.
 
+With Server and CLI version `0.2.0`, Operators can rename
+a Node with `fleet nodes rename <current-alias> <new-alias>`. Update its key in
+`fleet.yml`, commit, then run `fleet source rescan`.
+
+When upgrading from `0.1.0`, remove each `id` field from `fleet.yml` and replace
+the Node mapping key with its exact enrolled name. The Server rejects the old
+manifest format. Keep your existing `secrets/`, `operator.env`, and database.
+
 ## Git source
 
 Set `FLEET_SOURCE_REMOTE` in `.env` to an HTTPS or SSH repository URL. For a private
@@ -95,7 +103,7 @@ The Server terminates HTTPS itself to validate Node client certificates. A proxy
 in front must preserve TLS with TCP passthrough; ordinary HTTP termination does
 not preserve this authentication.
 
-The pinned POC image tag is `skorcius/fleet-manager:0.1.0-poc.20260908`. To upgrade,
+The pinned POC image tag is `skorcius/fleet-manager:0.2.0`. To upgrade,
 back up PostgreSQL and the private configuration, change `FLEET_IMAGE` in `.env`,
 then run `docker compose pull` and `docker compose up -d --force-recreate --wait`.
 Migrations run before the Server starts. Do not run `docker compose down -v` on

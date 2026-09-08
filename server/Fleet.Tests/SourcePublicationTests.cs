@@ -46,7 +46,7 @@ public sealed class SourcePublicationTests : IAsyncLifetime
             "linux",
             new(nodeId, credentialId, certificateDigest, now - TimeSpan.FromMinutes(1), now + TimeSpan.FromHours(1), "certificate"u8.ToArray())));
 
-        var source = CreateRepository(nodeId);
+        var source = CreateRepository();
         var scanner = new GitSourceScanner(source, Path.Combine(_files, "mirror.git"), new Nodes(nodeId));
         var scan = Assert.IsType<SourceScanResult.Snapshot>(await scanner.ScanAsync(null, CancellationToken.None));
         var publication = await coordinator.AcceptSourceSnapshotAsync(scan.Value);
@@ -61,7 +61,7 @@ public sealed class SourcePublicationTests : IAsyncLifetime
         Assert.Equal(sourceBundle.Content, (await coordinator.GetBundleAsync(authentication, skill.BundleDigest)).Content);
     }
 
-    private string CreateRepository(NodeId nodeId)
+    private string CreateRepository()
     {
         var repository = Path.Combine(_files, "source");
         Directory.CreateDirectory(repository);
@@ -78,7 +78,6 @@ public sealed class SourcePublicationTests : IAsyncLifetime
                 path: .agents/skills
             nodes:
               publication-node:
-                id: {{nodeId.Value}}
                 targets:
                   skills:
                     groups:
@@ -123,7 +122,7 @@ public sealed class SourcePublicationTests : IAsyncLifetime
 
     private sealed class Nodes(NodeId nodeId) : IEnrolledNodeSource
     {
-        public Task<IReadOnlySet<NodeId>> GetNodeIdsAsync(CancellationToken cancellationToken) =>
-            Task.FromResult<IReadOnlySet<NodeId>>(new HashSet<NodeId> { nodeId });
+        public Task<IReadOnlyDictionary<string, NodeId>> GetNodeAliasesAsync(CancellationToken cancellationToken) =>
+            Task.FromResult<IReadOnlyDictionary<string, NodeId>>(new Dictionary<string, NodeId>(StringComparer.Ordinal) { ["publication-node"] = nodeId });
     }
 }

@@ -33,3 +33,14 @@ database. From the repository root, `make security` also performs the locked
 The audit run on 2026-09-07 completed with no reported vulnerabilities across
 149 locked crate dependencies. CI pins `cargo-audit` 0.22.2; the local Nix
 cache provided 0.22.1 for the recorded verification run.
+
+The CLI reads Operator credentials from `FLEET_OPERATOR_TOKEN`. Node aliases can
+be changed with:
+
+```sh
+fleet nodes rename <current-alias> <new-alias>
+```
+
+The command prints the renamed node as JSON. It reports an unknown current alias
+with HTTP 404. HTTP 409 means the new alias is already in use or the node is
+revoked.

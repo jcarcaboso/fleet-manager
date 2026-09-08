@@ -100,6 +100,84 @@ public sealed class PersistenceHardeningTests : IAsyncLifetime
     }
 
     [Fact]
+    public async Task Alias_change_preserves_identity_is_idempotent_and_rejects_revoked_credentials()
+    {
+        await using var db = Database();
+        var coordinator = Coordinator(db);
+        var enrolled = await Enroll(coordinator, "before");
+        var bundle = Bundle("alias-identity");
+        await coordinator.AcceptSourceSnapshotAsync(Snapshot("alias-identity", enrolled.NodeId, bundle));
+
+        var renamed = await coordinator.RenameNodeAliasAsync(new(enrolled.Authentication, "After"));
+        var retried = await coordinator.RenameNodeAliasAsync(new(enrolled.Authentication, "After"));
+
+        Assert.Equal(enrolled.NodeId, renamed.NodeId);
+        Assert.Equal(renamed, retried);
+        Assert.Equal("After", await db.Nodes.Where(x => x.Id == enrolled.NodeId.Value).Select(x => x.Name).SingleAsync());
+        Assert.Equal(1, await db.AuditEvents.CountAsync(x => x.Action == "node_alias_changed" && x.NodeId == enrolled.NodeId.Value));
+        Assert.NotNull((await coordinator.PollAsync(enrolled.Authentication, clock.GetUtcNow())).Assignment);
+
+        await coordinator.RevokeCredentialAsync(enrolled.Authentication.CredentialId, "operator");
+        var error = await Assert.ThrowsAsync<CoordinationException>(() =>
+            coordinator.RenameNodeAliasAsync(new(enrolled.Authentication, "unreachable")));
+        Assert.Equal("node_unauthorized", error.Code);
+    }
+
+    [Fact]
+    public async Task Operator_and_node_alias_changes_allow_one_claim_and_release_the_old_alias()
+    {
+        Enrolled first;
+        Enrolled second;
+        await using (var setup = Database())
+        {
+            var coordinator = Coordinator(setup);
+            first = await Enroll(coordinator, "first-alias");
+            second = await Enroll(coordinator, "second-alias");
+        }
+        await using var firstDb = Database();
+        await using var secondDb = Database();
+
+        var outcomes = await Task.WhenAll(
+            CaptureResult(Coordinator(firstDb).RenameNodeAliasAsOperatorAsync(new("first-alias", "contended", "operator"))),
+            CaptureResult(Coordinator(secondDb).RenameNodeAliasAsync(new(second.Authentication, "contended"))));
+
+        Assert.Single(outcomes, x => x.Result is not null);
+        Assert.Single(outcomes, x => x.Error?.Code == "node_alias_in_use");
+        var winner = Assert.IsType<NodeAliasResult>(outcomes.Single(x => x.Result is not null).Result);
+        var loser = winner.NodeId == first.NodeId ? second : first;
+        await using var releaseDb = Database();
+        var claimed = await Coordinator(releaseDb).RenameNodeAliasAsync(new(loser.Authentication,
+            winner.NodeId == first.NodeId ? "first-alias" : "second-alias"));
+        Assert.Equal(loser.NodeId, claimed.NodeId);
+    }
+
+    [Fact]
+    public async Task Enrollment_and_alias_change_cannot_claim_the_same_alias()
+    {
+        Enrolled enrolled;
+        EnrollmentAuthorization authorization;
+        IssuedNodeCredential issued;
+        await using (var setup = Database())
+        {
+            var coordinator = Coordinator(setup);
+            enrolled = await Enroll(coordinator, "rename-source");
+            authorization = await coordinator.CreateEnrollmentAuthorizationAsync(
+                new("operator", clock.GetUtcNow() + TimeSpan.FromMinutes(5), TimeSpan.FromMinutes(2)));
+            issued = Credential(new(Guid.NewGuid()));
+        }
+        await using var renameDb = Database();
+        await using var enrollDb = Database();
+
+        var rename = CaptureResult(Coordinator(renameDb).RenameNodeAliasAsync(new(enrolled.Authentication, "shared-alias")));
+        var enrollment = CaptureResult(Coordinator(enrollDb).CompleteEnrollmentAsync(new(
+            authorization.Token, Sha("csr-shared"), "shared-alias", "linux", issued)));
+        var outcomes = await Task.WhenAll(rename, enrollment);
+
+        Assert.Single(outcomes, x => x.Result is not null);
+        Assert.Single(outcomes, x => x.Error?.Code == "node_alias_in_use");
+    }
+
+    [Fact]
     public async Task Concurrent_publications_leave_one_current_assignment_and_stale_report_cannot_win()
     {
         Enrolled enrolled;
@@ -173,6 +251,12 @@ public sealed class PersistenceHardeningTests : IAsyncLifetime
         try { await operation; return null; }
         catch (CoordinationException) { return null; }
         catch (Exception error) { return error; }
+    }
+
+    private static async Task<(object? Result, CoordinationException? Error)> CaptureResult<T>(Task<T> operation)
+    {
+        try { return (await operation, null); }
+        catch (CoordinationException error) { return (null, error); }
     }
 
     private sealed record Enrolled(NodeId NodeId, NodeAuthentication Authentication);

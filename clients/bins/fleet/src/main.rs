@@ -32,12 +32,40 @@ struct Cli {
 
 #[derive(Debug, Subcommand)]
 enum Command {
-    Nodes(ListArgs),
+    Nodes(NodesArgs),
     Rollouts(ListArgs),
     Warnings(ListArgs),
     Enrollment(EnrollmentCommand),
     Credentials(CredentialsCommand),
     Source(SourceCommand),
+}
+
+#[derive(Debug, Args)]
+struct NodesArgs {
+    #[command(subcommand)]
+    command: NodesSubcommand,
+
+    #[arg(long = "after", hide = true)]
+    legacy_after: Option<String>,
+}
+
+#[derive(Debug, Subcommand)]
+enum NodesSubcommand {
+    List(NodesListArgs),
+    /// Change a node's alias.
+    Rename {
+        /// Alias currently assigned to the node.
+        current_alias: String,
+        /// New alias to assign to the node.
+        new_alias: String,
+    },
+}
+
+#[derive(Debug, Args)]
+struct NodesListArgs {
+    /// Opaque cursor returned by a previous list response.
+    #[arg(long)]
+    after: Option<String>,
 }
 
 #[derive(Debug, Args)]
@@ -106,6 +134,20 @@ struct Collection {
 #[serde(rename_all = "camelCase")]
 struct EnrollmentRequest {
     expires_in_seconds: u32,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct RenameNodeRequest<'a> {
+    current_alias: &'a str,
+    alias: &'a str,
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct RenameNodeResponse {
+    node_id: Uuid,
+    alias: String,
 }
 
 struct Api {
@@ -198,6 +240,22 @@ impl Api {
         Ok(())
     }
 
+    async fn rename_node(&self, current_alias: &str, new_alias: &str) -> Result<()> {
+        let response: RenameNodeResponse = self
+            .send_with_errors(
+                self.client
+                    .post(self.endpoint("nodes/rename")?)
+                    .json(&RenameNodeRequest {
+                        current_alias,
+                        alias: new_alias,
+                    }),
+                rename_error_detail,
+            )
+            .await?;
+        println!("{}", serde_json::to_string(&response)?);
+        Ok(())
+    }
+
     async fn rescan(&self) -> Result<()> {
         let response: Value = self
             .send(self.client.post(self.endpoint("source/rescan")?))
@@ -210,6 +268,14 @@ impl Api {
         &self,
         request: reqwest::RequestBuilder,
     ) -> Result<T> {
+        self.send_with_errors(request, default_error_detail).await
+    }
+
+    async fn send_with_errors<T: for<'de> Deserialize<'de>>(
+        &self,
+        request: reqwest::RequestBuilder,
+        error_detail: fn(StatusCode) -> &'static str,
+    ) -> Result<T> {
         let response = request
             .bearer_auth(&self.token)
             .send()
@@ -217,13 +283,7 @@ impl Api {
             .context("request Fleet Server")?;
         let status = response.status();
         if !status.is_success() {
-            let detail = match status {
-                StatusCode::UNAUTHORIZED | StatusCode::FORBIDDEN => {
-                    "operator authentication failed"
-                }
-                StatusCode::NOT_FOUND => "Fleet Server route was not found",
-                _ => "Fleet Server request failed",
-            };
+            let detail = error_detail(status);
             bail!("{detail} (HTTP {})", status.as_u16());
         }
         if response
@@ -248,6 +308,23 @@ impl Api {
     }
 }
 
+fn default_error_detail(status: StatusCode) -> &'static str {
+    match status {
+        StatusCode::UNAUTHORIZED | StatusCode::FORBIDDEN => "operator authentication failed",
+        StatusCode::NOT_FOUND => "Fleet Server route was not found",
+        _ => "Fleet Server request failed",
+    }
+}
+
+fn rename_error_detail(status: StatusCode) -> &'static str {
+    match status {
+        StatusCode::UNAUTHORIZED | StatusCode::FORBIDDEN => "operator authentication failed",
+        StatusCode::NOT_FOUND => "no node has the current alias",
+        StatusCode::CONFLICT => "new alias is already in use or the node is revoked",
+        _ => "Fleet Server request failed",
+    }
+}
+
 fn is_loopback(url: &Url) -> bool {
     matches!(url.host_str(), Some("localhost" | "127.0.0.1" | "::1"))
 }
@@ -262,10 +339,29 @@ async fn main() -> Result<()> {
     }
     let api = Api::new(&cli.server_url, token, cli.allow_http, cli.ca_cert.as_ref())?;
     match cli.command {
-        Command::Nodes(ListArgs {
-            command: ListCommand::List,
-            after,
-        }) => api.get_collection("nodes", after.as_deref()).await,
+        Command::Nodes(NodesArgs {
+            command: NodesSubcommand::List(args),
+            legacy_after,
+        }) => {
+            if legacy_after.is_some() && args.after.is_some() {
+                bail!("--after may be supplied only once")
+            }
+            api.get_collection("nodes", args.after.as_deref().or(legacy_after.as_deref()))
+                .await
+        }
+        Command::Nodes(NodesArgs {
+            command:
+                NodesSubcommand::Rename {
+                    current_alias,
+                    new_alias,
+                },
+            legacy_after,
+        }) => {
+            if legacy_after.is_some() {
+                bail!("--after is only valid with nodes list")
+            }
+            api.rename_node(&current_alias, &new_alias).await
+        }
         Command::Rollouts(ListArgs {
             command: ListCommand::List,
             after,
@@ -363,6 +459,52 @@ mod tests {
         server.join().unwrap();
     }
 
+    #[tokio::test]
+    async fn rename_sends_aliases_as_json_in_a_fixed_path() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut buffer = [0_u8; 4096];
+            let size = stream.read(&mut buffer).unwrap();
+            let request = String::from_utf8_lossy(&buffer[..size]);
+            let (headers, body) = request.split_once("\r\n\r\n").unwrap();
+            assert!(headers.starts_with("POST /operator/v1/nodes/rename HTTP/1.1"));
+            assert!(
+                headers
+                    .to_ascii_lowercase()
+                    .contains("authorization: bearer test-token")
+            );
+            let json: Value = serde_json::from_str(body).unwrap();
+            assert_eq!(
+                json,
+                serde_json::json!({
+                    "currentAlias": "rack/A ?# \"snow\"",
+                    "alias": "new/alias + ?&"
+                })
+            );
+            let body =
+                r#"{"nodeId":"550e8400-e29b-41d4-a716-446655440000","alias":"new/alias + ?&"}"#;
+            let response = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{}",
+                body.len(),
+                body
+            );
+            stream.write_all(response.as_bytes()).unwrap();
+        });
+        let api = Api::new(
+            &format!("http://{address}"),
+            "test-token".into(),
+            true,
+            None,
+        )
+        .unwrap();
+        api.rename_node("rack/A ?# \"snow\"", "new/alias + ?&")
+            .await
+            .unwrap();
+        server.join().unwrap();
+    }
+
     #[test]
     fn rejects_non_uuid_credential_ids_at_parser_boundary() {
         assert!(Uuid::parse_str("not-a-uuid").is_err());
@@ -397,6 +539,18 @@ mod tests {
                 "fleet",
                 "--server-url",
                 "https://fleet",
+                "nodes",
+                "--after",
+                "legacy-cursor",
+                "list"
+            ])
+            .is_ok()
+        );
+        assert!(
+            Cli::try_parse_from([
+                "fleet",
+                "--server-url",
+                "https://fleet",
                 "credentials",
                 "revoke",
                 "550e8400-e29b-41d4-a716-446655440000"
@@ -406,6 +560,30 @@ mod tests {
         assert!(
             Cli::try_parse_from(["fleet", "--server-url", "https://fleet", "source", "rescan"])
                 .is_ok()
+        );
+        assert!(
+            Cli::try_parse_from([
+                "fleet",
+                "--server-url",
+                "https://fleet",
+                "nodes",
+                "rename",
+                "old alias",
+                "new/alias?#"
+            ])
+            .is_ok()
+        );
+        assert!(
+            Cli::try_parse_from([
+                "fleet",
+                "--server-url",
+                "https://fleet",
+                "nodes",
+                "list",
+                "--after",
+                "cursor"
+            ])
+            .is_ok()
         );
         assert!(
             Cli::try_parse_from([
@@ -466,6 +644,40 @@ mod tests {
             .to_string();
         assert!(error.contains("operator authentication failed"));
         assert!(!error.contains("secret"));
+        server.join().unwrap();
+    }
+
+    #[tokio::test]
+    async fn rename_reports_conflict_without_exposing_response_body() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut buffer = [0_u8; 1024];
+            let _ = stream.read(&mut buffer).unwrap();
+            let body = "database detail and secret target metadata";
+            let response = format!(
+                "HTTP/1.1 409 Conflict\r\nContent-Length: {}\r\n\r\n{}",
+                body.len(),
+                body
+            );
+            stream.write_all(response.as_bytes()).unwrap();
+        });
+        let api = Api::new(
+            &format!("http://{address}"),
+            "test-token".into(),
+            true,
+            None,
+        )
+        .unwrap();
+        let error = api
+            .rename_node("current", "target")
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("already in use or the node is revoked"));
+        assert!(!error.contains("secret"));
+        assert!(!error.contains("database"));
         server.join().unwrap();
     }
 

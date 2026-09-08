@@ -23,6 +23,10 @@ _Avoid_: Bundle group, Agent group
 One registered macOS or Linux machine with a stable Fleet identity.
 _Avoid_: Host, client, machine identity
 
+**Node alias**:
+A human-readable name unique within a Workspace that identifies a Node in desired
+configuration. Revocation does not release the alias for another Node.
+
 **Agent**:
 The user-level process that represents one Node and owns local reconciliation.
 _Avoid_: Client, worker, CLI

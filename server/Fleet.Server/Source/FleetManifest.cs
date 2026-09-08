@@ -32,8 +32,6 @@ internal sealed class ManifestTarget
 
 internal sealed class ManifestNode
 {
-    [YamlMember(Alias = "id")]
-    public required string Id { get; init; }
     [YamlMember(Alias = "targets")]
     public required ManifestTargets Targets { get; init; }
 }

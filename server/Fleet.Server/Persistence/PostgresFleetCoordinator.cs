@@ -4,6 +4,7 @@ using System.Text;
 using System.Text.Json;
 using Fleet.Core.Coordination;
 using Microsoft.EntityFrameworkCore;
+using Npgsql;
 
 namespace Fleet.Server.Persistence;
 
@@ -92,7 +93,15 @@ public sealed class PostgresFleetCoordinator(
         row.DeliveryPayload = command.IssuedCredential.DeliveryPayload;
         db.AuditEvents.Add(Audit("node_enrolled", "enrollment", now,
             command.IssuedCredential.NodeId.Value, command.IssuedCredential.CredentialId.Value));
-        await db.SaveChangesAsync(cancellationToken);
+        try
+        {
+            await db.SaveChangesAsync(cancellationToken);
+        }
+        catch (DbUpdateException exception) when (exception.InnerException is PostgresException
+        { SqlState: PostgresErrorCodes.UniqueViolation, ConstraintName: "IX_nodes_WorkspaceId_Name" })
+        {
+            throw Error("node_alias_in_use", "The Node alias is already registered in this Workspace.");
+        }
         await transaction.CommitAsync(cancellationToken);
         return new(EnrollmentOutcome.Enrolled, command.IssuedCredential.NodeId,
             command.IssuedCredential.CredentialId, command.IssuedCredential.DeliveryPayload);
@@ -131,6 +140,67 @@ public sealed class PostgresFleetCoordinator(
             command.Authentication.NodeId.Value, command.IssuedCredential.CredentialId.Value));
         await db.SaveChangesAsync(cancellationToken);
         await transaction.CommitAsync(cancellationToken);
+    }
+
+    public async Task<NodeAliasResult> RenameNodeAliasAsync(
+        RenameNodeAlias command, CancellationToken cancellationToken = default)
+    {
+        await EnsureWorkspace(cancellationToken);
+        var alias = Required(command.Alias, 200, "node_alias");
+        await using var transaction = await db.Database.BeginTransactionAsync(IsolationLevel.ReadCommitted, cancellationToken);
+        var now = clock.GetUtcNow();
+        var nodeId = command.Authentication.NodeId.Value;
+        var credentialId = command.Authentication.CredentialId.Value;
+        var node = await db.Nodes.FromSqlInterpolated($"SELECT * FROM nodes WHERE \"Id\" = {nodeId} FOR UPDATE")
+            .SingleOrDefaultAsync(cancellationToken);
+        var credential = await db.Credentials.FromSqlInterpolated($"SELECT * FROM node_credentials WHERE \"Id\" = {credentialId} FOR UPDATE")
+            .SingleOrDefaultAsync(cancellationToken);
+        if (node is null || credential is null || node.WorkspaceId != options.WorkspaceId.Value || node.RevokedAt is not null ||
+            credential.NodeId != node.Id || credential.RevokedAt is not null || credential.NotBefore > now || credential.NotAfter <= now ||
+            credential.CertificateSha256 != command.Authentication.CertificateSha256)
+            throw Error("node_unauthorized", "Node credential is not active.");
+        await ChangeNodeAlias(node, alias, node.Id.ToString("D"), credential.Id, cancellationToken);
+        await transaction.CommitAsync(cancellationToken);
+        return new(command.Authentication.NodeId, alias);
+    }
+
+    public async Task<NodeAliasResult> RenameNodeAliasAsOperatorAsync(
+        OperatorRenameNodeAlias command, CancellationToken cancellationToken = default)
+    {
+        await EnsureWorkspace(cancellationToken);
+        var currentAlias = Required(command.CurrentAlias, 200, "node_alias");
+        var alias = Required(command.Alias, 200, "node_alias");
+        var actor = Required(command.RequestedBy, 200, "requested_by");
+        var workspaceId = options.WorkspaceId.Value;
+        await using var transaction = await db.Database.BeginTransactionAsync(IsolationLevel.ReadCommitted, cancellationToken);
+        var node = await db.Nodes.FromSqlInterpolated($"SELECT * FROM nodes WHERE \"WorkspaceId\" = {workspaceId} AND \"Name\" = {currentAlias} FOR UPDATE")
+            .SingleOrDefaultAsync(cancellationToken)
+            ?? throw Error("node_not_found", "The Node alias is not registered in this Workspace.");
+        if (node.RevokedAt is not null)
+            throw Error("node_revoked", "A revoked Node cannot change its alias.");
+        await ChangeNodeAlias(node, alias, actor, null, cancellationToken);
+        await transaction.CommitAsync(cancellationToken);
+        return new(new(node.Id), alias);
+    }
+
+    private async Task ChangeNodeAlias(NodeRow node, string alias, string actor, Guid? credentialId,
+        CancellationToken cancellationToken)
+    {
+        if (node.Name == alias) return;
+        if (await db.Nodes.AnyAsync(x => x.WorkspaceId == options.WorkspaceId.Value && x.Name == alias && x.Id != node.Id,
+                cancellationToken))
+            throw Error("node_alias_in_use", "The Node alias is already registered in this Workspace.");
+        node.Name = alias;
+        db.AuditEvents.Add(Audit("node_alias_changed", actor, clock.GetUtcNow(), node.Id, credentialId));
+        try
+        {
+            await db.SaveChangesAsync(cancellationToken);
+        }
+        catch (DbUpdateException exception) when (exception.InnerException is PostgresException
+        { SqlState: PostgresErrorCodes.UniqueViolation, ConstraintName: "IX_nodes_WorkspaceId_Name" })
+        {
+            throw Error("node_alias_in_use", "The Node alias is already registered in this Workspace.");
+        }
     }
 
     public async Task RevokeCredentialAsync(CredentialId credentialId, string revokedBy, CancellationToken cancellationToken = default)

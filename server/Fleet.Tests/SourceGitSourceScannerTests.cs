@@ -26,8 +26,11 @@ public sealed class SourceGitSourceScannerTests : IDisposable
         var scanner = Scanner(repository);
         var first = Assert.IsType<SourceScanResult.Snapshot>(await scanner.ScanAsync(null, CancellationToken.None));
         var target = Assert.Single(first.Value.Targets);
+        Assert.Equal(_nodeId, target.NodeId);
         Assert.Equal(first.Value.Bundles.Single(x => x.Digest == Assert.Single(target.Skills).BundleDigest).Digest, target.Skills[0].BundleDigest);
-        Assert.Contains(first.Value.Warnings, x => x.Code == "duplicate_skill_name");
+        var warning = Assert.Single(first.Value.Warnings, x => x.Code == "duplicate_skill_name");
+        Assert.Contains(_nodeId.Value.ToString(), warning.Message, StringComparison.Ordinal);
+        Assert.DoesNotContain("fixture", warning.Message, StringComparison.Ordinal);
         var bytes = first.Value.Bundles.Single(x => x.Digest == target.Skills[0].BundleDigest).Content;
         Assert.Contains(new byte[] { 0, 255, 12, 0 }, bytes.AsSpan());
         Assert.Contains((byte)1, bytes);
@@ -56,10 +59,10 @@ public sealed class SourceGitSourceScannerTests : IDisposable
     }
 
     [Fact]
-    public async Task Rejects_symlinks_missing_skill_manifest_and_unknown_nodes()
+    public async Task Rejects_symlinks_missing_skill_manifest_and_unknown_node_aliases()
     {
         var repository = CreateRepository();
-        Write(repository, "fleet.yml", Manifest(["stable"], Guid.NewGuid()));
+        Write(repository, "fleet.yml", Manifest(["stable"], "Fixture"));
         Write(repository, "groups/stable/review/content.txt", "content");
         File.CreateSymbolicLink(Path.Combine(repository, "groups/stable/review/link"), "content.txt");
         Run(repository, "add", "groups/stable/review/link");
@@ -68,6 +71,31 @@ public sealed class SourceGitSourceScannerTests : IDisposable
         var invalid = Assert.IsType<SourceScanResult.Invalid>(await Scanner(repository).ScanAsync(null, CancellationToken.None));
         Assert.Contains(invalid.Diagnostics, x => x.Code == "unsafe_entry_type");
         Assert.Contains(invalid.Diagnostics, x => x.Code == "unknown_node");
+    }
+
+    [Fact]
+    public async Task Rejects_legacy_node_ids()
+    {
+        var repository = CreateRepository();
+        Write(repository, "fleet.yml", Manifest([]).Replace("fixture:\n", $"fixture:\n    id: {_nodeId.Value}\n", StringComparison.Ordinal));
+        Commit(repository, "legacy node id");
+
+        var invalid = Assert.IsType<SourceScanResult.Invalid>(await Scanner(repository).ScanAsync(null, CancellationToken.None));
+
+        Assert.Equal("invalid_manifest", Assert.Single(invalid.Diagnostics).Code);
+    }
+
+    [Fact]
+    public async Task Rejects_duplicate_node_alias_keys()
+    {
+        var repository = CreateRepository();
+        var duplicate = Manifest([]) + "  fixture:\n    targets:\n      skills:\n        groups: []\n";
+        Write(repository, "fleet.yml", duplicate);
+        Commit(repository, "duplicate node alias");
+
+        var invalid = Assert.IsType<SourceScanResult.Invalid>(await Scanner(repository).ScanAsync(null, CancellationToken.None));
+
+        Assert.Equal("invalid_manifest", Assert.Single(invalid.Diagnostics).Code);
     }
 
     [Fact]
@@ -208,7 +236,7 @@ public sealed class SourceGitSourceScannerTests : IDisposable
         return path;
     }
 
-    private string Manifest(string[] groups, Guid? node = null)
+    private static string Manifest(string[] groups, string alias = "fixture")
     {
         var declaredGroups = groups.Length == 0 ? "groups: []" : $"groups:\n{string.Join('\n', groups.Select(x => $"  - {x}"))}";
         var subscribedGroups = groups.Length == 0 ? "groups: []" : $"groups:\n{string.Join('\n', groups.Select(x => $"          - {x}"))}";
@@ -220,8 +248,7 @@ public sealed class SourceGitSourceScannerTests : IDisposable
             base: home
             path: .agents/skills
         nodes:
-          fixture:
-            id: {{node ?? _nodeId.Value}}
+          {{alias}}:
             targets:
               skills:
                 {{subscribedGroups}}
@@ -257,6 +284,7 @@ public sealed class SourceGitSourceScannerTests : IDisposable
 
     private sealed class Nodes(NodeId id) : IEnrolledNodeSource
     {
-        public Task<IReadOnlySet<NodeId>> GetNodeIdsAsync(CancellationToken cancellationToken) => Task.FromResult<IReadOnlySet<NodeId>>(new HashSet<NodeId> { id });
+        public Task<IReadOnlyDictionary<string, NodeId>> GetNodeAliasesAsync(CancellationToken cancellationToken) =>
+            Task.FromResult<IReadOnlyDictionary<string, NodeId>>(new Dictionary<string, NodeId>(StringComparer.Ordinal) { ["fixture"] = id });
     }
 }
