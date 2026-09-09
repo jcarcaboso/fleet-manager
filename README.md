@@ -6,7 +6,7 @@ Node runs an Agent that polls the Server over mutual TLS and reconciles its own
 filesystem. Nodes need no inbound listener, SSH access, Git checkout, or source
 repository credentials.
 
-Version 0.4.0 contains three parts:
+Fleet Manager contains three parts:
 
 - The .NET Server scans the canonical Git source, validates desired state,
   publishes immutable assignments, serves the Operator dashboard and API, and
@@ -31,7 +31,7 @@ migrations with Docker Compose. The dashboard is part of the Server image, so
 it does not need a separate container. Follow the
 [homelab setup](deploy/homelab/README.md) for a first installation.
 
-The amd64 Server image is `skorcius/fleet-manager:0.4.0`.
+The amd64 Server image is `skorcius/fleet-manager:0.4.1`.
 For an existing installation, back up PostgreSQL and private configuration,
 replace `compose.yaml` with the current release copy, and preserve `.env`, `secrets/`,
 `operator.env`, `ssh/`, and Docker volumes. Set the image in `.env`, then run:
@@ -128,6 +128,21 @@ custom state paths, foreground operation, service commands, and recovery limits.
 
 ## Publish Skills from Git
 
+After pushing your Skill changes, click **Sync repository** in the dashboard to
+fetch and validate the latest commit and publish changed assignments. The same
+operation is already available in the Operator CLI:
+
+```sh
+fleet source rescan
+```
+
+Configure `FLEET_SERVER_URL` and `FLEET_OPERATOR_TOKEN` for the CLI, plus
+`--ca-cert /path/to/ca.pem` when using a private CA. Running Agents fetch the
+published assignments on their next poll, normally within 60 seconds. Offline
+Nodes catch up after reconnecting. The sync result confirms server publication,
+not that every Agent has finished applying it. Invalid source changes leave the
+current assignments active.
+
 The Server reads the `main` branch of one canonical repository. `fleet.yml`
 maps stable Node aliases to Skill groups and target paths. Skill content stays
 reviewable in Git; credentials and mutable Node metadata do not belong there.
@@ -183,6 +198,7 @@ The main design references are:
 - [Implementation status](docs/implementation-status.md)
 - [Operations hardening](docs/technical-design/operations-hardening.md)
 - [Engineering standards](docs/engineering-standards.md)
+- [Server 0.4.1 release notes](docs/releases/0.4.1.md)
 - [Fleet Manager 0.4.0 release notes](docs/releases/0.4.0.md)
 - [Fleet Manager 0.3.0 release notes](docs/releases/0.3.0.md)
 

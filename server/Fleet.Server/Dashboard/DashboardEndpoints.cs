@@ -4,6 +4,7 @@ using System.Security.Cryptography.X509Certificates;
 using System.Text;
 using System.Text.Json;
 using Fleet.Core.Coordination;
+using Fleet.Server.Hosting;
 using Fleet.Server.Security;
 using Microsoft.AspNetCore.Antiforgery;
 using Microsoft.AspNetCore.Authentication;
@@ -123,6 +124,9 @@ public static class DashboardEndpoints
             return Results.Ok(new { actor });
         }).RequireRateLimiting("enrollment");
         var authenticated = api.MapGroup("").RequireAuthorization(Scheme);
+        authenticated.MapPost("/source/rescan", async (SourcePollingService source, HttpContext http, CancellationToken ct) =>
+            Results.Ok(await source.ScanNowAsync(Actor(http), ct)))
+            .WithRequestTimeout(TimeSpan.FromSeconds(app.Configuration.GetValue("Source:ScanTimeoutSeconds", 180) + 30));
         authenticated.MapGet("/session", (HttpContext http) => Results.Ok(new { actor = Actor(http) }));
         authenticated.MapPost("/logout", async (HttpContext http) =>
         {

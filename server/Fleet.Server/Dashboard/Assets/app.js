@@ -30,6 +30,7 @@ function clearLink() { $('#enrollment-link').value = ''; $('#link-result').hidde
 function showLogin() {
   $('#login-panel').hidden = false; $('#workspace').hidden = true; $('#logout').hidden = true;
   $('#actor').textContent = ''; $('#nodes').replaceChildren(); clearLink();
+  $('#source-result').textContent = '';
 }
 async function showWorkspace(actor) {
   $('#login-panel').hidden = true; $('#workspace').hidden = false; $('#logout').hidden = false;
@@ -102,6 +103,26 @@ $('#revoke-link').addEventListener('click', async () => {
   if (!enrollmentId) return;
   try { await api('/enrollment-links/' + encodeURIComponent(enrollmentId) + '/revoke', {}); clearLink(); message('Enrollment link revoked.'); }
   catch (error) { message(error.message); }
+});
+$('#sync-source').addEventListener('click', async () => {
+  const button = $('#sync-source');
+  if (button.disabled) return;
+  button.disabled = true;
+  $('#source-result').textContent = 'Fetching and validating repository changes…';
+  try {
+    const result = await api('/source/rescan', {});
+    const outcomes = {
+      accepted: `Repository synced. Published ${result.changedAssignmentCount} changed assignment(s). Running Agents will fetch them on their next poll.`,
+      unchanged: 'Repository is up to date. No new assignments were needed. Agents continue syncing their current assignments.',
+      disabled: 'No source repository is configured on this server.',
+      already_running: 'A repository sync is already running. Try again shortly to check for changes.',
+      invalid: 'Repository sync was rejected. Check source diagnostics with the Operator API. Current assignments remain active.',
+      failed: 'Repository sync failed. Check the server source status and Git access. Current assignments remain active.'
+    };
+    $('#source-result').textContent = outcomes[result.outcome] || 'The server returned an unknown sync result. Check source status before retrying.';
+  } catch (error) {
+    $('#source-result').textContent = error.message + ' Sync completion could not be confirmed.';
+  } finally { button.disabled = false; }
 });
 $('#refresh').addEventListener('click', () => nodes(false).catch(error => message(error.message)));
 $('#more').addEventListener('click', () => nodes(true).catch(error => message(error.message)));

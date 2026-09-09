@@ -59,6 +59,31 @@ public sealed class HostingTests : IAsyncLifetime
     }
 
     [Fact]
+    public async Task Dashboard_source_sync_requires_session_origin_and_csrf_and_matches_operator_rescan()
+    {
+        using var browser = _factory.CreateClient(new() { BaseAddress = new Uri("https://localhost") });
+        browser.DefaultRequestHeaders.Add("Origin", "https://localhost");
+        await DashboardCsrf(browser);
+        Assert.Equal(HttpStatusCode.Unauthorized, (await browser.PostAsJsonAsync("/dashboard/api/source/rescan", new { })).StatusCode);
+        (await browser.PostAsJsonAsync("/dashboard/api/login", new { token = Token })).EnsureSuccessStatusCode();
+        browser.DefaultRequestHeaders.Remove("X-Fleet-CSRF");
+        Assert.Equal(HttpStatusCode.BadRequest, (await browser.PostAsJsonAsync("/dashboard/api/source/rescan", new { })).StatusCode);
+        await DashboardCsrf(browser);
+        browser.DefaultRequestHeaders.Remove("Origin");
+        browser.DefaultRequestHeaders.Add("Origin", "https://attacker.invalid");
+        Assert.Equal(HttpStatusCode.BadRequest, (await browser.PostAsJsonAsync("/dashboard/api/source/rescan", new { })).StatusCode);
+        browser.DefaultRequestHeaders.Remove("Origin");
+        browser.DefaultRequestHeaders.Add("Origin", "https://localhost");
+        var response = await browser.PostAsJsonAsync("/dashboard/api/source/rescan", new { });
+        response.EnsureSuccessStatusCode();
+        var result = await response.Content.ReadFromJsonAsync<JsonElement>();
+        Assert.Equal("disabled", result.GetProperty("outcome").GetString());
+        var operatorResponse = await _operator.PostAsync("/operator/v1/source/rescan", null);
+        operatorResponse.EnsureSuccessStatusCode();
+        Assert.Equal(result.ToString(), (await operatorResponse.Content.ReadFromJsonAsync<JsonElement>()).ToString());
+    }
+
+    [Fact]
     public async Task Dashboard_sessions_require_csrf_and_cannot_authenticate_as_operators_or_nodes()
     {
         using var browser = _factory.CreateClient(new() { BaseAddress = new Uri("https://localhost") });
