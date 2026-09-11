@@ -154,7 +154,9 @@ Put Skills under `skills/<group>/<skill>/`. Fleet discovers both levels from
 the directories, so `fleet.yml` has no top-level group catalog. For each Node,
 omit `targets.skills.groups` or set it to `[]` to sync every discovered group.
 A nonempty array selects those groups and defines their duplicate-Skill
-precedence.
+precedence. A source revision must contain both `skills/` and `agents/`. Since
+Git does not track empty directories, each root must contain at least one valid
+Skill or agent instruction source.
 
 Repositories using the earlier layout must move `groups/<group>/<skill>/` to
 `skills/<group>/<skill>/` and remove the top-level `groups` field from

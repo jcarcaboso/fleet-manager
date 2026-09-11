@@ -44,6 +44,9 @@ agents/<source-name>/AGENTS.md
 The Server discovers groups from the immediate directories below `skills/`.
 Every immediate child directory of a discovered group is a Skill. A group may
 contain one Skill when an Operator needs a narrowly assigned collection.
+Every accepted source revision contains at least one valid Skill below
+`skills/` and one valid agent instruction source below `agents/`. Git does not
+track empty directories, so an empty root does not satisfy this requirement.
 The legacy `groups/` source directory and top-level `groups` manifest field are
 invalid. Move the directories and remove the field in one source commit.
 

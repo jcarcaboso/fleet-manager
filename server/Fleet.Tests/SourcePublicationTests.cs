@@ -54,7 +54,7 @@ public sealed class SourcePublicationTests : IAsyncLifetime
         var authentication = new NodeAuthentication(nodeId, credentialId, certificateDigest);
         var assignment = Assert.IsType<AgentAssignment>((await coordinator.PollAsync(authentication, DateTimeOffset.UtcNow)).Assignment);
         var skill = Assert.Single(assignment.Skills);
-        var sourceBundle = Assert.Single(scan.Value.Bundles);
+        var sourceBundle = scan.Value.Bundles.Single(x => x.Digest == skill.BundleDigest);
         Assert.Equal(PublicationOutcome.Accepted, publication.Outcome);
         Assert.Equal("review", skill.Name);
         Assert.Equal(sourceBundle.Digest, skill.BundleDigest);
@@ -143,6 +143,7 @@ public sealed class SourcePublicationTests : IAsyncLifetime
                       - stable
             """);
         Write(repository, "skills/stable/review/SKILL.md", "# Review\n\nReview the requested change.\n");
+        Write(repository, "agents/personal/AGENTS.md", "# Available agent instructions\n");
         Git(repository, "add", ".");
         Git(repository, "commit", "-m", "publish review skill");
         return repository;

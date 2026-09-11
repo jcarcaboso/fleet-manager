@@ -38,6 +38,12 @@ def git(*arguments):
 def publish(alias, text, empty=False):
     (source / 'fleet.yml').write_text('schema: fleet/v1\ntargets:\n  skills:\n    base: home\n    path: .agents/skills\nnodes:\n  '
         + alias + ':\n    targets:\n      skills:\n        groups: []\n')
+    agent_source = source / 'agents/available'
+    agent_source.mkdir(parents=True, exist_ok=True)
+    (agent_source / 'AGENTS.md').write_text('Available agent instructions\n')
+    anchor = source / 'skills/baseline/smoke-anchor'
+    anchor.mkdir(parents=True, exist_ok=True)
+    (anchor / 'SKILL.md').write_text('Keeps the required skills directory present during removal tests.\n')
     skill = source / 'skills/stable/review'
     if empty:
         shutil.rmtree(skill)

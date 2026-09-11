@@ -108,6 +108,8 @@ public sealed class GitSourceScanner(
         IReadOnlyList<TreeEntry> entries, DiagnosticBag diagnostics, CancellationToken cancellationToken)
     {
         var agentEntries = entries.Where(x => x.Path.StartsWith("agents/", StringComparison.Ordinal)).ToArray();
+        if (agentEntries.Length == 0)
+            diagnostics.Add("missing_agents_directory", "The repository must contain at least one tracked file below agents/.", "agents");
         foreach (var rootFile in agentEntries.Where(x => !x.Path["agents/".Length..].Contains('/')))
             diagnostics.Add("unexpected_agent_file", "Agent instruction files must be stored as agents/<source>/AGENTS.md.", rootFile.Path);
 
@@ -184,6 +186,8 @@ public sealed class GitSourceScanner(
         foreach (var legacy in entries.Where(x => x.Path.StartsWith("groups/", StringComparison.Ordinal)))
             diagnostics.Add("legacy_skill_layout", "Skill groups must be stored below skills/.", legacy.Path);
         var skillEntries = entries.Where(x => x.Path.StartsWith("skills/", StringComparison.Ordinal)).ToArray();
+        if (skillEntries.Length == 0)
+            diagnostics.Add("missing_skills_directory", "The repository must contain at least one tracked file below skills/.", "skills");
         foreach (var shallow in skillEntries.Where(x => x.Path["skills/".Length..].Split('/').Length < 3))
             diagnostics.Add("unexpected_skill_file", "Skill files must be stored as skills/<group>/<skill>/<path>.", shallow.Path);
         var groups = skillEntries
