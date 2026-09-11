@@ -1,26 +1,26 @@
 class Fleet < Formula
   desc "Operator CLI for Fleet Manager"
   homepage "https://github.com/jcarcaboso/fleet-manager"
-  version "0.5.0"
+  version "0.5.1"
   license "MIT"
 
   on_macos do
     depends_on macos: :ventura
 
     if Hardware::CPU.arm?
-      url "https://github.com/jcarcaboso/fleet-manager/releases/download/v0.5.0/fleet-macos-arm64.tar.gz"
-      sha256 "6b9b2ac75b86d622d9d619f858b96719ea2317f9875119afd2111be439a294cc"
+      url "https://github.com/jcarcaboso/fleet-manager/releases/download/v0.5.1/fleet-macos-arm64.tar.gz"
+      sha256 "444707d773fc16dd94cfdb5a47dd726c47699a693bcabbdfba3acdb4a2b76e19"
     else
-      url "https://github.com/jcarcaboso/fleet-manager/releases/download/v0.5.0/fleet-macos-amd64.tar.gz"
-      sha256 "6591953ed9259786a0688e7f46ae81b81b9806a7adb84797119e049a9e441793"
+      url "https://github.com/jcarcaboso/fleet-manager/releases/download/v0.5.1/fleet-macos-amd64.tar.gz"
+      sha256 "46a9dfd1e5c00c4d579a82e5abbc301857e386eb9afe363b5ccfa527bcba1cbf"
     end
   end
 
   on_linux do
     depends_on arch: :x86_64
 
-    url "https://github.com/jcarcaboso/fleet-manager/releases/download/v0.5.0/fleet-linux-amd64.tar.gz"
-    sha256 "104a8608ab4fffc2fe63b1c4d4c3e1de966d71fd7e683a4f929d02e4d098e3b1"
+    url "https://github.com/jcarcaboso/fleet-manager/releases/download/v0.5.1/fleet-linux-amd64.tar.gz"
+    sha256 "248bb9c28fbde3a523be10bcb085ec73acc29ff47cc64c4fc0140946735b7925"
   end
 
   def install
@@ -28,7 +28,7 @@ class Fleet < Formula
   end
 
   test do
-    assert_match "fleet 0.5.0", shell_output("#{bin}/fleet --version")
+    assert_match "fleet 0.5.1", shell_output("#{bin}/fleet --version")
     system "#{bin}/fleet", "--help"
   end
 end
