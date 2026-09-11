@@ -31,6 +31,21 @@ configuration. Revocation does not release the alias for another Node.
 The user-level process that represents one Node and owns local reconciliation.
 _Avoid_: Client, worker, CLI
 
+**AI client**:
+A supported coding assistant that reads a Node-local instruction file, such as
+Codex, OpenCode, or Claude Code.
+_Avoid_: Agent
+
+**Agent source**:
+A named `agents/<source>/AGENTS.md` file discovered from the canonical source
+repository and selected by a Node's desired state.
+_Avoid_: AI client, Agent
+
+**Managed file**:
+A single Node-local file whose content and ownership Fleet reconciles. One
+Agent source may resolve to several AI-client-specific Managed files.
+_Avoid_: Skill, configuration directory
+
 **Operator**:
 An authorized person or automation identity that administers the Workspace.
 _Avoid_: Agent, Node

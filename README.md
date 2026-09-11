@@ -149,6 +149,32 @@ reviewable in Git; credentials and mutable Node metadata do not belong there.
 The [desired-state design](docs/architecture/desired-state.md) defines the
 manifest and repository layout.
 
+Put each named agent instruction source in `agents/<source>/AGENTS.md`, then map
+sources to AI clients under a Node's `targets.agents`. Fleet discovers source
+directories directly, so `fleet.yml` has no separate source catalog. Omit
+`clients` to select every supported client:
+
+```yaml
+nodes:
+  node-1:
+    targets:
+      skills:
+        groups: []
+      agents:
+        - source: personal
+          clients:
+            - codex
+            - opencode
+```
+
+The Server writes the selected content to `.codex/AGENTS.md`,
+`.config/opencode/AGENTS.md`, or `.claude/CLAUDE.md` relative to the Node user's
+home. Omit `targets.agents` to leave agent files unmanaged. Use `agents: []` to
+remove files already owned by Fleet.
+
+Upgrade `fleet-agent` on managed Nodes before committing instruction sources;
+older Agents do not understand Managed-file Assignments.
+
 For a private source, use SSH with a dedicated read-only deploy key, a verified
 `known_hosts`, and an explicit SSH configuration under the homelab deployment's
 `ssh/` directory. Fleet rejects credentials embedded in HTTPS URLs. See the

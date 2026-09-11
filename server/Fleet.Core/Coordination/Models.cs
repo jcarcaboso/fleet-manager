@@ -1,3 +1,5 @@
+using System.Text.Json.Serialization;
+
 namespace Fleet.Core.Coordination;
 
 public sealed record PageRequest(int Limit, string? Cursor = null)
@@ -13,11 +15,14 @@ public sealed record SnapshotBundle(string Digest, string Schema, long Size, byt
 
 public sealed record SnapshotSkill(string Name, string BundleDigest);
 
+public sealed record SnapshotFile(string Name, string? BundleDigest);
+
 public sealed record SnapshotTarget(
     NodeId NodeId,
     string TargetName,
     TargetDescriptor Descriptor,
-    IReadOnlyList<SnapshotSkill> Skills);
+    IReadOnlyList<SnapshotSkill> Skills,
+    SnapshotFile? File = null);
 
 public sealed record SourceWarning(
     string Code,
@@ -116,6 +121,8 @@ public enum ConvergenceState
 
 public sealed record AssignmentSkill(string Name, string BundleDigest, long Size, string Schema);
 
+public sealed record AssignmentFile(string Name, string? BundleDigest, long? Size, string? Schema);
+
 public sealed record AgentAssignment(
     AssignmentId AssignmentId,
     AttemptId AttemptId,
@@ -123,7 +130,8 @@ public sealed record AgentAssignment(
     DesiredRevisionId DesiredRevisionId,
     string TargetName,
     TargetDescriptor Target,
-    IReadOnlyList<AssignmentSkill> Skills);
+    IReadOnlyList<AssignmentSkill> Skills,
+    [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] AssignmentFile? File = null);
 
 public sealed record PollResult(AgentAssignment? Assignment);
 

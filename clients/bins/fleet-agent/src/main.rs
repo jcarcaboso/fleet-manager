@@ -10,7 +10,7 @@ use protocol::{Api, Assignment, ConvergenceState};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::{
-    collections::HashSet,
+    collections::{BTreeMap, HashSet},
     fs,
     io::{self, BufRead, Write},
     path::{Path, PathBuf},
@@ -52,6 +52,7 @@ enum Command {
     },
     /// Poll and reconcile continuously, or once for a deployment check.
     Run {
+        /// Reconcile all currently available Assignments, then exit.
         #[arg(long)]
         once: bool,
     },
@@ -77,9 +78,28 @@ struct PendingReport {
 #[derive(Default, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct RunState {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     active: Option<Assignment>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pending_assignment: Option<Assignment>,
+    #[serde(default)]
+    targets: BTreeMap<String, TargetRunState>,
+    #[serde(default)]
     pending_report: Option<PendingReport>,
+}
+
+#[derive(Default, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct TargetRunState {
+    #[serde(default)]
+    active: Option<Assignment>,
+    #[serde(default)]
+    pending_assignment: Option<Assignment>,
+}
+
+struct CycleOutcome {
+    next_poll_seconds: u64,
+    progressed: bool,
 }
 
 const MAX_ENROLLMENT_LINK_BYTES: usize = 16 * 1024;
@@ -196,13 +216,26 @@ async fn main() -> Result<()> {
             let identity = store
                 .load_identity()?
                 .context("Agent enrollment is incomplete")?;
-            let run =
+            let mut run =
                 state::read_json::<RunState>(&directory.join("run.json"))?.unwrap_or_default();
+            migrate_run_state(&mut run);
+            let active_assignments = run
+                .targets
+                .iter()
+                .filter_map(|(name, target)| {
+                    target
+                        .active
+                        .as_ref()
+                        .map(|assignment| (name.clone(), assignment.assignment_id))
+                })
+                .collect::<BTreeMap<_, _>>();
+            let active_assignment = active_assignments.get("skills").copied();
             println!(
                 "{}",
                 serde_json::json!({"nodeId":identity.node_id,"workspaceId":identity.workspace_id,
                 "alias":config.node_alias,"expiresAt":identity.expires_at,"stateDirectory":directory,
-                "pendingReport":run.pending_report.is_some(),"activeAssignment":run.active.map(|a|a.assignment_id)})
+                "pendingReport":run.pending_report.is_some(),"activeAssignment":active_assignment,
+                "activeAssignments":active_assignments})
             );
         }
         Command::Alias { new_alias } => {
@@ -238,22 +271,28 @@ async fn main() -> Result<()> {
                     &reconciler,
                 )
                 .await;
-                let delay = match result {
-                    Ok(delay) => delay,
+                let outcome = match result {
+                    Ok(outcome) => outcome,
                     Err(error) if once => return Err(error),
                     Err(error) => {
                         let rejected = error
                             .downcast_ref::<protocol::ProtocolError>()
                             .is_some_and(|e| e.is_auth_failure());
                         eprintln!("Agent cycle failed: {error}");
-                        if rejected { 300 } else { 30 }
+                        CycleOutcome {
+                            next_poll_seconds: if rejected { 300 } else { 30 },
+                            progressed: false,
+                        }
                     }
                 };
+                if outcome.progressed {
+                    continue;
+                }
                 if once {
                     break;
                 }
                 tokio::select! {
-                    _ = tokio::time::sleep(Duration::from_secs(delay.clamp(5, 3600))) => {},
+                    _ = tokio::time::sleep(Duration::from_secs(outcome.next_poll_seconds.clamp(5, 3600))) => {},
                     result = tokio::signal::ctrl_c() => { result?; break; }
                 }
             }
@@ -418,13 +457,31 @@ fn api(config: &state::Config, identity: &StoredIdentity) -> Result<Api> {
 }
 
 fn target(assignment: &Assignment) -> Result<fleet_reconcile::TargetDescriptor> {
-    if assignment.target_name != "skills" || assignment.target.base != "home" {
+    let is_skills = assignment.target_name == "skills" && assignment.file.is_none();
+    let is_file = assignment.target_name.starts_with("agent-file/")
+        && assignment.skills.is_empty()
+        && assignment.file.is_some();
+    if (!is_skills && !is_file) || assignment.target.base != "home" {
         bail!("unsupported Target descriptor");
     }
     Ok(fleet_reconcile::TargetDescriptor {
         base: fleet_reconcile::TargetBase::Home,
         path: PathBuf::from(&assignment.target.path),
     })
+}
+
+fn migrate_run_state(run: &mut RunState) {
+    if let Some(assignment) = run.active.take() {
+        let target_name = assignment.target_name.clone();
+        run.targets.entry(target_name).or_default().active = Some(assignment);
+    }
+    if let Some(assignment) = run.pending_assignment.take() {
+        let target_name = assignment.target_name.clone();
+        run.targets
+            .entry(target_name)
+            .or_default()
+            .pending_assignment = Some(assignment);
+    }
 }
 
 fn cache_path(cache: &Path, digest: &str) -> Result<PathBuf> {
@@ -443,9 +500,20 @@ fn cache_path(cache: &Path, digest: &str) -> Result<PathBuf> {
 
 fn clean_cache(cache: &Path, run: &RunState) -> Result<()> {
     let mut keep = HashSet::new();
-    for assignment in run.active.iter().chain(run.pending_assignment.iter()) {
+    for assignment in run
+        .targets
+        .values()
+        .flat_map(|target| target.active.iter().chain(target.pending_assignment.iter()))
+    {
         for skill in &assignment.skills {
             keep.insert(cache_path(cache, &skill.bundle_digest)?);
+        }
+        if let Some(digest) = assignment
+            .file
+            .as_ref()
+            .and_then(|file| file.bundle_digest.as_deref())
+        {
+            keep.insert(cache_path(cache, digest)?);
         }
     }
     for entry in fs::read_dir(cache)? {
@@ -491,11 +559,54 @@ fn local_assignment(assignment: &Assignment, cache: &Path) -> Result<fleet_recon
     })
 }
 
+fn local_file_assignment(
+    assignment: &Assignment,
+    cache: &Path,
+) -> Result<fleet_reconcile::FileAssignment> {
+    let file = assignment
+        .file
+        .as_ref()
+        .context("managed-file Target has no file")?;
+    let content = match &file.bundle_digest {
+        Some(digest) => state::read_bytes(&cache_path(cache, digest)?, 16 * 1024 * 1024)?,
+        None => Vec::new(),
+    };
+    Ok(fleet_reconcile::FileAssignment {
+        assignment_id: assignment.assignment_id.to_string(),
+        desired_revision_id: assignment.desired_revision_id.to_string(),
+        file: fleet_reconcile::DesiredFile {
+            name: file.name.clone(),
+            digest: file.bundle_digest.clone(),
+            size: file
+                .size
+                .map(|size| u64::try_from(size).context("invalid managed file size"))
+                .transpose()?,
+            schema: file.schema.clone(),
+            content,
+        },
+    })
+}
+
 fn verify_bundle(skill: &protocol::AssignmentSkill, bytes: &[u8]) -> bool {
     skill.schema == "fleet.bundle/v1"
         && skill.size >= 0
         && bytes.len() as i64 == skill.size
         && format!("sha256:{:x}", Sha256::digest(bytes)) == skill.bundle_digest
+}
+
+fn verify_file(file: &protocol::AssignmentFile, bytes: &[u8]) -> bool {
+    let mut digest = Sha256::new();
+    digest.update(b"fleet.file/v1\0");
+    digest.update(bytes);
+    let digest = digest.finalize();
+    file.schema.as_deref() == Some("fleet.file/v1")
+        && file
+            .size
+            .is_some_and(|size| size >= 0 && bytes.len() as i64 == size)
+        && file
+            .bundle_digest
+            .as_ref()
+            .is_some_and(|expected| format!("sha256:{digest:x}") == *expected)
 }
 
 async fn ensure_bundles(client: &Api, assignment: &Assignment, cache: &Path) -> Result<()> {
@@ -541,6 +652,44 @@ async fn ensure_bundles(client: &Api, assignment: &Assignment, cache: &Path) -> 
             state::write_bytes(&destination, &bundle.bytes)?;
         }
     }
+    if let Some(file) = assignment.file.as_ref()
+        && let Some(digest) = file.bundle_digest.as_deref()
+    {
+        let size = file.size.context("managed file size is missing")?;
+        if !(0..=16 * 1024 * 1024).contains(&size)
+            || file.schema.as_deref() != Some("fleet.file/v1")
+        {
+            bail!("unsupported managed file size or schema");
+        }
+        let destination = cache_path(cache, digest)?;
+        let valid = match fs::symlink_metadata(&destination) {
+            Ok(metadata) => {
+                if !metadata.is_file() || metadata.file_type().is_symlink() {
+                    bail!("unsafe Bundle cache entry");
+                }
+                if metadata.len() <= 16 * 1024 * 1024
+                    && verify_file(file, &state::read_bytes(&destination, 16 * 1024 * 1024)?)
+                {
+                    true
+                } else {
+                    fs::remove_file(&destination)?;
+                    false
+                }
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => false,
+            Err(error) => return Err(error.into()),
+        };
+        if !valid {
+            let downloaded = client.file(file).await?;
+            if downloaded.digest != digest
+                || downloaded.schema != "fleet.file/v1"
+                || !verify_file(file, &downloaded.bytes)
+            {
+                bail!("downloaded managed file failed integrity validation");
+            }
+            state::write_bytes(&destination, &downloaded.bytes)?;
+        }
+    }
     Ok(())
 }
 
@@ -565,6 +714,45 @@ async fn deliver_report(client: &Api, run: &mut RunState, path: &Path) -> Result
     Ok(())
 }
 
+fn recover_assignment(
+    reconciler: &fleet_reconcile::Reconciler,
+    assignment: &Assignment,
+) -> Result<()> {
+    let descriptor = target(assignment)?;
+    if let Some(file) = &assignment.file {
+        reconciler.recover_file(&descriptor, &file.name)?;
+    } else {
+        reconciler.recover(&descriptor)?;
+    }
+    Ok(())
+}
+
+fn assignment_within_budget(assignment: &Assignment) -> bool {
+    if assignment.skills.len() > 10_000 {
+        return false;
+    }
+    let skill_bytes = assignment.skills.iter().try_fold(0u64, |sum, skill| {
+        u64::try_from(skill.size)
+            .ok()
+            .and_then(|size| sum.checked_add(size))
+    });
+    if skill_bytes.is_none_or(|sum| sum > 256 * 1024 * 1024) {
+        return false;
+    }
+    match &assignment.file {
+        None => assignment.target_name == "skills",
+        Some(file) if assignment.target_name.starts_with("agent-file/") => matches!(
+            (
+                file.bundle_digest.as_ref(),
+                file.size,
+                file.schema.as_deref(),
+            ),
+            (None, None, None) | (Some(_), Some(0..=16_777_216), Some("fleet.file/v1"))
+        ),
+        Some(_) => false,
+    }
+}
+
 async fn cycle(
     config: &state::Config,
     store: &CredentialStore,
@@ -573,9 +761,14 @@ async fn cycle(
     path: &Path,
     cache: &Path,
     reconciler: &fleet_reconcile::Reconciler,
-) -> Result<u64> {
-    for assignment in run.active.iter().chain(run.pending_assignment.iter()) {
-        reconciler.recover(&target(assignment)?)?;
+) -> Result<CycleOutcome> {
+    migrate_run_state(run);
+    for assignment in run
+        .targets
+        .values()
+        .flat_map(|target| target.active.iter().chain(target.pending_assignment.iter()))
+    {
+        recover_assignment(reconciler, assignment)?;
     }
     let expires = OffsetDateTime::parse(&identity.expires_at, &Rfc3339)
         .context("invalid credential expiration")?;
@@ -600,35 +793,37 @@ async fn cycle(
     let delay = poll.next_poll_seconds;
     if let Some(assignment) = poll.assignment {
         target(&assignment)?;
-        if let Some(active) = &run.active
+        if !assignment_within_budget(&assignment) {
+            bail!("Assignment exceeds the supported size budget");
+        }
+        let target_state = run
+            .targets
+            .entry(assignment.target_name.clone())
+            .or_default();
+        if let Some(active) = &target_state.active
             && active.target.path != assignment.target.path
         {
             bail!("Target path cannot change after installation");
         }
-        if assignment.skills.len() > 10_000
-            || assignment
-                .skills
-                .iter()
-                .try_fold(0u64, |sum, s| {
-                    u64::try_from(s.size)
-                        .ok()
-                        .and_then(|size| sum.checked_add(size))
-                })
-                .is_none_or(|sum| sum > 256 * 1024 * 1024)
-        {
-            bail!("Assignment exceeds the supported size budget");
-        }
-        run.pending_assignment = Some(assignment);
+        target_state.pending_assignment = Some(assignment);
         state::write_json(path, run)?;
     }
     clean_cache(cache, run)?;
-    if let Some(assignment) = run.pending_assignment.clone() {
+    let pending = run
+        .targets
+        .values()
+        .find_map(|target| target.pending_assignment.clone());
+    let progressed = pending.is_some();
+    if let Some(assignment) = pending {
         ensure_bundles(&client, &assignment, cache).await?;
         let applying = client
             .report(assignment.attempt_id, ConvergenceState::Applying, None)
             .await?;
         if matches!(applying.outcome, protocol::ReportOutcome::Stale) {
-            run.pending_assignment = None;
+            run.targets
+                .entry(assignment.target_name.clone())
+                .or_default()
+                .pending_assignment = None;
             run.pending_report = Some(PendingReport {
                 attempt_id: assignment.attempt_id,
                 succeeded: false,
@@ -636,16 +831,29 @@ async fn cycle(
             });
             state::write_json(path, run)?;
             deliver_report(&client, run, path).await?;
-            return Ok(5);
+            return Ok(CycleOutcome {
+                next_poll_seconds: 5,
+                progressed: true,
+            });
         }
         if applying.state != ConvergenceState::Applying {
             bail!("Server did not acknowledge applying state");
         }
-        let outcome = reconciler.reconcile(
-            &target(&assignment)?,
-            &local_assignment(&assignment, cache)?,
-        );
-        run.pending_assignment = None;
+        let descriptor = target(&assignment)?;
+        let outcome = if assignment.file.is_some() {
+            reconciler
+                .reconcile_file(&descriptor, &local_file_assignment(&assignment, cache)?)
+                .map(|_| ())
+        } else {
+            reconciler
+                .reconcile(&descriptor, &local_assignment(&assignment, cache)?)
+                .map(|_| ())
+        };
+        let target_state = run
+            .targets
+            .entry(assignment.target_name.clone())
+            .or_default();
+        target_state.pending_assignment = None;
         run.pending_report = Some(PendingReport {
             attempt_id: assignment.attempt_id,
             succeeded: outcome.is_ok(),
@@ -655,18 +863,34 @@ async fn cycle(
                 .map(|error| error.code_str().to_owned()),
         });
         if outcome.is_ok() {
-            run.active = Some(assignment);
+            target_state.active = Some(assignment);
         }
         state::write_json(path, run)?;
         deliver_report(&client, run, path).await?;
         clean_cache(cache, run)?;
         outcome?;
         println!("{{\"outcome\":\"succeeded\"}}");
-    } else if let Some(active) = &run.active {
-        ensure_bundles(&client, active, cache).await?;
-        reconciler.reconcile(&target(active)?, &local_assignment(active, cache)?)?;
+    } else {
+        let active = run
+            .targets
+            .values()
+            .filter_map(|target| target.active.clone())
+            .collect::<Vec<_>>();
+        for assignment in active {
+            ensure_bundles(&client, &assignment, cache).await?;
+            let descriptor = target(&assignment)?;
+            if assignment.file.is_some() {
+                reconciler
+                    .reconcile_file(&descriptor, &local_file_assignment(&assignment, cache)?)?;
+            } else {
+                reconciler.reconcile(&descriptor, &local_assignment(&assignment, cache)?)?;
+            }
+        }
     }
-    Ok(delay)
+    Ok(CycleOutcome {
+        next_poll_seconds: delay,
+        progressed,
+    })
 }
 
 #[cfg(test)]

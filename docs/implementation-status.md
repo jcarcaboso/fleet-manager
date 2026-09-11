@@ -14,8 +14,9 @@ Implemented:
   consumption, Node authentication/revocation, source publication, Agent poll,
   Bundle lookup, and idempotent Attempt reporting;
 - source adapters for bounded Git inspection, manifest parsing, duplicate
-  warnings, complete nested Skill Bundle encoding, and startup/periodic source
-  scanning;
+  warnings, complete nested Skill Bundle encoding, discovered agent sources,
+  per-Node Managed-file resolution for Codex, OpenCode, and Claude Code, and
+  startup/periodic source scanning;
 - separate Operator bearer-token and Node mTLS authentication policies, with
   route groups for `/operator/v1` and `/agent/v1`;
 - Rust 2024 `fleet` CLI workspace with bearer-token operator requests;
@@ -47,7 +48,8 @@ IDs, certificates, and existing Assignments remain stable.
 
 The first Node Agent implements P-256 enrollment, real mTLS, certificate renewal,
 polling, bounded Bundle downloads, receipt-based ownership, journaled filesystem
-activation and rollback, cached drift repair, and durable terminal report retry.
+activation and rollback, cached drift repair, multi-Target run state, Managed-file
+reconciliation, and durable terminal report retry.
 The [Agent setup guide](../deploy/agent/README.md) covers the Linux amd64 binary
 and user service. It works with the deployed Server 0.2.0 API.
 

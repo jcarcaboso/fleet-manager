@@ -1,4 +1,5 @@
 using System.Text;
+using System.Security.Cryptography;
 using Fleet.Core.Coordination;
 using YamlDotNet.Core;
 using YamlDotNet.Core.Events;
@@ -18,6 +19,13 @@ public sealed class GitSourceScanner(
     private readonly GitProcess _git = new();
     private static readonly UTF8Encoding StrictUtf8 = new(false, true);
     private static readonly StringComparer PortableComparer = StringComparer.OrdinalIgnoreCase;
+    private static readonly IReadOnlyDictionary<string, AgentClient> AgentClients =
+        new Dictionary<string, AgentClient>(StringComparer.Ordinal)
+        {
+            ["codex"] = new(".codex", "AGENTS.md"),
+            ["opencode"] = new(".config/opencode", "AGENTS.md"),
+            ["claude"] = new(".claude", "CLAUDE.md"),
+        };
 
     public async Task<SourceScanResult> ScanAsync(string? lastObservedRevision, CancellationToken cancellationToken)
     {
@@ -70,7 +78,8 @@ public sealed class GitSourceScanner(
 
             var nodeAliases = (await nodes.GetNodeAliasesAsync(scanToken))
                 .ToDictionary(pair => pair.Key, pair => pair.Value, StringComparer.Ordinal);
-            ValidateManifest(manifest, nodeAliases, diagnostics);
+            var agentSources = await BuildAgentSourcesAsync(entries, diagnostics, scanToken);
+            ValidateManifest(manifest, nodeAliases, agentSources, diagnostics);
             if (diagnostics.Any)
                 return new SourceScanResult.Invalid(revision, diagnostics.Items);
             var skillsByGroup = await BuildSkillsAsync(entries, manifest.Groups ?? [], diagnostics, scanToken);
@@ -78,11 +87,13 @@ public sealed class GitSourceScanner(
                 return new SourceScanResult.Invalid(revision, diagnostics.Items);
 
             var bundles = skillsByGroup.Values.SelectMany(x => x.Values).Select(x => x.Bundle)
+                .Concat(agentSources.Values)
                 .DistinctBy(x => x.Digest, StringComparer.Ordinal).OrderBy(x => x.Digest, StringComparer.Ordinal).ToArray();
             var warnings = BuildWarnings(manifest, nodeAliases, skillsByGroup, diagnostics, scanToken);
             if (diagnostics.Any)
                 return new SourceScanResult.Invalid(revision, diagnostics.Items);
-            var targets = BuildTargets(manifest, nodeAliases, skillsByGroup);
+            var targets = BuildTargets(manifest, nodeAliases, skillsByGroup)
+                .Concat(BuildAgentTargets(manifest, nodeAliases, agentSources)).ToArray();
             return new SourceScanResult.Snapshot(new AcceptedSourceSnapshot(revision, bundles, targets, warnings, DateTimeOffset.UtcNow));
         }
         catch (Exception exception) when (exception is GitSourceException or IOException or UnauthorizedAccessException or DecoderFallbackException or FormatException or OverflowException)
@@ -93,6 +104,57 @@ public sealed class GitSourceScanner(
         {
             return Invalid(null, "git_source_failure", "Source scanning exceeded its time limit.");
         }
+    }
+
+    private async Task<Dictionary<string, SnapshotBundle>> BuildAgentSourcesAsync(
+        IReadOnlyList<TreeEntry> entries, DiagnosticBag diagnostics, CancellationToken cancellationToken)
+    {
+        var agentEntries = entries.Where(x => x.Path.StartsWith("agents/", StringComparison.Ordinal)).ToArray();
+        foreach (var rootFile in agentEntries.Where(x => !x.Path["agents/".Length..].Contains('/')))
+            diagnostics.Add("unexpected_agent_file", "Agent instruction files must be stored as agents/<source>/AGENTS.md.", rootFile.Path);
+
+        var sourceNames = agentEntries
+            .Select(x => x.Path["agents/".Length..].Split('/'))
+            .Where(x => x.Length > 1)
+            .Select(x => x[0])
+            .Distinct(StringComparer.Ordinal)
+            .OrderBy(x => x, StringComparer.Ordinal)
+            .ToArray();
+        var sources = new Dictionary<string, SnapshotBundle>(StringComparer.Ordinal);
+        foreach (var source in sourceNames)
+        {
+            var sourcePath = $"agents/{source}";
+            var expectedPath = $"{sourcePath}/AGENTS.md";
+            ValidateName(source, "agent_source", sourcePath, diagnostics);
+            var sourceEntries = agentEntries.Where(x => x.Path.StartsWith(sourcePath + '/', StringComparison.Ordinal)).ToArray();
+            foreach (var unexpected in sourceEntries.Where(x => x.Path != expectedPath))
+                diagnostics.Add("unexpected_agent_file", "An agent source directory may contain only AGENTS.md.", unexpected.Path);
+            var entry = sourceEntries.SingleOrDefault(x => x.Path == expectedPath);
+            if (entry is null || entry.Type != "blob" || entry.Mode is not ("100644" or "100755"))
+            {
+                diagnostics.Add("missing_agent_instructions", "An agent source directory must contain AGENTS.md.", expectedPath);
+                continue;
+            }
+            var bundle = await BuildAgentInstructionsFileAsync(
+                entry, diagnostics, cancellationToken);
+            if (bundle is not null) sources.Add(source, bundle);
+        }
+        return sources;
+    }
+
+    private async Task<SnapshotBundle?> BuildAgentInstructionsFileAsync(
+        TreeEntry entry, DiagnosticBag diagnostics, CancellationToken cancellationToken)
+    {
+        if (entry.Size > _limits.MaxAgentInstructionsBytes)
+        {
+            diagnostics.Add("agent_instructions_too_large",
+                $"{entry.Path} exceeds {_limits.MaxAgentInstructionsBytes} bytes.", entry.Path);
+            return null;
+        }
+        var content = await ReadBlobAsync(entry, cancellationToken);
+        var digestInput = Encoding.UTF8.GetBytes("fleet.file/v1\0").Concat(content).ToArray();
+        var digest = $"sha256:{Convert.ToHexStringLower(SHA256.HashData(digestInput))}";
+        return new SnapshotBundle(digest, "fleet.file/v1", content.LongLength, content);
     }
 
     private async Task PrepareMirrorAsync(CancellationToken cancellationToken)
@@ -190,7 +252,11 @@ public sealed class GitSourceScanner(
         if (total > _limits.MaxTotalBytes) diagnostics.Add("source_too_large", "Repository file bytes exceed the total size limit.");
     }
 
-    private static void ValidateManifest(FleetManifest manifest, IReadOnlyDictionary<string, NodeId> nodeAliases, DiagnosticBag diagnostics)
+    private static void ValidateManifest(
+        FleetManifest manifest,
+        IReadOnlyDictionary<string, NodeId> nodeAliases,
+        IReadOnlyDictionary<string, SnapshotBundle> agentSources,
+        DiagnosticBag diagnostics)
     {
         if (manifest is null) { diagnostics.Add("invalid_manifest", "fleet.yml must contain a mapping."); return; }
         if (manifest.Schema != "fleet/v1") diagnostics.Add("unsupported_schema", "schema must be fleet/v1.", "fleet.yml");
@@ -212,6 +278,33 @@ public sealed class GitSourceScanner(
             ValidateTarget(defaultTarget?.Base, target.Path ?? defaultTarget?.Path, diagnostics);
             if (target.Groups is null) diagnostics.Add("missing_node_groups", $"Node '{alias}' must declare its groups list.", "fleet.yml");
             else foreach (var group in target.Groups) if (!(manifest.Groups?.Contains(group, StringComparer.Ordinal) ?? false)) diagnostics.Add("unknown_group", $"Node '{alias}' subscribes to undeclared group '{group}'.", "fleet.yml");
+            if (node!.Targets.Agents is not null)
+            {
+                var assignedClients = new HashSet<string>(StringComparer.Ordinal);
+                foreach (var agentTarget in node.Targets.Agents)
+                {
+                    if (agentTarget is null)
+                    {
+                        diagnostics.Add("invalid_agent_target", $"Node '{alias}' contains an empty agent Target.", "fleet.yml");
+                        continue;
+                    }
+                    ValidateName(agentTarget.Source, "agent_source", "fleet.yml", diagnostics);
+                    if (agentTarget.Source is not null && !agentSources.ContainsKey(agentTarget.Source))
+                        diagnostics.Add("unknown_agent_source", $"Node '{alias}' refers to unknown agent source '{agentTarget.Source}'.", "fleet.yml");
+                    if (agentTarget.Clients is { Count: 0 })
+                        diagnostics.Add("empty_agent_clients", $"Node '{alias}' contains an agent Target with an empty clients list.", "fleet.yml");
+                    foreach (var client in agentTarget.Clients ?? AgentClients.Keys)
+                    {
+                        if (client is null || !AgentClients.ContainsKey(client))
+                        {
+                            diagnostics.Add("unknown_agent_client", $"Node '{alias}' configures unknown agent client '{client}'.", "fleet.yml");
+                            continue;
+                        }
+                        if (!assignedClients.Add(client))
+                            diagnostics.Add("duplicate_agent_client", $"Node '{alias}' assigns agent client '{client}' more than once.", "fleet.yml");
+                    }
+                }
+            }
         }
     }
 
@@ -239,6 +332,34 @@ public sealed class GitSourceScanner(
                     skills.TryAdd(skill.Key, new SnapshotSkill(skill.Key, skill.Value.Bundle.Digest));
             return new SnapshotTarget(nodeAliases[pair.Key], "skills", new TargetDescriptor("home", target.Path ?? manifest.Targets.Skills.Path!), skills.Values.ToArray());
         }).ToArray();
+
+    private static IReadOnlyList<SnapshotTarget> BuildAgentTargets(
+        FleetManifest manifest,
+        IReadOnlyDictionary<string, NodeId> nodeAliases,
+        IReadOnlyDictionary<string, SnapshotBundle> sources)
+    {
+        var targets = new List<SnapshotTarget>();
+        foreach (var node in manifest.Nodes.OrderBy(x => x.Key, StringComparer.Ordinal))
+        {
+            var configured = node.Value.Targets.Agents;
+            if (configured is null) continue;
+            var desiredByClient = new Dictionary<string, SnapshotBundle>(StringComparer.Ordinal);
+            foreach (var agentTarget in configured)
+                foreach (var client in agentTarget!.Clients ?? AgentClients.Keys)
+                    desiredByClient.Add(client, sources[agentTarget.Source!]);
+            foreach (var client in AgentClients.OrderBy(x => x.Key, StringComparer.Ordinal))
+            {
+                var desiredDigest = desiredByClient.TryGetValue(client.Key, out var bundle) ? bundle.Digest : null;
+                targets.Add(new SnapshotTarget(
+                    nodeAliases[node.Key],
+                    $"agent-file/{client.Key}",
+                    new TargetDescriptor("home", client.Value.TargetPath),
+                    [],
+                    new SnapshotFile(client.Value.TargetFileName, desiredDigest)));
+            }
+        }
+        return targets;
+    }
 
     private IReadOnlyList<SourceWarning> BuildWarnings(FleetManifest manifest, IReadOnlyDictionary<string, NodeId> nodeAliases,
         Dictionary<string, Dictionary<string, BuiltSkill>> groups, DiagnosticBag diagnostics, CancellationToken cancellationToken)
@@ -374,7 +495,7 @@ public sealed class GitSourceScanner(
             _limits.MaxMirrorBytes <= 0 || _limits.MaxMirrorEntries <= 0 || _limits.MaxManifestBytes <= 0 || _limits.MaxDiagnostics <= 0 ||
             _limits.MaxWarnings <= 0 || _limits.MaxWarningWinners <= 0 || _limits.MaxWarningLocations <= 0 ||
             _limits.MaxWarningBytes <= 0 || _limits.MaxWarningMessageChars is <= 0 or > CoordinationWarningMessageChars ||
-            _limits.ScanTimeoutSeconds <= 0 || _limits.GitCommandTimeoutSeconds <= 0)
+            _limits.MaxAgentInstructionsBytes <= 0 || _limits.ScanTimeoutSeconds <= 0 || _limits.GitCommandTimeoutSeconds <= 0)
             throw new GitSourceException("Source limits must be positive.");
     }
 
@@ -447,6 +568,7 @@ public sealed class GitSourceScanner(
     private static SourceScanResult.Invalid Invalid(string? revision, string code, string message, string? path = null) => new(revision, [new(code, message, path)]);
     private sealed record TreeEntry(string Mode, string Type, string ObjectId, long Size, string Path);
     private sealed record BuiltSkill(SnapshotBundle Bundle, string Location);
+    private sealed record AgentClient(string TargetPath, string TargetFileName);
     private sealed class DiagnosticBag(int max)
     {
         private readonly List<SourceDiagnostic> _items = [];

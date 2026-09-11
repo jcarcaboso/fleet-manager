@@ -43,6 +43,155 @@ public sealed class SourceGitSourceScannerTests : IDisposable
     }
 
     [Fact]
+    public async Task Resolves_discovered_agent_sources_to_their_configured_clients()
+    {
+        var repository = CreateRepository();
+        Write(repository, "fleet.yml", Manifest([]).Replace(
+            "        groups: []\n",
+            "        groups: []\n      agents:\n        - source: personal\n          clients: [codex, opencode]\n        - source: claude-personal\n          clients: [claude]\n",
+            StringComparison.Ordinal));
+        Write(repository, "agents/personal/AGENTS.md", "# Personal instructions\n");
+        Write(repository, "agents/claude-personal/AGENTS.md", "# Claude instructions\n");
+        Commit(repository, "configured agent sources");
+
+        var snapshot = Assert.IsType<SourceScanResult.Snapshot>(await Scanner(repository).ScanAsync(null, CancellationToken.None));
+        var fileTargets = snapshot.Value.Targets.Where(x => x.File is not null).ToDictionary(x => x.TargetName);
+        Assert.Equal(3, fileTargets.Count);
+        Assert.Equal((".codex", "AGENTS.md"), (fileTargets["agent-file/codex"].Descriptor.Path, fileTargets["agent-file/codex"].File!.Name));
+        Assert.Equal((".config/opencode", "AGENTS.md"), (fileTargets["agent-file/opencode"].Descriptor.Path, fileTargets["agent-file/opencode"].File!.Name));
+        Assert.Equal((".claude", "CLAUDE.md"), (fileTargets["agent-file/claude"].Descriptor.Path, fileTargets["agent-file/claude"].File!.Name));
+        Assert.Equal(
+            fileTargets["agent-file/codex"].File!.BundleDigest,
+            fileTargets["agent-file/opencode"].File!.BundleDigest);
+        Assert.NotEqual(
+            fileTargets["agent-file/codex"].File!.BundleDigest,
+            fileTargets["agent-file/claude"].File!.BundleDigest);
+        var contents = snapshot.Value.Bundles.ToDictionary(x => x.Digest, x => Encoding.UTF8.GetString(x.Content));
+        Assert.Equal("# Personal instructions\n", contents[fileTargets["agent-file/codex"].File!.BundleDigest!]);
+        Assert.Equal("# Claude instructions\n", contents[fileTargets["agent-file/claude"].File!.BundleDigest!]);
+    }
+
+    [Fact]
+    public async Task Omitted_clients_selects_all_and_an_empty_agents_list_removes_all()
+    {
+        var repository = CreateRepository();
+        Write(repository, "fleet.yml", Manifest([]).Replace(
+            "        groups: []\n",
+            "        groups: []\n      agents:\n        - source: personal\n",
+            StringComparison.Ordinal));
+        Write(repository, "agents/personal/AGENTS.md", "# Personal instructions\n");
+        Commit(repository, "all clients");
+        var scanner = Scanner(repository);
+
+        var defaults = Assert.IsType<SourceScanResult.Snapshot>(await scanner.ScanAsync(null, CancellationToken.None));
+        var defaultFiles = defaults.Value.Targets.Where(x => x.File is not null).ToArray();
+        Assert.Equal(3, defaultFiles.Length);
+        Assert.All(defaultFiles, target => Assert.NotNull(target.File!.BundleDigest));
+
+        Write(repository, "fleet.yml", Manifest([]).Replace(
+            "        groups: []\n",
+            "        groups: []\n      agents: []\n",
+            StringComparison.Ordinal));
+        Commit(repository, "remove all agent files");
+        var removed = Assert.IsType<SourceScanResult.Snapshot>(await scanner.ScanAsync(defaults.Value.SourceRevision, CancellationToken.None));
+        var removalFiles = removed.Value.Targets.Where(x => x.File is not null).ToArray();
+        Assert.Equal(3, removalFiles.Length);
+        Assert.All(removalFiles, target => Assert.Null(target.File!.BundleDigest));
+    }
+
+    [Fact]
+    public async Task Missing_agents_target_does_not_manage_agent_files()
+    {
+        var repository = CreateRepository();
+        Write(repository, "fleet.yml", Manifest([]));
+        Write(repository, "agents/personal/AGENTS.md", "# Available but unassigned\n");
+        Commit(repository, "unassigned source");
+
+        var snapshot = Assert.IsType<SourceScanResult.Snapshot>(
+            await Scanner(repository).ScanAsync(null, CancellationToken.None));
+
+        Assert.DoesNotContain(snapshot.Value.Targets, target => target.File is not null);
+    }
+
+    [Fact]
+    public async Task Different_nodes_can_select_different_agent_sources()
+    {
+        var secondNodeId = new NodeId(Guid.NewGuid());
+        var repository = CreateRepository();
+        Write(repository, "fleet.yml", """
+            schema: fleet/v1
+            groups: []
+            targets:
+              skills:
+                base: home
+                path: .agents/skills
+            nodes:
+              fixture:
+                targets:
+                  skills:
+                    groups: []
+                  agents:
+                    - source: personal
+                      clients: [codex]
+              second:
+                targets:
+                  skills:
+                    groups: []
+                  agents:
+                    - source: work
+                      clients: [codex]
+            """);
+        Write(repository, "agents/personal/AGENTS.md", "personal");
+        Write(repository, "agents/work/AGENTS.md", "work");
+        Commit(repository, "different node sources");
+        var nodes = new Dictionary<string, NodeId>(StringComparer.Ordinal)
+        {
+            ["fixture"] = _nodeId,
+            ["second"] = secondNodeId,
+        };
+
+        var snapshot = Assert.IsType<SourceScanResult.Snapshot>(await new GitSourceScanner(
+            repository, Path.Combine(_root, "two-node-mirror"), new Nodes(nodes)).ScanAsync(null, CancellationToken.None));
+        var codexTargets = snapshot.Value.Targets.Where(x => x.TargetName == "agent-file/codex").ToDictionary(x => x.NodeId);
+
+        Assert.NotEqual(codexTargets[_nodeId].File!.BundleDigest, codexTargets[secondNodeId].File!.BundleDigest);
+    }
+
+    [Fact]
+    public async Task Rejects_unknown_sources_clients_and_duplicate_client_assignments()
+    {
+        var repository = CreateRepository();
+        Write(repository, "agents/personal/AGENTS.md", "personal");
+        Write(repository, "fleet.yml", Manifest([]).Replace(
+            "        groups: []\n",
+            "        groups: []\n      agents:\n        - source: missing\n          clients: [unknown]\n        - source: personal\n          clients: [codex, codex]\n        - source: personal\n          clients: []\n",
+            StringComparison.Ordinal));
+        Commit(repository, "invalid agent targets");
+
+        var invalid = Assert.IsType<SourceScanResult.Invalid>(await Scanner(repository).ScanAsync(null, CancellationToken.None));
+        Assert.Contains(invalid.Diagnostics, diagnostic => diagnostic.Code == "unknown_agent_source");
+        Assert.Contains(invalid.Diagnostics, diagnostic => diagnostic.Code == "unknown_agent_client");
+        Assert.Contains(invalid.Diagnostics, diagnostic => diagnostic.Code == "duplicate_agent_client");
+        Assert.Contains(invalid.Diagnostics, diagnostic => diagnostic.Code == "empty_agent_clients");
+    }
+
+    [Fact]
+    public async Task Rejects_unrecognized_files_in_the_agents_directory()
+    {
+        var repository = CreateRepository();
+        Write(repository, "fleet.yml", Manifest([]));
+        Write(repository, "agents/personal/notes.md", "wrong filename");
+        Commit(repository, "invalid agent file");
+
+        var invalid = Assert.IsType<SourceScanResult.Invalid>(
+            await Scanner(repository).ScanAsync(null, CancellationToken.None));
+
+        var diagnostic = Assert.Single(invalid.Diagnostics, x => x.Code == "unexpected_agent_file");
+        Assert.Equal("agents/personal/notes.md", diagnostic.Path);
+        Assert.Contains(invalid.Diagnostics, x => x.Code == "missing_agent_instructions");
+    }
+
+    [Fact]
     public async Task Rejects_unknown_manifest_fields_without_replacing_a_snapshot()
     {
         var repository = CreateRepository();
@@ -151,6 +300,20 @@ public sealed class SourceGitSourceScannerTests : IDisposable
         var invalid = Assert.IsType<SourceScanResult.Invalid>(await scanner.ScanAsync(null, CancellationToken.None));
 
         Assert.Contains(invalid.Diagnostics, x => x.Code == "bundle_too_large");
+    }
+
+    [Fact]
+    public async Task Rejects_a_nonpositive_agent_instruction_limit()
+    {
+        var scanner = new GitSourceScanner(
+            "unused",
+            Path.Combine(_root, "invalid-limit-mirror"),
+            new Nodes(_nodeId),
+            new SourceLimits(MaxAgentInstructionsBytes: 0));
+
+        var invalid = Assert.IsType<SourceScanResult.Invalid>(await scanner.ScanAsync(null, CancellationToken.None));
+
+        Assert.Equal("git_source_failure", Assert.Single(invalid.Diagnostics).Code);
     }
 
     [Fact]
@@ -282,9 +445,15 @@ public sealed class SourceGitSourceScannerTests : IDisposable
         GC.SuppressFinalize(this);
     }
 
-    private sealed class Nodes(NodeId id) : IEnrolledNodeSource
+    private sealed class Nodes : IEnrolledNodeSource
     {
+        private readonly IReadOnlyDictionary<string, NodeId> _nodes;
+
+        public Nodes(NodeId id) : this(new Dictionary<string, NodeId>(StringComparer.Ordinal) { ["fixture"] = id }) { }
+
+        public Nodes(IReadOnlyDictionary<string, NodeId> nodes) => _nodes = nodes;
+
         public Task<IReadOnlyDictionary<string, NodeId>> GetNodeAliasesAsync(CancellationToken cancellationToken) =>
-            Task.FromResult<IReadOnlyDictionary<string, NodeId>>(new Dictionary<string, NodeId>(StringComparer.Ordinal) { ["fixture"] = id });
+            Task.FromResult(_nodes);
     }
 }

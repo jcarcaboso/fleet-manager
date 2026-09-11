@@ -14,6 +14,11 @@ technical design if the meaning remains intact.
 
 ```text
 fleet.yml
+agents/
+  personal/
+    AGENTS.md
+  work/
+    AGENTS.md
 groups/
   definitive/
     code-review/
@@ -33,13 +38,20 @@ The convention is:
 
 ```text
 groups/<group-name>/<skill-name>/
+agents/<source-name>/AGENTS.md
 ```
 
 Every immediate child directory of a declared group is a Skill. A group may
 contain one Skill when an Operator needs a narrowly assigned collection.
 
-Group and Skill names use lowercase letters, numbers, and hyphens. This avoids
-case collisions between common macOS and Linux filesystems.
+Group, Skill, and agent source names use lowercase letters, numbers, and
+hyphens. This avoids case collisions between common macOS and Linux
+filesystems.
+
+The Server discovers agent sources directly from the immediate directories
+below `agents/`; `fleet.yml` does not declare a separate catalog. Each source
+directory contains exactly one `AGENTS.md`. Fleet treats its bytes as opaque
+and caps it at 1 MiB.
 
 ## Skill directory trees
 
@@ -93,6 +105,14 @@ nodes:
         groups:
           - definitive
           - testing
+      agents:
+        - source: personal
+          clients:
+            - codex
+            - opencode
+        - source: work
+          clients:
+            - claude
 
   linux-workstation:
     targets:
@@ -100,10 +120,42 @@ nodes:
         path: .codex/skills
         groups:
           - definitive
+      agents:
+        - source: work
 ```
 
 The YAML declares group names and order but never lists the Skills inside them.
 The Server discovers Skills from the directories at the exact source revision.
+
+Each entry in `targets.agents` maps one discovered source to one or more known
+AI clients. The destination adapter supplies the client-specific directory and
+filename:
+
+| AI client | Destination relative to home |
+|---|---|
+| Codex | `.codex/AGENTS.md` |
+| OpenCode | `.config/opencode/AGENTS.md` |
+| Claude Code | `.claude/CLAUDE.md` |
+
+For example, `source: personal` resolves exactly
+`agents/personal/AGENTS.md`. Omitting `clients` selects Codex, OpenCode, and
+Claude Code. When `clients` is present, the source applies only to those
+clients. A Node may use several sources as long as no client occurs in more
+than one entry. Overlapping client mappings, unknown clients, and unknown
+sources invalidate the source revision. An entry-level `clients: []` is also
+invalid; use a Node-level `agents: []` to request removal.
+
+Missing `targets.agents` means Fleet publishes no Managed-file Targets for that
+Node and leaves any earlier assignments untouched. An explicit `agents: []`
+publishes removal Assignments for all supported clients. A nonempty list also
+publishes removals for clients it does not select. The Agent removes a file only
+when its local Receipt proves Fleet owns it. It reports an ownership conflict
+instead of replacing a pre-existing file.
+
+Deleting a referenced source makes the repository invalid and leaves the last
+accepted desired revision active. To retire a source, first update every Node
+that references it. Use `agents: []` and wait for that Rollout when its managed
+files should be removed.
 
 The Server owns the enrolled Node registry. Keys under `nodes` are unique Node
 aliases, resolved by the Server to stable internal Node IDs. The alias is the

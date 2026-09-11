@@ -31,3 +31,13 @@ and 1 MiB for `fleet.yml`. Each encoded Bundle, including its header, paths, and
 entry metadata, is limited to 16 MiB. Implementations may lower these limits
 through configuration but must not accept a Bundle that exceeds the configured
 values.
+
+## Managed-file content
+
+Fleet transports one Managed file as `fleet.file/v1`. The response body is the
+exact file content. Its digest is SHA-256 over the ASCII bytes
+`fleet.file/v1`, one NUL byte, and the response body, in that order. The schema
+prefix separates a raw file digest from a Skill Bundle digest even when their
+transport bytes happen to match. Source ingestion caps each discovered
+`agents/<source>/AGENTS.md` file at 1 MiB. Agents retain the protocol-wide 16 MiB
+rejection limit before reading any Managed-file response.

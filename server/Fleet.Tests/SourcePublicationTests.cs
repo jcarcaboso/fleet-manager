@@ -61,6 +61,69 @@ public sealed class SourcePublicationTests : IAsyncLifetime
         Assert.Equal(sourceBundle.Content, (await coordinator.GetBundleAsync(authentication, skill.BundleDigest)).Content);
     }
 
+    [Fact]
+    public async Task Publication_persists_managed_files_and_authorizes_their_content()
+    {
+        await using var database = Database();
+        var coordinator = Coordinator(database);
+        var now = DateTimeOffset.UtcNow;
+        var nodeId = new NodeId(Guid.NewGuid());
+        var credentialId = new CredentialId(Guid.NewGuid());
+        var certificateDigest = Sha("managed-file-certificate");
+        var authorization = await coordinator.CreateEnrollmentAuthorizationAsync(
+            new("managed-file-test", now + TimeSpan.FromMinutes(5), TimeSpan.FromMinutes(1)));
+        await coordinator.CompleteEnrollmentAsync(new(
+            authorization.Token,
+            Sha("managed-file-csr"),
+            "publication-node",
+            "linux",
+            new(nodeId, credentialId, certificateDigest, now - TimeSpan.FromMinutes(1), now + TimeSpan.FromHours(1), "certificate"u8.ToArray())));
+
+        var source = CreateRepository();
+        Write(source, "fleet.yml", """
+            schema: fleet/v1
+            groups:
+              - stable
+            targets:
+              skills:
+                base: home
+                path: .agents/skills
+            nodes:
+              publication-node:
+                targets:
+                  skills:
+                    groups:
+                      - stable
+                  agents:
+                    - source: personal
+                      clients: [codex]
+            """);
+        Write(source, "agents/personal/AGENTS.md", "# Fleet instructions\n");
+        Git(source, "add", ".");
+        Git(source, "commit", "-m", "add managed agent file");
+
+        var scanner = new GitSourceScanner(source, Path.Combine(_files, "managed-file-mirror.git"), new Nodes(nodeId));
+        var scan = Assert.IsType<SourceScanResult.Snapshot>(await scanner.ScanAsync(null, CancellationToken.None));
+        await coordinator.AcceptSourceSnapshotAsync(scan.Value);
+
+        var authentication = new NodeAuthentication(nodeId, credentialId, certificateDigest);
+        AgentAssignment? codex = null;
+        for (var index = 0; index < 4; index++)
+        {
+            var assignment = Assert.IsType<AgentAssignment>((await coordinator.PollAsync(authentication, DateTimeOffset.UtcNow)).Assignment);
+            if (assignment.TargetName == "agent-file/codex") codex = assignment;
+            await coordinator.ReportAttemptAsync(authentication,
+                new(assignment.AttemptId, ConvergenceState.Succeeded, null, null, DateTimeOffset.UtcNow));
+        }
+
+        Assert.NotNull(codex);
+        Assert.Empty(codex.Skills);
+        Assert.Equal("AGENTS.md", codex.File!.Name);
+        Assert.Equal("fleet.file/v1", codex.File.Schema);
+        var content = await coordinator.GetBundleAsync(authentication, codex.File.BundleDigest!);
+        Assert.Equal("# Fleet instructions\n"u8.ToArray(), content.Content);
+    }
+
     private string CreateRepository()
     {
         var repository = Path.Combine(_files, "source");
