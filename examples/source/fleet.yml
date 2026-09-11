@@ -16,3 +16,8 @@ nodes:
         groups:
           - definitive
           - testing
+      agents:
+        - source: personal
+          clients:
+            - codex
+            - opencode

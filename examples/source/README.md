@@ -9,3 +9,8 @@ Aliases are case-sensitive and remain reserved after revocation.
 The `definitive` group has precedence over `testing` because it appears first.
 Each immediate child below a group is a Skill, and each Skill requires a root
 `SKILL.md`.
+
+The Server discovers the `personal` source from
+`agents/personal/AGENTS.md`. The example maps it to Codex and OpenCode under the
+Node's `targets.agents`. Omit `clients` to install one source for every
+supported AI client.

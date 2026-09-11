@@ -19,6 +19,7 @@ paths.
 | Rollout | ID, desired revision ID and creation time group per-Target results. |
 | Assignment | ID, Node ID, Rollout/revision IDs, Target name, relative descriptor, current flag, convergence state, and creation time describe intended Target state. |
 | Assignment Skill | Assignment ID, Skill name, Bundle digest and ordering describe the complete resolved map. |
+| Assignment File | Assignment ID, destination filename, and optional content digest describe one Managed file or its removal. |
 | Attempt | ID, Assignment/Rollout/Node IDs, convergence state, error code, bounded diagnostic and update time retain accepted reports. Public report requests currently accept stable error codes only. |
 | Audit event | ID, Workspace ID, timestamp, action, actor and optional Node/credential IDs record security-relevant transitions without request bodies. |
 

@@ -9,15 +9,31 @@ internal sealed class FleetManifest
     [YamlMember(Alias = "groups")]
     public required List<string> Groups { get; init; }
     [YamlMember(Alias = "targets")]
-    public required ManifestTargets Targets { get; init; }
+    public required ManifestDefaults Targets { get; init; }
     [YamlMember(Alias = "nodes")]
     public required Dictionary<string, ManifestNode> Nodes { get; init; }
 }
 
-internal sealed class ManifestTargets
+internal sealed class ManifestDefaults
 {
     [YamlMember(Alias = "skills")]
     public required ManifestTarget Skills { get; init; }
+}
+
+internal sealed class ManifestNodeTargets
+{
+    [YamlMember(Alias = "skills")]
+    public required ManifestTarget Skills { get; init; }
+    [YamlMember(Alias = "agents")]
+    public List<ManifestAgentTarget>? Agents { get; init; }
+}
+
+internal sealed class ManifestAgentTarget
+{
+    [YamlMember(Alias = "source")]
+    public string? Source { get; init; }
+    [YamlMember(Alias = "clients")]
+    public List<string>? Clients { get; init; }
 }
 
 internal sealed class ManifestTarget
@@ -33,5 +49,5 @@ internal sealed class ManifestTarget
 internal sealed class ManifestNode
 {
     [YamlMember(Alias = "targets")]
-    public required ManifestTargets Targets { get; init; }
+    public required ManifestNodeTargets Targets { get; init; }
 }

@@ -73,7 +73,7 @@ An Assignment contains, conceptually:
 ```text
 Workspace, Node, Target, Assignment, Attempt, Rollout, and desired revision IDs
 constrained Target descriptor
-complete ordered set of Skill name, Bundle digest, size, and schema metadata
+either a complete ordered set of Skill metadata or one Managed file descriptor
 policy and protocol compatibility information
 ```
 
@@ -128,6 +128,13 @@ with the Assignment:
 
 The Agent refuses to claim or replace a pre-existing unowned Skill directory
 with the same name. It reports an ownership conflict instead.
+
+Managed-file Targets use the same ownership rule through a separate
+reconciliation interface. The Assignment names one file and either supplies
+content metadata or declares it absent. The Agent writes through a staged file
+and atomic rename, records a file-specific Receipt, repairs drift, and removes
+only a file named by a valid Receipt. One Managed-file Target cannot contain
+Skills.
 
 ## Target resolution and containment
 

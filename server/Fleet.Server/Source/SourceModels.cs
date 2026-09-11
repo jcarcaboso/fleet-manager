@@ -39,5 +39,6 @@ public sealed record SourceLimits(
     int MaxWarningLocations = 100,
     int MaxWarningBytes = 256 * 1024,
     int MaxWarningMessageChars = 2_048,
+    int MaxAgentInstructionsBytes = 1024 * 1024,
     int ScanTimeoutSeconds = 180,
     int GitCommandTimeoutSeconds = 120);

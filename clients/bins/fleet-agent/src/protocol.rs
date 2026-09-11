@@ -141,7 +141,36 @@ impl Api {
     }
 
     pub async fn bundle(&self, skill: &AssignmentSkill) -> Result<Bundle, ProtocolError> {
-        if skill.size < 0 || skill.size as usize > MAX_BUNDLE_BYTES {
+        self.bundle_content(&skill.bundle_digest, skill.size, &skill.schema)
+            .await
+    }
+
+    pub async fn file(&self, file: &AssignmentFile) -> Result<Bundle, ProtocolError> {
+        let digest = file
+            .bundle_digest
+            .as_deref()
+            .ok_or(ProtocolError::InvalidResponse(
+                "managed file digest is missing",
+            ))?;
+        let size = file.size.ok_or(ProtocolError::InvalidResponse(
+            "managed file size is missing",
+        ))?;
+        let schema = file
+            .schema
+            .as_deref()
+            .ok_or(ProtocolError::InvalidResponse(
+                "managed file schema is missing",
+            ))?;
+        self.bundle_content(digest, size, schema).await
+    }
+
+    async fn bundle_content(
+        &self,
+        digest: &str,
+        size: i64,
+        expected_schema: &str,
+    ) -> Result<Bundle, ProtocolError> {
+        if size < 0 || size as usize > MAX_BUNDLE_BYTES {
             return Err(ProtocolError::ResponseTooLarge {
                 limit: MAX_BUNDLE_BYTES,
             });
@@ -149,7 +178,7 @@ impl Api {
         let mut url = self.endpoint("agent/v1/bundles")?;
         url.path_segments_mut()
             .map_err(|_| ProtocolError::Configuration("server URL cannot be a base"))?
-            .push(&skill.bundle_digest);
+            .push(digest);
         let response = self
             .authenticated()?
             .get(url)
@@ -165,19 +194,19 @@ impl Api {
                 "bundle schema header is missing",
             ))?
             .to_owned();
-        if schema != skill.schema {
+        if schema != expected_schema {
             return Err(ProtocolError::InvalidResponse(
                 "bundle schema does not match assignment",
             ));
         }
         let bytes = read_bounded(response, MAX_BUNDLE_BYTES).await?;
-        if bytes.len() as i64 != skill.size {
+        if bytes.len() as i64 != size {
             return Err(ProtocolError::InvalidResponse(
                 "bundle size does not match assignment",
             ));
         }
         Ok(Bundle {
-            digest: skill.bundle_digest.clone(),
+            digest: digest.to_owned(),
             schema,
             bytes,
         })
@@ -320,6 +349,8 @@ pub struct Assignment {
     pub target_name: String,
     pub target: TargetDescriptor,
     pub skills: Vec<AssignmentSkill>,
+    #[serde(default)]
+    pub file: Option<AssignmentFile>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -336,6 +367,15 @@ pub struct AssignmentSkill {
     pub bundle_digest: String,
     pub size: i64,
     pub schema: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct AssignmentFile {
+    pub name: String,
+    pub bundle_digest: Option<String>,
+    pub size: Option<i64>,
+    pub schema: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -411,6 +451,18 @@ mod tests {
     fn poll_fixture_matches_server_wire_contract() {
         let poll: PollResponse = serde_json::from_str(r#"{"workspaceId":"00000000-0000-0000-0000-000000000001","nodeId":"00000000-0000-0000-0000-000000000002","assignment":{"assignmentId":"00000000-0000-0000-0000-000000000003","attemptId":"00000000-0000-0000-0000-000000000004","rolloutId":"00000000-0000-0000-0000-000000000005","desiredRevisionId":"00000000-0000-0000-0000-000000000006","targetName":"skills","target":{"base":"home","path":".agents/skills"},"skills":[{"name":"review","bundleDigest":"sha256:abc","size":12,"schema":"fleet.bundle/v1"}]},"nextPollSeconds":30}"#).unwrap();
         assert_eq!(poll.assignment.unwrap().skills[0].name, "review");
+    }
+
+    #[test]
+    fn managed_file_fixture_accepts_content_and_removal_assignments() {
+        let content: PollResponse = serde_json::from_str(r#"{"workspaceId":"00000000-0000-0000-0000-000000000001","nodeId":"00000000-0000-0000-0000-000000000002","assignment":{"assignmentId":"00000000-0000-0000-0000-000000000003","attemptId":"00000000-0000-0000-0000-000000000004","rolloutId":"00000000-0000-0000-0000-000000000005","desiredRevisionId":"00000000-0000-0000-0000-000000000006","targetName":"agent-file/claude","target":{"base":"home","path":".claude"},"skills":[],"file":{"name":"CLAUDE.md","bundleDigest":"sha256:abc","size":12,"schema":"fleet.file/v1"}},"nextPollSeconds":30}"#).unwrap();
+        assert_eq!(content.assignment.unwrap().file.unwrap().name, "CLAUDE.md");
+
+        let removal: AssignmentFile = serde_json::from_str(
+            r#"{"name":"AGENTS.md","bundleDigest":null,"size":null,"schema":null}"#,
+        )
+        .unwrap();
+        assert!(removal.bundle_digest.is_none());
     }
 
     #[test]

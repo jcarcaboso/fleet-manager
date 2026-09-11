@@ -18,6 +18,7 @@ use unicode_normalization::UnicodeNormalization;
 
 const MAGIC: &[u8; 6] = b"FLTB1\0";
 const SCHEMA: &str = "fleet.bundle/v1";
+const FILE_SCHEMA: &str = "fleet.file/v1";
 const MAX_BUNDLE: usize = 16 * 1024 * 1024;
 const MAX_FILES: usize = 10_000;
 const MAX_PATH: usize = 1_024;
@@ -51,6 +52,32 @@ pub struct Assignment {
     pub assignment_id: String,
     pub desired_revision_id: String,
     pub skills: Vec<DesiredSkill>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct DesiredFile {
+    pub name: String,
+    pub digest: Option<String>,
+    pub size: Option<u64>,
+    pub schema: Option<String>,
+    pub content: Vec<u8>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct FileAssignment {
+    pub assignment_id: String,
+    pub desired_revision_id: String,
+    pub file: DesiredFile,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct FileReconcileOutcome {
+    pub target: PathBuf,
+    pub file: String,
+    pub assignment_id: String,
+    pub desired_revision_id: String,
+    pub changed: bool,
+    pub owned_digest: Option<String>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -209,6 +236,28 @@ struct Journal {
     new_names: Vec<String>,
 }
 
+#[derive(Clone, Debug, Serialize, Deserialize)]
+struct FileReceipt {
+    version: u32,
+    target: String,
+    name: String,
+    assignment_id: String,
+    desired_revision_id: String,
+    digest: String,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+struct FileJournal {
+    version: u32,
+    target: String,
+    name: String,
+    transaction: String,
+    phase: Phase,
+    old_receipt: Option<FileReceipt>,
+    old_present: bool,
+    desired_digest: Option<String>,
+}
+
 impl Reconciler {
     pub fn new(home: impl Into<PathBuf>, state_dir: impl Into<PathBuf>) -> Result<Self> {
         let home = home.into();
@@ -293,7 +342,206 @@ impl Reconciler {
         Ok(())
     }
 
+    pub fn reconcile_file(
+        &self,
+        target: &TargetDescriptor,
+        assignment: &FileAssignment,
+    ) -> Result<FileReconcileOutcome> {
+        validate_id(&assignment.assignment_id)?;
+        validate_id(&assignment.desired_revision_id)?;
+        validate_file(&assignment.file)?;
+        let target_path = self.resolve_target_for_file(target, assignment.file.digest.is_some())?;
+        let destination = target_path.join(&assignment.file.name);
+        let key = hex_sha256(destination.as_os_str().to_string_lossy().as_bytes());
+        let shared = target_path
+            .parent()
+            .ok_or_else(|| {
+                ReconcileError::new(
+                    ErrorCode::InvalidTarget,
+                    "managed file Target has no parent",
+                )
+            })?
+            .join(".fleet-reconcile")
+            .join(&key);
+        ensure_private_dir(&shared, ErrorCode::Io)?;
+        reject_symlink_path(&shared, ErrorCode::FilesystemEscape)?;
+        let lock = open_lock(&shared.join("lock"))?;
+        lock.lock().map_err(|e| {
+            ReconcileError::io(ErrorCode::LockFailed, "cannot lock managed file", e)
+        })?;
+        self.reconcile_file_locked(&target_path, &destination, &shared, &key, assignment)
+    }
+
+    pub fn recover_file(&self, target: &TargetDescriptor, name: &str) -> Result<()> {
+        validate_file_name(name)?;
+        let target_path = self.resolve_target_for_file(target, false)?;
+        let destination = target_path.join(name);
+        let key = hex_sha256(destination.as_os_str().to_string_lossy().as_bytes());
+        let shared = target_path
+            .parent()
+            .ok_or_else(|| {
+                ReconcileError::new(
+                    ErrorCode::InvalidTarget,
+                    "managed file Target has no parent",
+                )
+            })?
+            .join(".fleet-reconcile")
+            .join(&key);
+        ensure_private_dir(&shared, ErrorCode::Io)?;
+        let lock = open_lock(&shared.join("lock"))?;
+        lock.lock().map_err(|e| {
+            ReconcileError::io(ErrorCode::LockFailed, "cannot lock managed file", e)
+        })?;
+        let state = self.state_dir.join("files").join(&key);
+        ensure_private_dir(&state, ErrorCode::Io)?;
+        if state.join("journal.json").exists() {
+            ensure_beneath(&self.home, &target_path, true)?;
+        }
+        recover_file_transaction(
+            &destination,
+            &shared,
+            &state.join("receipt.json"),
+            &state.join("journal.json"),
+        )
+    }
+
+    fn reconcile_file_locked(
+        &self,
+        target: &Path,
+        destination: &Path,
+        shared: &Path,
+        key: &str,
+        assignment: &FileAssignment,
+    ) -> Result<FileReconcileOutcome> {
+        let state = self.state_dir.join("files").join(key);
+        ensure_private_dir(&state, ErrorCode::Io)?;
+        let receipt_path = state.join("receipt.json");
+        let journal_path = state.join("journal.json");
+        ensure_beneath(
+            &self.home,
+            target,
+            assignment.file.digest.is_some() || journal_path.exists(),
+        )?;
+        recover_file_transaction(destination, shared, &receipt_path, &journal_path)?;
+        let old = read_file_receipt(&receipt_path, target, &assignment.file.name)?;
+        let observed = digest_regular_file(destination)?;
+        if old.is_none() && observed.is_some() && assignment.file.digest.is_some() {
+            return Err(ReconcileError::new(
+                ErrorCode::OwnershipConflict,
+                format!("{} exists without Fleet ownership", assignment.file.name),
+            ));
+        }
+        let desired = assignment.file.digest.clone();
+        let unchanged = match (&old, &desired, &observed) {
+            (None, None, _) => true,
+            (Some(receipt), Some(wanted), Some(actual)) => {
+                receipt.digest == *wanted
+                    && actual == wanted
+                    && receipt.assignment_id == assignment.assignment_id
+                    && receipt.desired_revision_id == assignment.desired_revision_id
+            }
+            _ => false,
+        };
+        if unchanged {
+            return Ok(file_outcome(target, assignment, false));
+        }
+
+        let tx = hex_sha256(
+            format!(
+                "{}\0{}",
+                assignment.assignment_id, assignment.desired_revision_id
+            )
+            .as_bytes(),
+        );
+        let tx_root = shared.join(format!("txn-{tx}"));
+        if tx_root.exists() {
+            remove_tree(&tx_root)?;
+        }
+        ensure_private_dir(&tx_root, ErrorCode::Io)?;
+        let staged = tx_root.join("new");
+        let backup = tx_root.join("old");
+        if desired.is_some() {
+            write_regular_file(&staged, &assignment.file.content)?;
+        }
+        let journal = FileJournal {
+            version: 1,
+            target: path_string(target),
+            name: assignment.file.name.clone(),
+            transaction: tx,
+            phase: Phase::Applying,
+            old_receipt: old.clone(),
+            old_present: observed.is_some(),
+            desired_digest: desired.clone(),
+        };
+        write_json_atomic(&journal_path, &journal)?;
+        let operation = (|| {
+            if destination.exists() {
+                fs::rename(destination, &backup).map_err(|e| {
+                    ReconcileError::io(ErrorCode::Io, "cannot back up managed file", e)
+                })?;
+                sync_parent(destination)?;
+            }
+            if desired.is_some() {
+                fs::rename(&staged, destination).map_err(|e| {
+                    ReconcileError::io(ErrorCode::Io, "cannot activate managed file", e)
+                })?;
+                sync_parent(destination)?;
+            }
+            if let Some(digest) = &desired {
+                if digest_regular_file(destination)?.as_ref() != Some(digest) {
+                    return Err(ReconcileError::new(
+                        ErrorCode::TargetChanged,
+                        "managed file verification failed",
+                    ));
+                }
+                write_json_atomic(
+                    &receipt_path,
+                    &FileReceipt {
+                        version: 1,
+                        target: path_string(target),
+                        name: assignment.file.name.clone(),
+                        assignment_id: assignment.assignment_id.clone(),
+                        desired_revision_id: assignment.desired_revision_id.clone(),
+                        digest: digest.clone(),
+                    },
+                )?;
+            } else if receipt_path.exists() {
+                remove_file_sync(&receipt_path)?;
+            }
+            let mut committed = journal.clone();
+            committed.phase = Phase::Committed;
+            write_json_atomic(&journal_path, &committed)?;
+            Ok(())
+        })();
+        if let Err(error) = operation {
+            if let Err(recovery) =
+                recover_file_transaction(destination, shared, &receipt_path, &journal_path)
+            {
+                return Err(ReconcileError::new(
+                    ErrorCode::RecoveryFailed,
+                    format!("{error}; rollback failed: {recovery}"),
+                ));
+            }
+            return Err(error);
+        }
+        remove_tree(&tx_root)?;
+        remove_file_sync(&journal_path)?;
+        Ok(file_outcome(target, assignment, true))
+    }
+
     fn resolve_target(&self, target: &TargetDescriptor) -> Result<PathBuf> {
+        self.resolve_target_with_create(target, true)
+    }
+
+    fn resolve_target_for_file(&self, target: &TargetDescriptor, create: bool) -> Result<PathBuf> {
+        self.resolve_target_with_create(target, create)
+    }
+
+    fn resolve_target_with_create(
+        &self,
+        target: &TargetDescriptor,
+        create: bool,
+    ) -> Result<PathBuf> {
         match target.base {
             TargetBase::Home => {}
         }
@@ -314,11 +562,16 @@ impl Reconciler {
             ));
         }
         let candidate = self.home.join(&target.path);
-        ensure_beneath(&self.home, &candidate, true)?;
-        let resolved = fs::canonicalize(&candidate).map_err(|e| {
-            ReconcileError::io(ErrorCode::InvalidTarget, "cannot resolve target", e)
-        })?;
-        if resolved.starts_with(&self.state_dir) || self.state_dir.starts_with(&resolved) {
+        ensure_beneath(&self.home, &candidate, create)?;
+        let overlaps_state = if candidate.exists() {
+            let resolved = fs::canonicalize(&candidate).map_err(|e| {
+                ReconcileError::io(ErrorCode::InvalidTarget, "cannot resolve target", e)
+            })?;
+            resolved.starts_with(&self.state_dir) || self.state_dir.starts_with(&resolved)
+        } else {
+            candidate.starts_with(&self.state_dir) || self.state_dir.starts_with(&candidate)
+        };
+        if overlaps_state {
             return Err(ReconcileError::new(
                 ErrorCode::InvalidTarget,
                 "target and private state directory must not overlap",
@@ -805,6 +1058,7 @@ fn ensure_beneath(home: &Path, target: &Path, create: bool) -> Result<()> {
                 })?;
                 sync_parent(&at)?;
             }
+            Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(()),
             Err(e) => {
                 return Err(ReconcileError::io(
                     ErrorCode::Io,
@@ -1130,6 +1384,292 @@ fn collect_files(
     Ok(())
 }
 
+fn validate_file(file: &DesiredFile) -> Result<()> {
+    validate_file_name(&file.name)?;
+    match (&file.digest, file.size, &file.schema) {
+        (None, None, None) if file.content.is_empty() => Ok(()),
+        (Some(digest), Some(size), Some(schema)) => {
+            parse_digest(digest)?;
+            if schema != FILE_SCHEMA {
+                return Err(ReconcileError::new(
+                    ErrorCode::UnsupportedSchema,
+                    "unsupported managed file schema",
+                ));
+            }
+            if size != file.content.len() as u64 || file.content.len() > MAX_FILE {
+                return Err(ReconcileError::new(
+                    ErrorCode::BundleSizeMismatch,
+                    "managed file size does not match its content",
+                ));
+            }
+            if format!("sha256:{}", hex_file_sha256(&file.content)) != *digest {
+                return Err(ReconcileError::new(
+                    ErrorCode::BundleDigestMismatch,
+                    "managed file digest does not match its content",
+                ));
+            }
+            Ok(())
+        }
+        _ => Err(ReconcileError::new(
+            ErrorCode::InvalidAssignment,
+            "managed file metadata is incomplete",
+        )),
+    }
+}
+
+fn validate_file_name(name: &str) -> Result<()> {
+    if name.is_empty()
+        || name.len() > 255
+        || name == "."
+        || name == ".."
+        || name.as_bytes().contains(&b'/')
+        || name.as_bytes().contains(&b'\\')
+        || name.as_bytes().contains(&0)
+        || name != name.nfc().collect::<String>()
+    {
+        return Err(ReconcileError::new(
+            ErrorCode::InvalidBundlePath,
+            "managed file name must be one portable path segment",
+        ));
+    }
+    Ok(())
+}
+
+fn digest_regular_file(path: &Path) -> Result<Option<String>> {
+    let metadata = match fs::symlink_metadata(path) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => {
+            return Err(ReconcileError::io(
+                ErrorCode::Io,
+                "cannot inspect managed file",
+                error,
+            ));
+        }
+    };
+    if metadata.file_type().is_symlink() || !metadata.is_file() {
+        return Err(ReconcileError::new(
+            ErrorCode::NonRegularEntry,
+            "managed file destination is not a regular file",
+        ));
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        if metadata.nlink() != 1 {
+            return Err(ReconcileError::new(
+                ErrorCode::NonRegularEntry,
+                "managed file destination is hard-linked",
+            ));
+        }
+    }
+    if metadata.len() > MAX_FILE as u64 {
+        return Err(ReconcileError::new(
+            ErrorCode::BundleLimitExceeded,
+            "managed file exceeds 16 MiB",
+        ));
+    }
+    let mut bytes = Vec::with_capacity(metadata.len() as usize);
+    File::open(path)
+        .map(|file| file.take(MAX_FILE as u64 + 1))
+        .and_then(|mut file| file.read_to_end(&mut bytes))
+        .map_err(|error| ReconcileError::io(ErrorCode::Io, "cannot read managed file", error))?;
+    if bytes.len() > MAX_FILE {
+        return Err(ReconcileError::new(
+            ErrorCode::BundleLimitExceeded,
+            "managed file grew beyond 16 MiB while reading",
+        ));
+    }
+    Ok(Some(format!("sha256:{}", hex_file_sha256(&bytes))))
+}
+
+fn write_regular_file(path: &Path, bytes: &[u8]) -> Result<()> {
+    let file = OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(path)
+        .map_err(|error| ReconcileError::io(ErrorCode::Io, "cannot stage managed file", error))?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        file.set_permissions(fs::Permissions::from_mode(0o644))
+            .map_err(|error| {
+                ReconcileError::io(ErrorCode::Io, "cannot set managed file permissions", error)
+            })?;
+    }
+    (&file)
+        .write_all(bytes)
+        .and_then(|_| file.sync_all())
+        .map_err(|error| ReconcileError::io(ErrorCode::Io, "cannot sync managed file", error))
+}
+
+fn read_file_receipt(path: &Path, target: &Path, name: &str) -> Result<Option<FileReceipt>> {
+    let metadata = match fs::symlink_metadata(path) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => {
+            return Err(ReconcileError::io(
+                ErrorCode::Io,
+                "cannot inspect file Receipt",
+                error,
+            ));
+        }
+    };
+    if metadata.file_type().is_symlink() || !metadata.is_file() || metadata.len() > MAX_STATE_FILE {
+        return Err(ReconcileError::new(
+            ErrorCode::CorruptReceipt,
+            "file Receipt is not a bounded regular file",
+        ));
+    }
+    let bytes = fs::read(path)
+        .map_err(|error| ReconcileError::io(ErrorCode::Io, "cannot read file Receipt", error))?;
+    let receipt: FileReceipt = serde_json::from_slice(&bytes).map_err(|_| {
+        ReconcileError::new(ErrorCode::CorruptReceipt, "file Receipt is invalid JSON")
+    })?;
+    if receipt.version != 1
+        || receipt.target != path_string(target)
+        || receipt.name != name
+        || validate_file_name(&receipt.name).is_err()
+        || parse_digest(&receipt.digest).is_err()
+    {
+        return Err(ReconcileError::new(
+            ErrorCode::CorruptReceipt,
+            "file Receipt binding or contents are invalid",
+        ));
+    }
+    Ok(Some(receipt))
+}
+
+fn recover_file_transaction(
+    destination: &Path,
+    shared: &Path,
+    receipt_path: &Path,
+    journal_path: &Path,
+) -> Result<()> {
+    let metadata = match fs::symlink_metadata(journal_path) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => {
+            return Err(ReconcileError::io(
+                ErrorCode::RecoveryFailed,
+                "cannot inspect file journal",
+                error,
+            ));
+        }
+    };
+    if metadata.file_type().is_symlink() || !metadata.is_file() || metadata.len() > MAX_STATE_FILE {
+        return Err(ReconcileError::new(
+            ErrorCode::RecoveryFailed,
+            "file journal is not a bounded regular file",
+        ));
+    }
+    let bytes = fs::read(journal_path).map_err(|error| {
+        ReconcileError::io(ErrorCode::RecoveryFailed, "cannot read file journal", error)
+    })?;
+    let journal: FileJournal = serde_json::from_slice(&bytes)
+        .map_err(|_| ReconcileError::new(ErrorCode::RecoveryFailed, "file journal is corrupt"))?;
+    let target = destination.parent().ok_or_else(|| {
+        ReconcileError::new(ErrorCode::RecoveryFailed, "managed file has no parent")
+    })?;
+    if journal.version != 1
+        || journal.target != path_string(target)
+        || destination.file_name().and_then(|x| x.to_str()) != Some(journal.name.as_str())
+        || validate_file_name(&journal.name).is_err()
+        || journal.transaction.len() != 64
+        || journal
+            .desired_digest
+            .as_deref()
+            .is_some_and(|digest| parse_digest(digest).is_err())
+    {
+        return Err(ReconcileError::new(
+            ErrorCode::RecoveryFailed,
+            "file journal binding is invalid",
+        ));
+    }
+    let transaction = shared.join(format!("txn-{}", journal.transaction));
+    if journal.phase == Phase::Committed {
+        if transaction.exists() {
+            remove_tree(&transaction)?;
+        }
+        remove_file_sync(journal_path)?;
+        return Ok(());
+    }
+    let backup = transaction.join("old");
+    if backup.exists() {
+        if destination.exists() {
+            let actual = digest_regular_file(destination)?;
+            if journal.desired_digest.as_ref() != actual.as_ref() {
+                return Err(ReconcileError::new(
+                    ErrorCode::RecoveryFailed,
+                    "managed file changed during recovery",
+                ));
+            }
+            fs::remove_file(destination).map_err(|error| {
+                ReconcileError::io(
+                    ErrorCode::RecoveryFailed,
+                    "cannot remove interrupted managed file",
+                    error,
+                )
+            })?;
+        }
+        fs::rename(&backup, destination).map_err(|error| {
+            ReconcileError::io(
+                ErrorCode::RecoveryFailed,
+                "cannot restore managed file",
+                error,
+            )
+        })?;
+        sync_parent(destination)?;
+    } else if !journal.old_present {
+        if destination.exists() {
+            let actual = digest_regular_file(destination)?;
+            if journal.desired_digest.as_ref() != actual.as_ref() {
+                return Err(ReconcileError::new(
+                    ErrorCode::RecoveryFailed,
+                    "managed file changed during recovery",
+                ));
+            }
+            fs::remove_file(destination).map_err(|error| {
+                ReconcileError::io(
+                    ErrorCode::RecoveryFailed,
+                    "cannot roll back managed file creation",
+                    error,
+                )
+            })?;
+            sync_parent(destination)?;
+        }
+    } else {
+        let actual = digest_regular_file(destination)?;
+        let old_digest = journal.old_receipt.as_ref().map(|receipt| &receipt.digest);
+        if actual.as_ref() != old_digest {
+            return Err(ReconcileError::new(
+                ErrorCode::RecoveryFailed,
+                "managed file backup is missing",
+            ));
+        }
+    }
+    match journal.old_receipt {
+        Some(receipt) => write_json_atomic(receipt_path, &receipt)?,
+        None if receipt_path.exists() => remove_file_sync(receipt_path)?,
+        None => {}
+    }
+    if transaction.exists() {
+        remove_tree(&transaction)?;
+    }
+    remove_file_sync(journal_path)
+}
+
+fn file_outcome(target: &Path, assignment: &FileAssignment, changed: bool) -> FileReconcileOutcome {
+    FileReconcileOutcome {
+        target: target.to_owned(),
+        file: assignment.file.name.clone(),
+        assignment_id: assignment.assignment_id.clone(),
+        desired_revision_id: assignment.desired_revision_id.clone(),
+        changed,
+        owned_digest: assignment.file.digest.clone(),
+    }
+}
+
 fn read_receipt(path: &Path, target: &Path) -> Result<Option<Receipt>> {
     match fs::symlink_metadata(path) {
         Ok(meta)
@@ -1326,6 +1866,13 @@ fn hex_sha256(bytes: &[u8]) -> String {
     out
 }
 
+fn hex_file_sha256(bytes: &[u8]) -> String {
+    let mut digest = Sha256::new();
+    digest.update(b"fleet.file/v1\0");
+    digest.update(bytes);
+    format!("{:x}", digest.finalize())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1394,6 +1941,141 @@ mod tests {
             desired_revision_id: format!("rev-{id}"),
             skills,
         }
+    }
+    fn file_assignment(id: &str, name: &str, content: Option<&[u8]>) -> FileAssignment {
+        let (digest, size, schema, bytes) = match content {
+            Some(content) => (
+                Some(format!("sha256:{}", hex_file_sha256(content))),
+                Some(content.len() as u64),
+                Some(FILE_SCHEMA.to_owned()),
+                content.to_vec(),
+            ),
+            None => (None, None, None, Vec::new()),
+        };
+        FileAssignment {
+            assignment_id: id.into(),
+            desired_revision_id: format!("rev-{id}"),
+            file: DesiredFile {
+                name: name.into(),
+                digest,
+                size,
+                schema,
+                content: bytes,
+            },
+        }
+    }
+    #[test]
+    fn managed_file_installs_updates_and_removes_owned_content() {
+        let (_temporary, reconciler, mut target) = setup();
+        target.path = ".codex".into();
+        assert!(
+            reconciler
+                .reconcile_file(&target, &file_assignment("1", "AGENTS.md", Some(b"one")))
+                .unwrap()
+                .changed
+        );
+        assert_eq!(
+            fs::read(reconciler.home.join(".codex/AGENTS.md")).unwrap(),
+            b"one"
+        );
+        reconciler
+            .reconcile_file(&target, &file_assignment("2", "AGENTS.md", Some(b"two")))
+            .unwrap();
+        assert_eq!(
+            fs::read(reconciler.home.join(".codex/AGENTS.md")).unwrap(),
+            b"two"
+        );
+        reconciler
+            .reconcile_file(&target, &file_assignment("3", "AGENTS.md", None))
+            .unwrap();
+        assert!(!reconciler.home.join(".codex/AGENTS.md").exists());
+    }
+    #[test]
+    fn managed_file_refuses_to_replace_unowned_content() {
+        let (_temporary, reconciler, mut target) = setup();
+        target.path = ".claude".into();
+        fs::create_dir(reconciler.home.join(".claude")).unwrap();
+        fs::write(reconciler.home.join(".claude/CLAUDE.md"), b"personal").unwrap();
+        let error = reconciler
+            .reconcile_file(&target, &file_assignment("1", "CLAUDE.md", Some(b"fleet")))
+            .unwrap_err();
+        assert_eq!(error.code(), ErrorCode::OwnershipConflict);
+        assert_eq!(
+            fs::read(reconciler.home.join(".claude/CLAUDE.md")).unwrap(),
+            b"personal"
+        );
+    }
+    #[test]
+    fn managed_file_removal_does_not_create_an_excluded_client_directory() {
+        let (_temporary, reconciler, mut target) = setup();
+        target.path = ".claude".into();
+
+        let outcome = reconciler
+            .reconcile_file(&target, &file_assignment("1", "CLAUDE.md", None))
+            .unwrap();
+
+        assert!(!outcome.changed);
+        assert!(!reconciler.home.join(".claude").exists());
+    }
+    #[test]
+    fn managed_file_repairs_owned_drift() {
+        let (_temporary, reconciler, mut target) = setup();
+        target.path = ".config/opencode".into();
+        let assignment = file_assignment("1", "AGENTS.md", Some(b"fleet"));
+        reconciler.reconcile_file(&target, &assignment).unwrap();
+        fs::write(reconciler.home.join(".config/opencode/AGENTS.md"), b"drift").unwrap();
+        assert!(
+            reconciler
+                .reconcile_file(&target, &assignment)
+                .unwrap()
+                .changed
+        );
+        assert_eq!(
+            fs::read(reconciler.home.join(".config/opencode/AGENTS.md")).unwrap(),
+            b"fleet"
+        );
+    }
+    #[test]
+    fn managed_file_recovery_restores_the_previous_content() {
+        let (_temporary, reconciler, mut target) = setup();
+        target.path = ".codex".into();
+        reconciler
+            .reconcile_file(&target, &file_assignment("1", "AGENTS.md", Some(b"old")))
+            .unwrap();
+        let target_path = reconciler.home.join(".codex");
+        let destination = target_path.join("AGENTS.md");
+        let key = hex_sha256(destination.as_os_str().to_string_lossy().as_bytes());
+        let shared = target_path
+            .parent()
+            .unwrap()
+            .join(".fleet-reconcile")
+            .join(&key);
+        let transaction = "c".repeat(64);
+        let transaction_root = shared.join(format!("txn-{transaction}"));
+        fs::create_dir_all(&transaction_root).unwrap();
+        fs::rename(&destination, transaction_root.join("old")).unwrap();
+        fs::write(&destination, b"new").unwrap();
+        let state = reconciler.state_dir.join("files").join(&key);
+        let old_receipt =
+            read_file_receipt(&state.join("receipt.json"), &target_path, "AGENTS.md").unwrap();
+        write_json_atomic(
+            &state.join("journal.json"),
+            &FileJournal {
+                version: 1,
+                target: path_string(&target_path),
+                name: "AGENTS.md".into(),
+                transaction,
+                phase: Phase::Applying,
+                old_receipt,
+                old_present: true,
+                desired_digest: Some(format!("sha256:{}", hex_file_sha256(b"new"))),
+            },
+        )
+        .unwrap();
+
+        reconciler.recover_file(&target, "AGENTS.md").unwrap();
+
+        assert_eq!(fs::read(destination).unwrap(), b"old");
     }
     #[test]
     fn install_update_remove_and_preserve_unowned() {

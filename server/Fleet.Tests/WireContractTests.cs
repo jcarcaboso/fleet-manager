@@ -28,4 +28,18 @@ public sealed class WireContractTests
         Assert.Equal("enrollment-token-fixture", value.Token);
         Assert.Equal(new DateTimeOffset(2026, 9, 7, 0, 15, 0, TimeSpan.Zero), value.ExpiresAt);
     }
+
+    [Fact]
+    public void Skill_assignments_omit_the_managed_file_extension()
+    {
+        var assignment = new AgentAssignment(
+            new(Guid.NewGuid()), new(Guid.NewGuid()), new(Guid.NewGuid()), new(Guid.NewGuid()),
+            "skills", new("home", ".agents/skills"), []);
+        var options = new JsonSerializerOptions(JsonSerializerDefaults.Web);
+        WireJson.Configure(options);
+
+        var json = JsonSerializer.SerializeToNode(assignment, options)!.AsObject();
+
+        Assert.False(json.ContainsKey("file"));
+    }
 }

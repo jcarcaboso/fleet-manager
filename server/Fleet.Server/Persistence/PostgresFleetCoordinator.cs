@@ -305,7 +305,7 @@ public sealed class PostgresFleetCoordinator(
     public async Task<PublicationResult> AcceptSourceSnapshotAsync(AcceptedSourceSnapshot snapshot, CancellationToken cancellationToken = default)
     {
         Required(snapshot.SourceRevision, 500, "source_revision");
-        if (snapshot.Targets.Count > 10_000 || snapshot.Bundles.Count > 20_000 || snapshot.Warnings.Count > 1_000)
+        if (snapshot.Targets.Count > 40_000 || snapshot.Bundles.Count > 20_000 || snapshot.Warnings.Count > 1_000)
             throw Error("snapshot_too_large", "Source snapshot exceeds a collection limit.");
         ValidateSnapshot(snapshot);
 
@@ -324,6 +324,7 @@ public sealed class PostgresFleetCoordinator(
             throw Error("unknown_node", "Source snapshot refers to an unknown Node.");
         var suppliedDigests = snapshot.Bundles.Select(x => x.Digest).ToHashSet(StringComparer.Ordinal);
         var referencedDigests = snapshot.Targets.SelectMany(x => x.Skills).Select(x => x.BundleDigest)
+            .Concat(snapshot.Targets.Select(x => x.File?.BundleDigest).OfType<string>())
             .Where(x => !suppliedDigests.Contains(x)).Distinct().ToArray();
         var storedDigestCount = await db.Bundles.CountAsync(x => referencedDigests.Contains(x.Digest), cancellationToken);
         if (storedDigestCount != referencedDigests.Length)
@@ -419,6 +420,13 @@ public sealed class PostgresFleetCoordinator(
                         BundleDigest = skill.BundleDigest,
                         Ordinal = ordinal++
                     });
+                if (target.File is not null)
+                    db.AssignmentFiles.Add(new AssignmentFileRow
+                    {
+                        AssignmentId = assignment.Id,
+                        Name = target.File.Name,
+                        BundleDigest = target.File.BundleDigest,
+                    });
                 db.Attempts.Add(new AttemptRow
                 {
                     Id = Guid.NewGuid(),
@@ -489,8 +497,15 @@ public sealed class PostgresFleetCoordinator(
                             orderby item.Ordinal
                             select new AssignmentSkill(item.Name, item.BundleDigest, bundle.Size, bundle.Schema))
             .ToListAsync(cancellationToken);
+        var file = await (from item in db.AssignmentFiles
+                          join bundle in db.Bundles on item.BundleDigest equals bundle.Digest into available
+                          from bundle in available.DefaultIfEmpty()
+                          where item.AssignmentId == assignment.Id
+                          select new AssignmentFile(item.Name, item.BundleDigest,
+                              bundle == null ? null : bundle.Size, bundle == null ? null : bundle.Schema))
+            .SingleOrDefaultAsync(cancellationToken);
         return new(new(new(assignment.Id), new(attempt.Id), new(assignment.RolloutId), new(assignment.DesiredRevisionId),
-            assignment.TargetName, new(assignment.TargetBase, assignment.TargetPath), skills));
+            assignment.TargetName, new(assignment.TargetBase, assignment.TargetPath), skills, file));
     }
 
     public async Task<BundleContent> GetBundleAsync(NodeAuthentication authentication, string digest, CancellationToken cancellationToken = default)
@@ -503,6 +518,13 @@ public sealed class PostgresFleetCoordinator(
                                     (assignment.IsCurrent || attempt.State == (int)ConvergenceState.Pending ||
                                      attempt.State == (int)ConvergenceState.Applying)
                                 select skill).AnyAsync(cancellationToken);
+        authorized = authorized || await (from assignment in db.Assignments
+                                          join file in db.AssignmentFiles on assignment.Id equals file.AssignmentId
+                                          join attempt in db.Attempts on assignment.Id equals attempt.AssignmentId
+                                          where assignment.NodeId == authentication.NodeId.Value && file.BundleDigest == digest &&
+                                              (assignment.IsCurrent || attempt.State == (int)ConvergenceState.Pending ||
+                                               attempt.State == (int)ConvergenceState.Applying)
+                                          select file).AnyAsync(cancellationToken);
         if (!authorized) throw Error("bundle_not_authorized", "Bundle is not assigned to this Node.");
         var bundle = await db.Bundles.AsNoTracking().SingleAsync(x => x.Digest == digest, cancellationToken);
         return new(bundle.Digest, bundle.Schema, bundle.Size, bundle.Content);
@@ -659,8 +681,13 @@ public sealed class PostgresFleetCoordinator(
         var skills = await db.AssignmentSkills.AsNoTracking().Where(x => x.AssignmentId == current.Id)
             .OrderBy(x => x.Name).Select(x => new { x.Name, x.BundleDigest }).ToListAsync(cancellationToken);
         var desired = target.Skills.OrderBy(x => x.Name).ToList();
-        return skills.Count == desired.Count && skills.Zip(desired).All(x =>
-            x.First.Name == x.Second.Name && x.First.BundleDigest == x.Second.BundleDigest);
+        if (skills.Count != desired.Count || !skills.Zip(desired).All(x =>
+            x.First.Name == x.Second.Name && x.First.BundleDigest == x.Second.BundleDigest)) return false;
+        var file = await db.AssignmentFiles.AsNoTracking().Where(x => x.AssignmentId == current.Id)
+            .Select(x => new { x.Name, x.BundleDigest }).SingleOrDefaultAsync(cancellationToken);
+        return file is null
+            ? target.File is null
+            : target.File is not null && file.Name == target.File.Name && file.BundleDigest == target.File.BundleDigest;
     }
 
     private static void ValidateSnapshot(AcceptedSourceSnapshot snapshot)
@@ -675,7 +702,7 @@ public sealed class PostgresFleetCoordinator(
         foreach (var bundle in snapshot.Bundles)
         {
             ValidateSha256(bundle.Digest, "bundle_digest");
-            if (bundle.Size is < 0 or > 16 * 1024 * 1024 || bundle.Size != bundle.Content.LongLength || !DigestMatches(bundle.Digest, bundle.Content))
+            if (bundle.Size is < 0 or > 16 * 1024 * 1024 || bundle.Size != bundle.Content.LongLength || !DigestMatches(bundle.Digest, bundle.Schema, bundle.Content))
                 throw Error("invalid_bundle_digest", "Bundle size or digest does not match its content.");
             Required(bundle.Schema, 100, "bundle_schema");
         }
@@ -688,10 +715,21 @@ public sealed class PostgresFleetCoordinator(
                 throw Error("invalid_target_descriptor", "Target must be a non-empty relative path below home.");
             if (target.Skills.Count > 10_000 || target.Skills.Select(x => x.Name).Distinct(StringComparer.Ordinal).Count() != target.Skills.Count)
                 throw Error("invalid_skills", "Target Skills exceed the limit or contain duplicate names.");
+            if ((target.File is null) == (target.TargetName.StartsWith("agent-file/", StringComparison.Ordinal)))
+                throw Error("invalid_target_content", "A Target must contain either Skills or one managed file.");
+            if (target.File is not null && target.Skills.Count != 0)
+                throw Error("invalid_target_content", "A managed-file Target cannot also contain Skills.");
             foreach (var skill in target.Skills)
             {
                 Required(skill.Name, 200, "skill_name");
                 ValidateSha256(skill.BundleDigest, "bundle_digest");
+            }
+            if (target.File is not null)
+            {
+                Required(target.File.Name, 255, "file_name");
+                if (target.File.Name.Contains('/') || target.File.Name.Contains('\\') || target.File.Name is "." or "..")
+                    throw Error("invalid_file_name", "Managed file name must be one portable path segment.");
+                if (target.File.BundleDigest is not null) ValidateSha256(target.File.BundleDigest, "bundle_digest");
             }
         }
         foreach (var warning in snapshot.Warnings)
@@ -748,9 +786,12 @@ public sealed class PostgresFleetCoordinator(
         if (hex.Length != 64 || !hex.All(Uri.IsHexDigit)) throw Error("invalid_" + field, $"{field} must be a SHA-256 digest.");
     }
 
-    private static bool DigestMatches(string expected, byte[] content)
+    private static bool DigestMatches(string expected, string schema, byte[] content)
     {
-        var hex = Convert.ToHexString(SHA256.HashData(content)).ToLowerInvariant();
+        var digestInput = schema == "fleet.file/v1"
+            ? Encoding.UTF8.GetBytes("fleet.file/v1\0").Concat(content).ToArray()
+            : content;
+        var hex = Convert.ToHexString(SHA256.HashData(digestInput)).ToLowerInvariant();
         return string.Equals(expected, hex, StringComparison.OrdinalIgnoreCase) || string.Equals(expected, "sha256:" + hex, StringComparison.OrdinalIgnoreCase);
     }
 
