@@ -78,7 +78,7 @@ config = {
 }
 (private / 'server.json').write_text(json.dumps(config, indent=2) + '\n')
 bind = '[' + args.bind_ip + ']' if ':' in args.bind_ip else args.bind_ip
-(root / '.env').write_text('FLEET_IMAGE=skorcius/fleet-manager:0.5.0\n'
+(root / '.env').write_text('FLEET_IMAGE=skorcius/fleet-manager:0.5.1\n'
                            + f'FLEET_HOSTNAME={args.host}\nFLEET_PUBLIC_URL=https://{url_host}:{args.port}\nFLEET_BIND_IP={bind}\nFLEET_PORT={args.port}\nFLEET_SOURCE_REMOTE=\n')
 (root / 'operator.env').write_text('export FLEET_SERVER_URL=' + shlex.quote(f'https://{url_host}:{args.port}') + '\n'
                                    + 'export FLEET_OPERATOR_TOKEN=' + shlex.quote(token) + '\n')

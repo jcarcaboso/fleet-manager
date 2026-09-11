@@ -44,9 +44,9 @@ agents/<source-name>/AGENTS.md
 The Server discovers groups from the immediate directories below `skills/`.
 Every immediate child directory of a discovered group is a Skill. A group may
 contain one Skill when an Operator needs a narrowly assigned collection.
-Every accepted source revision contains at least one valid Skill below
-`skills/` and one valid agent instruction source below `agents/`. Git does not
-track empty directories, so an empty root does not satisfy this requirement.
+The `skills/` and `agents/` roots are independent and optional. If either root
+is absent, the Server discovers no content of that type. A manifest still fails
+when it explicitly selects a group or agent source that does not exist.
 The legacy `groups/` source directory and top-level `groups` manifest field are
 invalid. Move the directories and remove the field in one source commit.
 
@@ -146,19 +146,19 @@ Claude Code. When `clients` is present, the source applies only to those
 clients. A Node may use several sources as long as no client occurs in more
 than one entry. Overlapping client mappings, unknown clients, and unknown
 sources invalidate the source revision. An entry-level `clients: []` is also
-invalid; use a Node-level `agents: []` to request removal.
+invalid; use a Node-level `agents: []` to clear every supported client file.
 
 Missing `targets.agents` means Fleet publishes no Managed-file Targets for that
 Node and leaves any earlier assignments untouched. An explicit `agents: []`
-publishes removal Assignments for all supported clients. A nonempty list also
-publishes removals for clients it does not select. The Agent removes a file only
-when its local Receipt proves Fleet owns it. It reports an ownership conflict
-instead of replacing a pre-existing file.
+publishes empty content for all supported clients, creating each instruction
+file if needed. A nonempty list publishes only the selected clients and leaves
+unselected client files untouched. The Agent reports an ownership conflict
+instead of replacing a pre-existing file that Fleet does not own.
 
 Deleting a referenced source makes the repository invalid and leaves the last
 accepted desired revision active. To retire a source, first update every Node
-that references it. Use `agents: []` and wait for that Rollout when its managed
-files should be removed.
+that references it. Use `agents: []` and wait for that Rollout when all of its
+supported client files should be cleared.
 
 The Server owns the enrolled Node registry. Keys under `nodes` are unique Node
 aliases, resolved by the Server to stable internal Node IDs. The alias is the

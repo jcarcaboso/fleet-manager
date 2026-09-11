@@ -26,6 +26,7 @@ public sealed class GitSourceScanner(
             ["opencode"] = new(".config/opencode", "AGENTS.md"),
             ["claude"] = new(".claude", "CLAUDE.md"),
         };
+    private static readonly SnapshotBundle EmptyAgentInstructions = AgentInstructionsBundle([]);
 
     public async Task<SourceScanResult> ScanAsync(string? lastObservedRevision, CancellationToken cancellationToken)
     {
@@ -84,14 +85,17 @@ public sealed class GitSourceScanner(
             if (diagnostics.Any)
                 return new SourceScanResult.Invalid(revision, diagnostics.Items);
 
-            var bundles = skillsByGroup.Values.SelectMany(x => x.Values).Select(x => x.Bundle)
-                .Concat(agentSources.Values)
-                .DistinctBy(x => x.Digest, StringComparer.Ordinal).OrderBy(x => x.Digest, StringComparer.Ordinal).ToArray();
             var warnings = BuildWarnings(manifest, nodeAliases, skillsByGroup, diagnostics, scanToken);
             if (diagnostics.Any)
                 return new SourceScanResult.Invalid(revision, diagnostics.Items);
-            var targets = BuildTargets(manifest, nodeAliases, skillsByGroup)
-                .Concat(BuildAgentTargets(manifest, nodeAliases, agentSources)).ToArray();
+            var agentTargets = BuildAgentTargets(manifest, nodeAliases, agentSources);
+            var bundles = skillsByGroup.Values.SelectMany(x => x.Values).Select(x => x.Bundle)
+                .Concat(agentSources.Values)
+                .Concat(agentTargets.Any(x => x.File?.BundleDigest == EmptyAgentInstructions.Digest)
+                    ? [EmptyAgentInstructions]
+                    : [])
+                .DistinctBy(x => x.Digest, StringComparer.Ordinal).OrderBy(x => x.Digest, StringComparer.Ordinal).ToArray();
+            var targets = BuildTargets(manifest, nodeAliases, skillsByGroup).Concat(agentTargets).ToArray();
             return new SourceScanResult.Snapshot(new AcceptedSourceSnapshot(revision, bundles, targets, warnings, DateTimeOffset.UtcNow));
         }
         catch (Exception exception) when (exception is GitSourceException or IOException or UnauthorizedAccessException or DecoderFallbackException or FormatException or OverflowException)
@@ -108,8 +112,6 @@ public sealed class GitSourceScanner(
         IReadOnlyList<TreeEntry> entries, DiagnosticBag diagnostics, CancellationToken cancellationToken)
     {
         var agentEntries = entries.Where(x => x.Path.StartsWith("agents/", StringComparison.Ordinal)).ToArray();
-        if (agentEntries.Length == 0)
-            diagnostics.Add("missing_agents_directory", "The repository must contain at least one tracked file below agents/.", "agents");
         foreach (var rootFile in agentEntries.Where(x => !x.Path["agents/".Length..].Contains('/')))
             diagnostics.Add("unexpected_agent_file", "Agent instruction files must be stored as agents/<source>/AGENTS.md.", rootFile.Path);
 
@@ -152,6 +154,11 @@ public sealed class GitSourceScanner(
             return null;
         }
         var content = await ReadBlobAsync(entry, cancellationToken);
+        return AgentInstructionsBundle(content);
+    }
+
+    private static SnapshotBundle AgentInstructionsBundle(byte[] content)
+    {
         var digestInput = Encoding.UTF8.GetBytes("fleet.file/v1\0").Concat(content).ToArray();
         var digest = $"sha256:{Convert.ToHexStringLower(SHA256.HashData(digestInput))}";
         return new SnapshotBundle(digest, "fleet.file/v1", content.LongLength, content);
@@ -186,8 +193,6 @@ public sealed class GitSourceScanner(
         foreach (var legacy in entries.Where(x => x.Path.StartsWith("groups/", StringComparison.Ordinal)))
             diagnostics.Add("legacy_skill_layout", "Skill groups must be stored below skills/.", legacy.Path);
         var skillEntries = entries.Where(x => x.Path.StartsWith("skills/", StringComparison.Ordinal)).ToArray();
-        if (skillEntries.Length == 0)
-            diagnostics.Add("missing_skills_directory", "The repository must contain at least one tracked file below skills/.", "skills");
         foreach (var shallow in skillEntries.Where(x => x.Path["skills/".Length..].Split('/').Length < 3))
             diagnostics.Add("unexpected_skill_file", "Skill files must be stored as skills/<group>/<skill>/<path>.", shallow.Path);
         var groups = skillEntries
@@ -368,19 +373,30 @@ public sealed class GitSourceScanner(
         {
             var configured = node.Value.Targets.Agents;
             if (configured is null) continue;
+            if (configured.Count == 0)
+            {
+                foreach (var client in AgentClients.OrderBy(x => x.Key, StringComparer.Ordinal))
+                    targets.Add(new SnapshotTarget(
+                        nodeAliases[node.Key],
+                        $"agent-file/{client.Key}",
+                        new TargetDescriptor("home", client.Value.TargetPath),
+                        [],
+                        new SnapshotFile(client.Value.TargetFileName, EmptyAgentInstructions.Digest)));
+                continue;
+            }
             var desiredByClient = new Dictionary<string, SnapshotBundle>(StringComparer.Ordinal);
             foreach (var agentTarget in configured)
                 foreach (var client in agentTarget!.Clients ?? AgentClients.Keys)
                     desiredByClient.Add(client, sources[agentTarget.Source!]);
-            foreach (var client in AgentClients.OrderBy(x => x.Key, StringComparer.Ordinal))
+            foreach (var desired in desiredByClient.OrderBy(x => x.Key, StringComparer.Ordinal))
             {
-                var desiredDigest = desiredByClient.TryGetValue(client.Key, out var bundle) ? bundle.Digest : null;
+                var client = AgentClients[desired.Key];
                 targets.Add(new SnapshotTarget(
                     nodeAliases[node.Key],
-                    $"agent-file/{client.Key}",
-                    new TargetDescriptor("home", client.Value.TargetPath),
+                    $"agent-file/{desired.Key}",
+                    new TargetDescriptor("home", client.TargetPath),
                     [],
-                    new SnapshotFile(client.Value.TargetFileName, desiredDigest)));
+                    new SnapshotFile(client.TargetFileName, desired.Value.Digest)));
             }
         }
         return targets;

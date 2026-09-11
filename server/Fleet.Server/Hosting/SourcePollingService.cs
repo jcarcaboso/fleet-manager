@@ -72,8 +72,17 @@ public sealed class SourcePollingService(
                     metrics.RecordSourceScan("unchanged");
                     return new { outcome = "unchanged", sourceRevision = unchanged.SourceRevision };
                 case SourceScanResult.Invalid invalid:
-                    // Only bounded validator diagnostics are returned; never log Git stderr or file bytes.
                     logger.LogWarning("Source scan rejected with {Count} diagnostics", invalid.Diagnostics.Count);
+                    foreach (var diagnostic in invalid.Diagnostics)
+                    {
+                        // Validator diagnostics are bounded and contain no file bytes. Git failures may contain
+                        // remote stderr, so log their code without their message.
+                        if (diagnostic.Code == "git_source_failure")
+                            logger.LogWarning("Source scan diagnostic {Code}", diagnostic.Code);
+                        else
+                            logger.LogWarning("Source scan diagnostic {Code} at {Path}: {Message}",
+                                diagnostic.Code, diagnostic.Path ?? "repository", diagnostic.Message);
+                    }
                     var first = invalid.Diagnostics.FirstOrDefault();
                     await coordinator.RecordSourceScanAsync(new RecordSourceScan(invalid.SourceRevision,
                         first?.Code == "git_source_failure" ? SourceScanOutcome.Failed : SourceScanOutcome.Invalid,

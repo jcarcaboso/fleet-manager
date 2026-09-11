@@ -31,7 +31,7 @@ migrations with Docker Compose. The dashboard is part of the Server image, so
 it does not need a separate container. Follow the
 [homelab setup](deploy/homelab/README.md) for a first installation.
 
-The amd64 Server image is `skorcius/fleet-manager:0.5.0`.
+The amd64 Server image is `skorcius/fleet-manager:0.5.1`.
 For an existing installation, back up PostgreSQL and private configuration,
 replace `compose.yaml` with the current release copy, and preserve `.env`, `secrets/`,
 `operator.env`, `ssh/`, and Docker volumes. Set the image in `.env`, then run:
@@ -154,9 +154,8 @@ Put Skills under `skills/<group>/<skill>/`. Fleet discovers both levels from
 the directories, so `fleet.yml` has no top-level group catalog. For each Node,
 omit `targets.skills.groups` or set it to `[]` to sync every discovered group.
 A nonempty array selects those groups and defines their duplicate-Skill
-precedence. A source revision must contain both `skills/` and `agents/`. Since
-Git does not track empty directories, each root must contain at least one valid
-Skill or agent instruction source.
+precedence. The `skills/` and `agents/` roots are independent and optional. An
+absent root contributes no content of that type.
 
 Repositories using the earlier layout must move `groups/<group>/<skill>/` to
 `skills/<group>/<skill>/` and remove the top-level `groups` field from
@@ -184,7 +183,9 @@ nodes:
 The Server writes the selected content to `.codex/AGENTS.md`,
 `.config/opencode/AGENTS.md`, or `.claude/CLAUDE.md` relative to the Node user's
 home. Omit `targets.agents` to leave agent files unmanaged. Use `agents: []` to
-remove files already owned by Fleet.
+create or replace every supported client's instruction file with an empty file.
+A nonempty list changes only its selected clients and leaves the others as they
+are.
 
 Upgrade `fleet-agent` on managed Nodes before committing instruction sources;
 older Agents do not understand Managed-file Assignments.
@@ -238,6 +239,7 @@ The main design references are:
 - [Implementation status](docs/implementation-status.md)
 - [Operations hardening](docs/technical-design/operations-hardening.md)
 - [Engineering standards](docs/engineering-standards.md)
+- [Fleet Manager 0.5.1 release notes](docs/releases/0.5.1.md)
 - [Fleet Manager 0.5.0 release notes](docs/releases/0.5.0.md)
 - [Server 0.4.1 release notes](docs/releases/0.4.1.md)
 - [Fleet Manager 0.4.0 release notes](docs/releases/0.4.0.md)

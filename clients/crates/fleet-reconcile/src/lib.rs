@@ -1986,7 +1986,16 @@ mod tests {
             b"two"
         );
         reconciler
-            .reconcile_file(&target, &file_assignment("3", "AGENTS.md", None))
+            .reconcile_file(&target, &file_assignment("3", "AGENTS.md", Some(b"")))
+            .unwrap();
+        assert!(reconciler.home.join(".codex/AGENTS.md").is_file());
+        assert!(
+            fs::read(reconciler.home.join(".codex/AGENTS.md"))
+                .unwrap()
+                .is_empty()
+        );
+        reconciler
+            .reconcile_file(&target, &file_assignment("4", "AGENTS.md", None))
             .unwrap();
         assert!(!reconciler.home.join(".codex/AGENTS.md").exists());
     }
