@@ -82,8 +82,6 @@ public sealed class SourcePublicationTests : IAsyncLifetime
         var source = CreateRepository();
         Write(source, "fleet.yml", """
             schema: fleet/v1
-            groups:
-              - stable
             targets:
               skills:
                 base: home
@@ -133,8 +131,6 @@ public sealed class SourcePublicationTests : IAsyncLifetime
         Git(repository, "config", "user.name", "Fleet Fixture");
         Write(repository, "fleet.yml", $$"""
             schema: fleet/v1
-            groups:
-              - stable
             targets:
               skills:
                 base: home
@@ -146,7 +142,7 @@ public sealed class SourcePublicationTests : IAsyncLifetime
                     groups:
                       - stable
             """);
-        Write(repository, "groups/stable/review/SKILL.md", "# Review\n\nReview the requested change.\n");
+        Write(repository, "skills/stable/review/SKILL.md", "# Review\n\nReview the requested change.\n");
         Git(repository, "add", ".");
         Git(repository, "commit", "-m", "publish review skill");
         return repository;

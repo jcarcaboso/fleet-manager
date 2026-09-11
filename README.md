@@ -143,11 +143,23 @@ Nodes catch up after reconnecting. The sync result confirms server publication,
 not that every Agent has finished applying it. Invalid source changes leave the
 current assignments active.
 
-The Server reads the `main` branch of one canonical repository. `fleet.yml`
-maps stable Node aliases to Skill groups and target paths. Skill content stays
+The Server reads the `main` branch of one canonical repository. It discovers
+Skill groups from `skills/<group>/<skill>/`; `fleet.yml` maps stable Node
+aliases to optional group selections and target paths. Skill content stays
 reviewable in Git; credentials and mutable Node metadata do not belong there.
 The [desired-state design](docs/architecture/desired-state.md) defines the
 manifest and repository layout.
+
+Put Skills under `skills/<group>/<skill>/`. Fleet discovers both levels from
+the directories, so `fleet.yml` has no top-level group catalog. For each Node,
+omit `targets.skills.groups` or set it to `[]` to sync every discovered group.
+A nonempty array selects those groups and defines their duplicate-Skill
+precedence.
+
+Repositories using the earlier layout must move `groups/<group>/<skill>/` to
+`skills/<group>/<skill>/` and remove the top-level `groups` field from
+`fleet.yml` in the same commit. The Server rejects the legacy layout to prevent
+an accidental empty rollout.
 
 Put each named agent instruction source in `agents/<source>/AGENTS.md`, then map
 sources to AI clients under a Node's `targets.agents`. Fleet discovers source

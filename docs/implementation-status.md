@@ -13,10 +13,10 @@ Implemented:
 - Server coordination transitions covering enrollment authorization and
   consumption, Node authentication/revocation, source publication, Agent poll,
   Bundle lookup, and idempotent Attempt reporting;
-- source adapters for bounded Git inspection, manifest parsing, duplicate
-  warnings, complete nested Skill Bundle encoding, discovered agent sources,
-  per-Node Managed-file resolution for Codex, OpenCode, and Claude Code, and
-  startup/periodic source scanning;
+- source adapters for bounded Git inspection, manifest parsing, discovered
+  Skill groups, duplicate warnings, complete nested Skill Bundle encoding,
+  discovered agent sources, per-Node Managed-file resolution for Codex,
+  OpenCode, and Claude Code, and startup/periodic source scanning;
 - separate Operator bearer-token and Node mTLS authentication policies, with
   route groups for `/operator/v1` and `/agent/v1`;
 - Rust 2024 `fleet` CLI workspace with bearer-token operator requests;

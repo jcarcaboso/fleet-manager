@@ -79,10 +79,8 @@ public sealed class GitSourceScanner(
             var nodeAliases = (await nodes.GetNodeAliasesAsync(scanToken))
                 .ToDictionary(pair => pair.Key, pair => pair.Value, StringComparer.Ordinal);
             var agentSources = await BuildAgentSourcesAsync(entries, diagnostics, scanToken);
-            ValidateManifest(manifest, nodeAliases, agentSources, diagnostics);
-            if (diagnostics.Any)
-                return new SourceScanResult.Invalid(revision, diagnostics.Items);
-            var skillsByGroup = await BuildSkillsAsync(entries, manifest.Groups ?? [], diagnostics, scanToken);
+            var skillsByGroup = await BuildSkillsAsync(entries, diagnostics, scanToken);
+            ValidateManifest(manifest, nodeAliases, agentSources, skillsByGroup, diagnostics);
             if (diagnostics.Any)
                 return new SourceScanResult.Invalid(revision, diagnostics.Items);
 
@@ -181,14 +179,29 @@ public sealed class GitSourceScanner(
     }
 
     private async Task<Dictionary<string, Dictionary<string, BuiltSkill>>> BuildSkillsAsync(
-        IReadOnlyList<TreeEntry> entries, IReadOnlyList<string> groups, DiagnosticBag diagnostics, CancellationToken cancellationToken)
+        IReadOnlyList<TreeEntry> entries, DiagnosticBag diagnostics, CancellationToken cancellationToken)
     {
+        foreach (var legacy in entries.Where(x => x.Path.StartsWith("groups/", StringComparison.Ordinal)))
+            diagnostics.Add("legacy_skill_layout", "Skill groups must be stored below skills/.", legacy.Path);
+        var skillEntries = entries.Where(x => x.Path.StartsWith("skills/", StringComparison.Ordinal)).ToArray();
+        foreach (var shallow in skillEntries.Where(x => x.Path["skills/".Length..].Split('/').Length < 3))
+            diagnostics.Add("unexpected_skill_file", "Skill files must be stored as skills/<group>/<skill>/<path>.", shallow.Path);
+        var groups = skillEntries
+            .Select(x => x.Path["skills/".Length..].Split('/'))
+            .Where(x => x.Length >= 3)
+            .Select(x => x[0])
+            .Distinct(StringComparer.Ordinal)
+            .OrderBy(x => x, StringComparer.Ordinal)
+            .ToArray();
         var result = new Dictionary<string, Dictionary<string, BuiltSkill>>(StringComparer.Ordinal);
         foreach (var group in groups)
         {
-            var prefix = $"groups/{group}/";
-            var groupEntries = entries.Where(x => x.Path.StartsWith(prefix, StringComparison.Ordinal)).ToArray();
-            var skillNames = groupEntries.Select(x => x.Path[prefix.Length..].Split('/')[0]).Distinct(StringComparer.Ordinal).Order().ToArray();
+            var prefix = $"skills/{group}/";
+            ValidateName(group, "group", prefix.TrimEnd('/'), diagnostics);
+            var groupEntries = skillEntries.Where(x => x.Path.StartsWith(prefix, StringComparison.Ordinal)).ToArray();
+            var skillNames = groupEntries.Select(x => x.Path[prefix.Length..].Split('/'))
+                .Where(x => x.Length > 1).Select(x => x[0])
+                .Distinct(StringComparer.Ordinal).Order(StringComparer.Ordinal).ToArray();
             var built = new Dictionary<string, BuiltSkill>(StringComparer.Ordinal);
             foreach (var skill in skillNames)
             {
@@ -256,16 +269,11 @@ public sealed class GitSourceScanner(
         FleetManifest manifest,
         IReadOnlyDictionary<string, NodeId> nodeAliases,
         IReadOnlyDictionary<string, SnapshotBundle> agentSources,
+        IReadOnlyDictionary<string, Dictionary<string, BuiltSkill>> skillGroups,
         DiagnosticBag diagnostics)
     {
         if (manifest is null) { diagnostics.Add("invalid_manifest", "fleet.yml must contain a mapping."); return; }
         if (manifest.Schema != "fleet/v1") diagnostics.Add("unsupported_schema", "schema must be fleet/v1.", "fleet.yml");
-        if (manifest.Groups is null) diagnostics.Add("missing_groups", "groups is required.", "fleet.yml");
-        else
-        {
-            var seen = new HashSet<string>(StringComparer.Ordinal);
-            foreach (var group in manifest.Groups) { ValidateName(group, "group", "fleet.yml", diagnostics); if (!seen.Add(group)) diagnostics.Add("duplicate_group", $"Group '{group}' is declared more than once.", "fleet.yml"); }
-        }
         var defaultTarget = manifest.Targets?.Skills;
         ValidateTarget(defaultTarget?.Base, defaultTarget?.Path, diagnostics);
         if (manifest.Nodes is null) { diagnostics.Add("missing_nodes", "nodes is required.", "fleet.yml"); return; }
@@ -276,8 +284,16 @@ public sealed class GitSourceScanner(
             var target = node?.Targets?.Skills;
             if (target is null) { diagnostics.Add("missing_node_target", $"Node '{alias}' must configure the skills Target.", "fleet.yml"); continue; }
             ValidateTarget(defaultTarget?.Base, target.Path ?? defaultTarget?.Path, diagnostics);
-            if (target.Groups is null) diagnostics.Add("missing_node_groups", $"Node '{alias}' must declare its groups list.", "fleet.yml");
-            else foreach (var group in target.Groups) if (!(manifest.Groups?.Contains(group, StringComparer.Ordinal) ?? false)) diagnostics.Add("unknown_group", $"Node '{alias}' subscribes to undeclared group '{group}'.", "fleet.yml");
+            var seenGroups = new HashSet<string>(StringComparer.Ordinal);
+            foreach (var group in target.Groups ?? [])
+            {
+                ValidateName(group, "group", "fleet.yml", diagnostics);
+                if (string.IsNullOrEmpty(group)) continue;
+                if (!skillGroups.ContainsKey(group))
+                    diagnostics.Add("unknown_group", $"Node '{alias}' selects unknown group '{group}'.", "fleet.yml");
+                if (!seenGroups.Add(group))
+                    diagnostics.Add("duplicate_group", $"Node '{alias}' selects group '{group}' more than once.", "fleet.yml");
+            }
             if (node!.Targets.Agents is not null)
             {
                 var assignedClients = new HashSet<string>(StringComparer.Ordinal);
@@ -327,11 +343,16 @@ public sealed class GitSourceScanner(
         {
             var target = pair.Value.Targets.Skills;
             var skills = new Dictionary<string, SnapshotSkill>(StringComparer.Ordinal);
-            foreach (var group in manifest.Groups.Where(g => target.Groups!.Contains(g, StringComparer.Ordinal)))
+            foreach (var group in SelectedGroups(target, groups))
                 foreach (var skill in groups[group].OrderBy(x => x.Key, StringComparer.Ordinal))
                     skills.TryAdd(skill.Key, new SnapshotSkill(skill.Key, skill.Value.Bundle.Digest));
             return new SnapshotTarget(nodeAliases[pair.Key], "skills", new TargetDescriptor("home", target.Path ?? manifest.Targets.Skills.Path!), skills.Values.ToArray());
         }).ToArray();
+
+    private static IEnumerable<string> SelectedGroups(
+        ManifestTarget target,
+        IReadOnlyDictionary<string, Dictionary<string, BuiltSkill>> groups)
+        => target.Groups is { Count: > 0 } ? target.Groups : groups.Keys.Order(StringComparer.Ordinal);
 
     private static IReadOnlyList<SnapshotTarget> BuildAgentTargets(
         FleetManifest manifest,
@@ -381,7 +402,7 @@ public sealed class GitSourceScanner(
                 .Select(node =>
                 {
                     cancellationToken.ThrowIfCancellationRequested();
-                    return (Id: nodeAliases[node.Key].Value.ToString(), Groups: manifest.Groups.Where(g => node.Value.Targets.Skills.Groups!.Contains(g, StringComparer.Ordinal) && groups[g].ContainsKey(duplicate.Key)).ToArray());
+                    return (Id: nodeAliases[node.Key].Value.ToString(), Groups: SelectedGroups(node.Value.Targets.Skills, groups).Where(g => groups[g].ContainsKey(duplicate.Key)).ToArray());
                 })
                 .Where(x => x.Groups.Length > 1)
                 .OrderBy(x => x.Id, StringComparer.Ordinal)

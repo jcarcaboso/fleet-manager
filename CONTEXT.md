@@ -15,8 +15,9 @@ A uniquely named rooted directory tree containing agent instructions and any
 supporting files chosen by its author.
 
 **Skill group**:
-An ordered source-level collection of Skills used to decide which Skills a Node
-should receive. Groups disappear when desired state is resolved.
+A named source directory containing Skills. A Node may select groups in
+precedence order or leave its selection empty to receive every discovered
+group. Groups disappear when desired state is resolved.
 _Avoid_: Bundle group, Agent group
 
 **Node**:
