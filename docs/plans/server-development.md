@@ -88,10 +88,11 @@ core comes before Linux and macOS adapters. Neither core is a later cleanup.
   credentials scoped to read access.
 - Scan at startup and on the configurable 30-minute interval.
 - Parse `fleet.yml` with strict schema and unknown-field handling.
-- Discover group directories and Skills without a YAML Skill catalog.
+- Discover group directories and Skills without a YAML catalog.
 - Validate nested entry types, names, paths, depth, file counts, file sizes, and
   total source limits.
-- Resolve duplicate Skill names by declared group order and persist warnings.
+- Resolve duplicate Skill names by explicit Node order or default group-name
+  order and persist warnings.
 - Build deterministic immutable Bundles from complete Skill directory trees,
   calculate digests, and store bytes in PostgreSQL.
 - Resolve each configured Node Target to a flat desired Skill map.

@@ -5,6 +5,7 @@ import datetime
 import json
 import os
 from pathlib import Path
+import shutil
 import ssl
 import subprocess
 import tempfile
@@ -35,14 +36,23 @@ def git(*arguments):
     subprocess.run(['git', '-C', str(source), *arguments], check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
 def publish(alias, text, empty=False):
-    (source / 'fleet.yml').write_text('schema: fleet/v1\ngroups: [stable]\ntargets:\n  skills:\n    base: home\n    path: .agents/skills\nnodes:\n  '
-        + alias + ':\n    targets:\n      skills:\n        groups: ' + ('[]' if empty else '[stable]') + '\n')
-    skill = source / 'groups/stable/review'
-    (skill / 'scripts').mkdir(parents=True, exist_ok=True)
-    (skill / 'SKILL.md').write_text(text)
-    executable = skill / 'scripts/check.sh'
-    executable.write_text('#!/bin/sh\nprintf test\\n\n')
-    executable.chmod(0o755)
+    (source / 'fleet.yml').write_text('schema: fleet/v1\ntargets:\n  skills:\n    base: home\n    path: .agents/skills\nnodes:\n  '
+        + alias + ':\n    targets:\n      skills:\n        groups: []\n')
+    agent_source = source / 'agents/available'
+    agent_source.mkdir(parents=True, exist_ok=True)
+    (agent_source / 'AGENTS.md').write_text('Available agent instructions\n')
+    anchor = source / 'skills/baseline/smoke-anchor'
+    anchor.mkdir(parents=True, exist_ok=True)
+    (anchor / 'SKILL.md').write_text('Keeps the required skills directory present during removal tests.\n')
+    skill = source / 'skills/stable/review'
+    if empty:
+        shutil.rmtree(skill)
+    else:
+        (skill / 'scripts').mkdir(parents=True, exist_ok=True)
+        (skill / 'SKILL.md').write_text(text)
+        executable = skill / 'scripts/check.sh'
+        executable.write_text('#!/bin/sh\nprintf test\\n\n')
+        executable.chmod(0o755)
     git('add', '.')
     git('commit', '-m', 'Agent smoke publication ' + uuid.uuid4().hex)
     if args.source_container:
@@ -80,7 +90,7 @@ with tempfile.TemporaryDirectory(prefix='fleet-agent-e2e-') as temporary:
     # Replay a durable terminal report as if its successful response was lost.
     run_path = state / 'run.json'
     saved = json.loads(run_path.read_text())
-    saved['pending_report'] = {'attempt_id': saved['active']['attemptId'], 'succeeded': True, 'error_code': None}
+    saved['pending_report'] = {'attempt_id': saved['targets']['skills']['active']['attemptId'], 'succeeded': True, 'error_code': None}
     run_path.write_text(json.dumps(saved))
     agent('run', '--once')
     assert json.loads(run_path.read_text())['pending_report'] is None, 'Terminal report retry was not acknowledged'

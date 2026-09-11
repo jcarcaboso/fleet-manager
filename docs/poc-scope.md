@@ -30,7 +30,7 @@ outbound connections to its configured Git remote.
 
 The end-to-end fixture contains:
 
-- ordered `definitive`, `testing`, and `in-progress` groups;
+- discovered `definitive`, `testing`, and `in-progress` group directories;
 - at least two Skills discovered from group directories;
 - one Skill containing nested text files, a binary file, and nested
   directories;
@@ -67,8 +67,7 @@ not disappear.
       diagnostics.
 - [ ] A source change outside managed desired state creates no unnecessary
       Rollout.
-- [ ] Group directories are discovered without listing individual Skills in
-      YAML.
+- [ ] Group directories and their Skills are discovered without a YAML catalog.
 - [ ] Each Bundle contains the complete nested directory tree of its Skill.
 - [ ] A Skill without a root `SKILL.md` is rejected.
 - [ ] Changing a nested file changes the Bundle digest and updates assigned
@@ -78,12 +77,14 @@ not disappear.
 - [ ] Case-insensitive or Unicode-normalized path collisions are rejected.
 - [ ] Unsafe entry types and paths make source ingestion fail without changing
       current desired state.
-- [ ] Duplicate Skill names resolve by declared group order and create a warning
-      visible through the Fleet CLI.
+- [ ] Duplicate Skill names resolve by the Node's explicit group order, or by
+      group-name order for the default selection, and create a warning visible
+      through the Fleet CLI.
 
 ### Desired-state resolution
 
-- [ ] Group subscriptions resolve to the expected flat Skill set for each Node.
+- [ ] Default and explicit group selections resolve to the expected flat Skill
+      set for each Node.
 - [ ] The global Target path and per-Node override resolve under each Node's
       actual home directory.
 - [ ] An unknown Node alias or unsafe Target descriptor makes publication fail.

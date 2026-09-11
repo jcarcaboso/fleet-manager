@@ -1,9 +1,5 @@
 schema: fleet/v1
 
-groups:
-  - definitive
-  - testing
-
 targets:
   skills:
     base: home
@@ -13,9 +9,7 @@ nodes:
   example-node:
     targets:
       skills:
-        groups:
-          - definitive
-          - testing
+        groups: []
       agents:
         - source: personal
           clients:

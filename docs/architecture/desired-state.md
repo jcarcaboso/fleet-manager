@@ -4,8 +4,8 @@
 
 The canonical source repository stores reviewable Skill content and the
 declarations that decide which Nodes should receive it. Operators maintain
-groups, Node subscriptions, and Target paths. They do not maintain a second
-catalog of individual Skills in YAML.
+group directories, optional Node selections, and Target paths. They do not
+maintain a second catalog of groups or Skills in YAML.
 
 This document fixes the semantics. Exact YAML field names may change during
 technical design if the meaning remains intact.
@@ -19,7 +19,7 @@ agents/
     AGENTS.md
   work/
     AGENTS.md
-groups/
+skills/
   definitive/
     code-review/
       SKILL.md
@@ -37,12 +37,18 @@ groups/
 The convention is:
 
 ```text
-groups/<group-name>/<skill-name>/
+skills/<group-name>/<skill-name>/
 agents/<source-name>/AGENTS.md
 ```
 
-Every immediate child directory of a declared group is a Skill. A group may
+The Server discovers groups from the immediate directories below `skills/`.
+Every immediate child directory of a discovered group is a Skill. A group may
 contain one Skill when an Operator needs a narrowly assigned collection.
+Every accepted source revision contains at least one valid Skill below
+`skills/` and one valid agent instruction source below `agents/`. Git does not
+track empty directories, so an empty root does not satisfy this requirement.
+The legacy `groups/` source directory and top-level `groups` manifest field are
+invalid. Move the directories and remove the field in one source commit.
 
 Group, Skill, and agent source names use lowercase letters, numbers, and
 hyphens. This avoids case collisions between common macOS and Linux
@@ -88,11 +94,6 @@ protocol decisions.
 ```yaml
 schema: fleet/v1
 
-groups:
-  - definitive
-  - testing
-  - in-progress
-
 targets:
   skills:
     base: home
@@ -124,8 +125,10 @@ nodes:
         - source: work
 ```
 
-The YAML declares group names and order but never lists the Skills inside them.
-The Server discovers Skills from the directories at the exact source revision.
+The YAML lists groups only when a Node needs a subset or a specific precedence
+order. The Server discovers the group and Skill catalogs from directories at
+the exact source revision. An omitted or empty `groups` array selects every
+discovered group.
 
 Each entry in `targets.agents` maps one discovered source to one or more known
 AI clients. The destination adapter supplies the client-specific directory and
@@ -208,8 +211,8 @@ Groups are source organization and assignment policy. Agents never see them.
 
 For each Node and Target, the Server:
 
-1. selects the groups subscribed by that Node;
-2. orders them by their declaration order in `fleet.yml`;
+1. uses the Node's nonempty `groups` array as its ordered selection;
+2. otherwise selects every discovered group in group-name order;
 3. discovers the Skills in each selected directory;
 4. resolves each Skill to immutable Bundle content; and
 5. produces one flat map of Skill name to Bundle digest.
@@ -237,20 +240,22 @@ in the POC so one mistake does not halt every unrelated update.
 
 Resolution is deterministic for each Node Target:
 
-1. consider only groups subscribed by that Node;
-2. process them in the global order declared in `fleet.yml`;
+1. consider the Node's selected groups, or every discovered group when its
+   selection is omitted or empty;
+2. process an explicit selection in array order, or the default selection in
+   group-name order;
 3. keep the first occurrence of a Skill name; and
 4. skip later occurrences with the same name.
 
 The accepted desired revision records a structured `duplicate_skill_name`
-warning containing the Skill name, every source location in declared order, and
+warning containing the Skill name, every source location in group-name order, and
 the effective winner for each affected Node Target. Server logs also include the
 warning, and Fleet CLI status must show it.
 
-Filesystem traversal order never decides the winner. If `definitive` must win,
-it appears before `testing` and `in-progress` in the declared group order.
-There is no hard-coded primary group name. The first declared subscribed group
-has the highest precedence.
+Filesystem traversal order never decides the winner. Put `definitive` before
+`testing` in a Node's `groups` array when that Node needs `definitive` to win.
+For Nodes that select every group by default, the lexicographically first group
+name has the highest precedence.
 
 ## Source polling and publication
 

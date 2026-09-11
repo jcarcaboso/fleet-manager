@@ -15,12 +15,13 @@ public sealed class SourceGitSourceScannerTests : IDisposable
     public async Task Builds_complete_deterministic_bundle_and_resolves_group_precedence()
     {
         var repository = CreateRepository();
-        Write(repository, "fleet.yml", Manifest(["first", "second"]));
-        Write(repository, "groups/first/shared/SKILL.md", "first");
-        Write(repository, "groups/first/shared/assets/data.bin", new byte[] { 0, 255, 12, 0 });
-        Write(repository, "groups/first/shared/run.sh", "#!/bin/sh\n");
-        Run(repository, "update-index", "--chmod=+x", "groups/first/shared/run.sh");
-        Write(repository, "groups/second/shared/SKILL.md", "second");
+        Write(repository, "fleet.yml", Manifest(["z-first", "a-second"]));
+        Write(repository, "skills/z-first/shared/SKILL.md", "first");
+        Write(repository, "skills/z-first/shared/assets/data.bin", new byte[] { 0, 255, 12, 0 });
+        Write(repository, "skills/z-first/shared/run.sh", "#!/bin/sh\n");
+        Run(repository, "update-index", "--chmod=+x", "skills/z-first/shared/run.sh");
+        Write(repository, "skills/a-second/shared/SKILL.md", "second");
+        WriteAvailableAgentSource(repository);
         Commit(repository, "initial");
 
         var scanner = Scanner(repository);
@@ -43,6 +44,123 @@ public sealed class SourceGitSourceScannerTests : IDisposable
     }
 
     [Fact]
+    public async Task Empty_or_omitted_groups_select_every_discovered_group_while_values_select_a_subset()
+    {
+        var secondNodeId = new NodeId(Guid.NewGuid());
+        var thirdNodeId = new NodeId(Guid.NewGuid());
+        var repository = CreateRepository();
+        Write(repository, "fleet.yml", """
+            schema: fleet/v1
+            targets:
+              skills:
+                base: home
+                path: .agents/skills
+            nodes:
+              fixture:
+                targets:
+                  skills:
+                    groups: []
+              second:
+                targets:
+                  skills: {}
+              third:
+                targets:
+                  skills:
+                    groups: [beta]
+            """);
+        Write(repository, "skills/alpha/one/SKILL.md", "one");
+        Write(repository, "skills/beta/two/SKILL.md", "two");
+        WriteAvailableAgentSource(repository);
+        Commit(repository, "discovered skill groups");
+        var nodes = new Dictionary<string, NodeId>(StringComparer.Ordinal)
+        {
+            ["fixture"] = _nodeId,
+            ["second"] = secondNodeId,
+            ["third"] = thirdNodeId,
+        };
+
+        var snapshot = Assert.IsType<SourceScanResult.Snapshot>(await new GitSourceScanner(
+            repository, Path.Combine(_root, "group-defaults-mirror"), new Nodes(nodes)).ScanAsync(null, CancellationToken.None));
+        var targets = snapshot.Value.Targets.Where(x => x.TargetName == "skills").ToDictionary(x => x.NodeId);
+
+        Assert.Equal(["one", "two"], targets[_nodeId].Skills.Select(x => x.Name));
+        Assert.Equal(["one", "two"], targets[secondNodeId].Skills.Select(x => x.Name));
+        Assert.Equal(["two"], targets[thirdNodeId].Skills.Select(x => x.Name));
+    }
+
+    [Fact]
+    public async Task Default_group_selection_uses_group_name_order_for_duplicate_skills()
+    {
+        var repository = CreateRepository();
+        Write(repository, "fleet.yml", Manifest([]));
+        Write(repository, "skills/zebra/shared/SKILL.md", "zebra");
+        Write(repository, "skills/alpha/shared/SKILL.md", "alpha");
+        WriteAvailableAgentSource(repository);
+        Commit(repository, "default group precedence");
+
+        var snapshot = Assert.IsType<SourceScanResult.Snapshot>(
+            await Scanner(repository).ScanAsync(null, CancellationToken.None));
+        var skill = Assert.Single(Assert.Single(snapshot.Value.Targets).Skills);
+        var bundle = snapshot.Value.Bundles.Single(x => x.Digest == skill.BundleDigest);
+
+        Assert.True(bundle.Content.AsSpan().EndsWith("alpha"u8));
+        Assert.Single(snapshot.Value.Warnings, x => x.Code == "duplicate_skill_name");
+    }
+
+    [Fact]
+    public async Task Rejects_unknown_and_duplicate_group_selections()
+    {
+        var repository = CreateRepository();
+        Write(repository, "fleet.yml", Manifest(["missing", "missing"]));
+        Write(repository, "skills/stable/review/SKILL.md", "review");
+        WriteAvailableAgentSource(repository);
+        Commit(repository, "invalid group selection");
+
+        var invalid = Assert.IsType<SourceScanResult.Invalid>(
+            await Scanner(repository).ScanAsync(null, CancellationToken.None));
+
+        Assert.Contains(invalid.Diagnostics, x => x.Code == "unknown_group");
+        Assert.Contains(invalid.Diagnostics, x => x.Code == "duplicate_group");
+    }
+
+    [Fact]
+    public async Task Rejects_the_legacy_groups_directory()
+    {
+        var repository = CreateRepository();
+        Write(repository, "fleet.yml", Manifest([]));
+        Write(repository, "groups/stable/review/SKILL.md", "legacy");
+        Write(repository, "skills/stable/review/SKILL.md", "review");
+        WriteAvailableAgentSource(repository);
+        Commit(repository, "legacy skill layout");
+
+        var invalid = Assert.IsType<SourceScanResult.Invalid>(
+            await Scanner(repository).ScanAsync(null, CancellationToken.None));
+
+        Assert.Contains(invalid.Diagnostics, x => x.Code == "legacy_skill_layout");
+    }
+
+    [Theory]
+    [InlineData("agents", "missing_agents_directory")]
+    [InlineData("skills", "missing_skills_directory")]
+    public async Task Rejects_a_revision_when_a_required_source_directory_is_missing(
+        string missingDirectory,
+        string expectedDiagnostic)
+    {
+        var repository = CreateRepository();
+        Write(repository, "fleet.yml", Manifest(["stable"]));
+        if (missingDirectory != "agents")
+            Write(repository, "agents/personal/AGENTS.md", "personal");
+        if (missingDirectory != "skills")
+            Write(repository, "skills/stable/review/SKILL.md", "review");
+        Commit(repository, $"missing {missingDirectory} directory");
+
+        var invalid = Assert.IsType<SourceScanResult.Invalid>(
+            await Scanner(repository).ScanAsync(null, CancellationToken.None));
+
+        Assert.Contains(invalid.Diagnostics, x => x.Code == expectedDiagnostic);
+    }
+
+    [Fact]
     public async Task Resolves_discovered_agent_sources_to_their_configured_clients()
     {
         var repository = CreateRepository();
@@ -52,6 +170,7 @@ public sealed class SourceGitSourceScannerTests : IDisposable
             StringComparison.Ordinal));
         Write(repository, "agents/personal/AGENTS.md", "# Personal instructions\n");
         Write(repository, "agents/claude-personal/AGENTS.md", "# Claude instructions\n");
+        WriteAvailableSkill(repository);
         Commit(repository, "configured agent sources");
 
         var snapshot = Assert.IsType<SourceScanResult.Snapshot>(await Scanner(repository).ScanAsync(null, CancellationToken.None));
@@ -80,6 +199,7 @@ public sealed class SourceGitSourceScannerTests : IDisposable
             "        groups: []\n      agents:\n        - source: personal\n",
             StringComparison.Ordinal));
         Write(repository, "agents/personal/AGENTS.md", "# Personal instructions\n");
+        WriteAvailableSkill(repository);
         Commit(repository, "all clients");
         var scanner = Scanner(repository);
 
@@ -105,6 +225,7 @@ public sealed class SourceGitSourceScannerTests : IDisposable
         var repository = CreateRepository();
         Write(repository, "fleet.yml", Manifest([]));
         Write(repository, "agents/personal/AGENTS.md", "# Available but unassigned\n");
+        WriteAvailableSkill(repository);
         Commit(repository, "unassigned source");
 
         var snapshot = Assert.IsType<SourceScanResult.Snapshot>(
@@ -120,7 +241,6 @@ public sealed class SourceGitSourceScannerTests : IDisposable
         var repository = CreateRepository();
         Write(repository, "fleet.yml", """
             schema: fleet/v1
-            groups: []
             targets:
               skills:
                 base: home
@@ -143,6 +263,7 @@ public sealed class SourceGitSourceScannerTests : IDisposable
             """);
         Write(repository, "agents/personal/AGENTS.md", "personal");
         Write(repository, "agents/work/AGENTS.md", "work");
+        WriteAvailableSkill(repository);
         Commit(repository, "different node sources");
         var nodes = new Dictionary<string, NodeId>(StringComparer.Ordinal)
         {
@@ -162,6 +283,7 @@ public sealed class SourceGitSourceScannerTests : IDisposable
     {
         var repository = CreateRepository();
         Write(repository, "agents/personal/AGENTS.md", "personal");
+        WriteAvailableSkill(repository);
         Write(repository, "fleet.yml", Manifest([]).Replace(
             "        groups: []\n",
             "        groups: []\n      agents:\n        - source: missing\n          clients: [unknown]\n        - source: personal\n          clients: [codex, codex]\n        - source: personal\n          clients: []\n",
@@ -181,6 +303,7 @@ public sealed class SourceGitSourceScannerTests : IDisposable
         var repository = CreateRepository();
         Write(repository, "fleet.yml", Manifest([]));
         Write(repository, "agents/personal/notes.md", "wrong filename");
+        WriteAvailableSkill(repository);
         Commit(repository, "invalid agent file");
 
         var invalid = Assert.IsType<SourceScanResult.Invalid>(
@@ -192,16 +315,20 @@ public sealed class SourceGitSourceScannerTests : IDisposable
     }
 
     [Fact]
-    public async Task Rejects_unknown_manifest_fields_without_replacing_a_snapshot()
+    public async Task Rejects_a_legacy_group_catalog_without_replacing_a_snapshot()
     {
         var repository = CreateRepository();
         Write(repository, "fleet.yml", Manifest(["stable"]));
-        Write(repository, "groups/stable/review/SKILL.md", "valid");
+        Write(repository, "skills/stable/review/SKILL.md", "valid");
+        WriteAvailableAgentSource(repository);
         Commit(repository, "valid");
         var scanner = Scanner(repository);
         var accepted = Assert.IsType<SourceScanResult.Snapshot>(await scanner.ScanAsync(null, CancellationToken.None));
 
-        Write(repository, "fleet.yml", Manifest(["stable"]) + "unknown: true\n");
+        Write(repository, "fleet.yml", Manifest(["stable"]).Replace(
+            "schema: fleet/v1\n",
+            "schema: fleet/v1\ngroups: [stable]\n",
+            StringComparison.Ordinal));
         Commit(repository, "invalid");
         var invalid = Assert.IsType<SourceScanResult.Invalid>(await scanner.ScanAsync(accepted.Value.SourceRevision, CancellationToken.None));
         Assert.Contains(invalid.Diagnostics, x => x.Code == "invalid_manifest");
@@ -212,9 +339,10 @@ public sealed class SourceGitSourceScannerTests : IDisposable
     {
         var repository = CreateRepository();
         Write(repository, "fleet.yml", Manifest(["stable"], "Fixture"));
-        Write(repository, "groups/stable/review/content.txt", "content");
-        File.CreateSymbolicLink(Path.Combine(repository, "groups/stable/review/link"), "content.txt");
-        Run(repository, "add", "groups/stable/review/link");
+        Write(repository, "skills/stable/review/content.txt", "content");
+        WriteAvailableAgentSource(repository);
+        File.CreateSymbolicLink(Path.Combine(repository, "skills/stable/review/link"), "content.txt");
+        Run(repository, "add", "skills/stable/review/link");
         Commit(repository, "invalid tree");
 
         var invalid = Assert.IsType<SourceScanResult.Invalid>(await Scanner(repository).ScanAsync(null, CancellationToken.None));
@@ -248,25 +376,14 @@ public sealed class SourceGitSourceScannerTests : IDisposable
     }
 
     [Fact]
-    public async Task Accepts_empty_groups_and_an_empty_node_subscription_for_removal()
-    {
-        var repository = CreateRepository();
-        Write(repository, "fleet.yml", Manifest([]));
-        Commit(repository, "remove desired skills");
-
-        var snapshot = Assert.IsType<SourceScanResult.Snapshot>(await Scanner(repository).ScanAsync(null, CancellationToken.None));
-        Assert.Empty(snapshot.Value.Bundles);
-        Assert.Empty(Assert.Single(snapshot.Value.Targets).Skills);
-    }
-
-    [Fact]
     public async Task Rejects_colliding_directory_prefixes()
     {
         var repository = CreateRepository();
         Write(repository, "fleet.yml", Manifest(["stable"]));
-        Write(repository, "groups/stable/review/SKILL.md", "review");
-        Write(repository, "groups/stable/review/refs/A/one.txt", "one");
-        Write(repository, "groups/stable/review/refs/a/two.txt", "two");
+        Write(repository, "skills/stable/review/SKILL.md", "review");
+        Write(repository, "skills/stable/review/refs/A/one.txt", "one");
+        Write(repository, "skills/stable/review/refs/a/two.txt", "two");
+        WriteAvailableAgentSource(repository);
         Commit(repository, "colliding prefixes");
 
         var invalid = Assert.IsType<SourceScanResult.Invalid>(await Scanner(repository).ScanAsync(null, CancellationToken.None));
@@ -278,7 +395,7 @@ public sealed class SourceGitSourceScannerTests : IDisposable
     {
         var repository = CreateRepository();
         var secret = "do-not-return-this-value";
-        Write(repository, "fleet.yml", $"schema: &schema fleet/v1\ngroups: []\ntargets: {{ skills: {{ base: home, path: .agents/skills }} }}\nnodes: {{ copied: *schema }}\n# {secret}\n");
+        Write(repository, "fleet.yml", $"schema: &schema fleet/v1\ntargets: {{ skills: {{ base: home, path: .agents/skills }} }}\nnodes: {{ copied: *schema }}\n# {secret}\n");
         Commit(repository, "alias");
 
         var invalid = Assert.IsType<SourceScanResult.Invalid>(await Scanner(repository).ScanAsync(null, CancellationToken.None));
@@ -292,7 +409,8 @@ public sealed class SourceGitSourceScannerTests : IDisposable
     {
         var repository = CreateRepository();
         Write(repository, "fleet.yml", Manifest(["stable"]));
-        Write(repository, "groups/stable/review/SKILL.md", "small source file");
+        Write(repository, "skills/stable/review/SKILL.md", "small source file");
+        WriteAvailableAgentSource(repository);
         Commit(repository, "bundle overhead exceeds test limit");
 
         var limits = new SourceLimits(MaxBundleBytes: 16);
@@ -361,7 +479,8 @@ public sealed class SourceGitSourceScannerTests : IDisposable
         var repository = CreateRepository();
         Write(repository, "fleet.yml", Manifest(["one", "two", "three"]));
         foreach (var group in new[] { "one", "two", "three" })
-            Write(repository, $"groups/{group}/shared/SKILL.md", group);
+            Write(repository, $"skills/{group}/shared/SKILL.md", group);
+        WriteAvailableAgentSource(repository);
         Commit(repository, "too many duplicate locations");
         var scanner = new GitSourceScanner(repository, Path.Combine(_root, "warning-mirror"), new Nodes(_nodeId),
             new SourceLimits(MaxWarningLocations: 2));
@@ -376,8 +495,9 @@ public sealed class SourceGitSourceScannerTests : IDisposable
     {
         var repository = CreateRepository();
         Write(repository, "fleet.yml", Manifest(["one", "two"]));
-        Write(repository, "groups/one/shared/SKILL.md", "one");
-        Write(repository, "groups/two/shared/SKILL.md", "two");
+        Write(repository, "skills/one/shared/SKILL.md", "one");
+        Write(repository, "skills/two/shared/SKILL.md", "two");
+        WriteAvailableAgentSource(repository);
         Commit(repository, "warning message bound");
         var scanner = new GitSourceScanner(repository, Path.Combine(_root, "warning-message-mirror"), new Nodes(_nodeId),
             new SourceLimits(MaxWarningMessageChars: 32));
@@ -388,6 +508,12 @@ public sealed class SourceGitSourceScannerTests : IDisposable
     }
 
     private GitSourceScanner Scanner(string repository) => new(repository, Path.Combine(_root, $"mirror-{Guid.NewGuid():N}"), new Nodes(_nodeId));
+
+    private static void WriteAvailableAgentSource(string repository) =>
+        Write(repository, "agents/available/AGENTS.md", "available");
+
+    private static void WriteAvailableSkill(string repository) =>
+        Write(repository, "skills/stable/review/SKILL.md", "review");
 
     private string CreateRepository()
     {
@@ -401,11 +527,9 @@ public sealed class SourceGitSourceScannerTests : IDisposable
 
     private static string Manifest(string[] groups, string alias = "fixture")
     {
-        var declaredGroups = groups.Length == 0 ? "groups: []" : $"groups:\n{string.Join('\n', groups.Select(x => $"  - {x}"))}";
         var subscribedGroups = groups.Length == 0 ? "groups: []" : $"groups:\n{string.Join('\n', groups.Select(x => $"          - {x}"))}";
         return $$"""
         schema: fleet/v1
-        {{declaredGroups}}
         targets:
           skills:
             base: home

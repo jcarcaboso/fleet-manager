@@ -6,8 +6,6 @@ internal sealed class FleetManifest
 {
     [YamlMember(Alias = "schema")]
     public required string Schema { get; init; }
-    [YamlMember(Alias = "groups")]
-    public required List<string> Groups { get; init; }
     [YamlMember(Alias = "targets")]
     public required ManifestDefaults Targets { get; init; }
     [YamlMember(Alias = "nodes")]

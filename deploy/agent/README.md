@@ -78,7 +78,6 @@ Configure this Node's alias in the source repository:
 
 ```yaml
 schema: fleet/v1
-groups: [definitive]
 targets:
   skills:
     base: home
@@ -89,6 +88,10 @@ nodes:
       skills:
         groups: [definitive]
 ```
+
+Fleet discovers groups below `skills/`. Omit `groups` or use `groups: []` to
+sync every discovered group; a nonempty array selects a subset in precedence
+order.
 
 Commit to the source repository's `main` branch. Request an immediate scan with
 `fleet source rescan` on the Operator machine, or wait for the Server's source
