@@ -240,6 +240,7 @@ The main design references are:
 - [Operations hardening](docs/technical-design/operations-hardening.md)
 - [Engineering standards](docs/engineering-standards.md)
 - [Fleet Manager 0.5.1 release notes](docs/releases/0.5.1.md)
+- [Fleet Manager 0.5.2 release notes](docs/releases/0.5.2.md)
 - [Fleet Manager 0.5.0 release notes](docs/releases/0.5.0.md)
 - [Server 0.4.1 release notes](docs/releases/0.4.1.md)
 - [Fleet Manager 0.4.0 release notes](docs/releases/0.4.0.md)
