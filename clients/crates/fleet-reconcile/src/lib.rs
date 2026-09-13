@@ -19,6 +19,8 @@ use unicode_normalization::UnicodeNormalization;
 const MAGIC: &[u8; 6] = b"FLTB1\0";
 const SCHEMA: &str = "fleet.bundle/v1";
 const FILE_SCHEMA: &str = "fleet.file/v1";
+const EMPTY_FILE_DIGEST: &str =
+    "sha256:b48b182ea449044fd6d169a8f504bd2704d7cbb822ef0c2c7c7ba0d99649c5f6";
 const MAX_BUNDLE: usize = 16 * 1024 * 1024;
 const MAX_FILES: usize = 10_000;
 const MAX_PATH: usize = 1_024;
@@ -425,7 +427,12 @@ impl Reconciler {
         recover_file_transaction(destination, shared, &receipt_path, &journal_path)?;
         let old = read_file_receipt(&receipt_path, target, &assignment.file.name)?;
         let observed = digest_regular_file(destination)?;
-        if old.is_none() && observed.is_some() && assignment.file.digest.is_some() {
+        if old.is_none()
+            && observed
+                .as_deref()
+                .is_some_and(|digest| digest != EMPTY_FILE_DIGEST)
+            && assignment.file.digest.is_some()
+        {
             return Err(ReconcileError::new(
                 ErrorCode::OwnershipConflict,
                 format!("{} exists without Fleet ownership", assignment.file.name),
@@ -2012,6 +2019,25 @@ mod tests {
         assert_eq!(
             fs::read(reconciler.home.join(".claude/CLAUDE.md")).unwrap(),
             b"personal"
+        );
+    }
+    #[test]
+    fn managed_file_claims_an_empty_unowned_file() {
+        let (_temporary, reconciler, mut target) = setup();
+        target.path = ".codex".into();
+        fs::create_dir(reconciler.home.join(".codex")).unwrap();
+        fs::write(reconciler.home.join(".codex/AGENTS.md"), b"").unwrap();
+
+        let assignment = file_assignment("1", "AGENTS.md", Some(b"fleet"));
+        assert!(
+            reconciler
+                .reconcile_file(&target, &assignment)
+                .unwrap()
+                .changed
+        );
+        assert_eq!(
+            fs::read(reconciler.home.join(".codex/AGENTS.md")).unwrap(),
+            b"fleet"
         );
     }
     #[test]

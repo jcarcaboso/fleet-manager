@@ -153,7 +153,8 @@ Node and leaves any earlier assignments untouched. An explicit `agents: []`
 publishes empty content for all supported clients, creating each instruction
 file if needed. A nonempty list publishes only the selected clients and leaves
 unselected client files untouched. The Agent reports an ownership conflict
-instead of replacing a pre-existing file that Fleet does not own.
+instead of replacing a non-empty pre-existing file that Fleet does not own; an
+empty pre-existing file may be claimed safely.
 
 Deleting a referenced source makes the repository invalid and leaves the last
 accepted desired revision active. To retire a source, first update every Node
