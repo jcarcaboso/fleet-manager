@@ -183,7 +183,10 @@ mod tests {
 
     impl TestRoot {
         fn new() -> Self {
-            let path = std::env::temp_dir().join(format!("fleet-actions-{}", Uuid::new_v4()));
+            let path = std::env::temp_dir()
+                .canonicalize()
+                .unwrap()
+                .join(format!("fleet-actions-{}", Uuid::new_v4()));
             crate::state::private_directory(&path).unwrap();
             Self(path)
         }
