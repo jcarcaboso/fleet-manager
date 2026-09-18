@@ -22,8 +22,9 @@ complete manifest is an incomplete backup and cannot be restored.
 The dump includes migrations, Workspace identity, desired state, Bundle bytes,
 Assignments, reports, enrollment consumption, credential metadata, revocations,
 and audit records. It excludes Server configuration, issuing and TLS private
-keys, and Operator token configuration. Preserve those separately in protected
-storage, with the same stable Workspace ID.
+keys, Operator token configuration, and the CLIProxyAPI key file. Preserve
+required deployment secrets separately in protected storage, with the same
+stable Workspace ID. Restoring PostgreSQL alone cannot restore proxy access.
 
 ## Restore drill
 
@@ -61,3 +62,6 @@ detects changes but does not authenticate an archive's author. Backups retain
 data present at snapshot time even after database cleanup. Storage encryption,
 access control, cadence, and archive retention remain deployment decisions.
 Repeat the drill on deployment hardware before setting recovery objectives.
+If private deployment configuration is archived separately, include or exclude
+the CLIProxyAPI key deliberately and apply the same controls as other bearer
+credentials. Node Agent-state backups may also contain a cached copy.

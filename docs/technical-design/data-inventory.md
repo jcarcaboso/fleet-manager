@@ -17,7 +17,7 @@ paths.
 | Source warning | ID, desired revision ID, diagnostic code, bounded message, and source locations explain deterministic duplicate resolution. |
 | Source scan | ID, Workspace ID, observed source revision, outcome, bounded code/diagnostic, timestamp, and requesting Operator record ingestion outcomes. |
 | Rollout | ID, desired revision ID and creation time group per-Target results. |
-| Assignment | ID, Node ID, Rollout/revision IDs, Target name, relative descriptor, current flag, convergence state, and creation time describe intended Target state. |
+| Assignment | ID, Node ID, Rollout/revision IDs, Target name, relative descriptor, current flag, convergence state, creation time, and optional AI-client mode, client, endpoint, and model describe intended Target state. The CLIProxyAPI key is absent. |
 | Assignment Skill | Assignment ID, Skill name, Bundle digest and ordering describe the complete resolved map. |
 | Assignment File | Assignment ID, destination filename, and optional content digest describe one Managed file or its removal. |
 | Attempt | ID, Assignment/Rollout/Node IDs, convergence state, error code, bounded diagnostic and update time retain accepted reports. Public report requests currently accept stable error codes only. |
@@ -35,6 +35,13 @@ restrict database and backup access. The issuing key and Server TLS key require
 separate protected backups. The [backup tool](backup-restore.md) supports a manual
 dump/restore drill. The local Compose environment does not implement encryption
 or an automatic backup policy.
+
+The Server reads the CLIProxyAPI key from a deployment-mounted file. It does not
+write the key to PostgreSQL, a Bundle, an audit event, or an Assignment. Each
+assigned Agent stores a private key copy and a model cache below its local state
+directory, plus ownership receipts and recovery journals for client
+configuration. These Node-local files are outside the Server backup tool. Treat
+an Agent-state backup as credential material.
 
 Before release, choose retention windows, measure database growth, repeat the
 backup drill on deployment hardware, and confirm that implemented fields still

@@ -37,6 +37,27 @@ A supported coding assistant that reads a Node-local instruction file, such as
 Codex, OpenCode, or Claude Code.
 _Avoid_: Agent
 
+**AI client connection**:
+The Node-local configuration that selects how one AI client reaches its model
+provider. Fleet may own selected connection fields without owning the client's
+login state or complete configuration file.
+_Avoid_: Agent connection, Managed file
+
+**Native connection**:
+An AI client connection that uses the client's built-in provider and locally
+completed authentication. Selecting it restores Fleet-owned proxy settings but
+does not perform login.
+_Avoid_: Unmanaged connection
+
+**CLIProxy connection**:
+An AI client connection that sends inference requests to the Workspace's
+configured CLIProxyAPI endpoint.
+
+**CLIProxy credential**:
+The bearer API key accepted by CLIProxyAPI. It is distinct from Node, Operator,
+and AI-client OAuth credentials and must not enter the source repository.
+_Avoid_: Node credential, API key
+
 **Agent source**:
 A named `agents/<source>/AGENTS.md` file discovered from the canonical source
 repository and selected by a Node's desired state.
@@ -90,8 +111,9 @@ verified by cryptographic digest.
 _Avoid_: Skill group, archive
 
 **Assignment**:
-The complete declarative Skill set that one Node and Target should reconcile for
-one desired revision.
+The complete declarative state that one Node and Target should reconcile for
+one desired revision. Its typed content may be Skills, one Managed file, or an
+AI client connection.
 _Avoid_: Command, patch, job
 
 **Rollout**:

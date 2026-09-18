@@ -22,8 +22,10 @@ public sealed class HostingTests : IAsyncLifetime
     private const string Token = "test-only-operator-token-with-at-least-32-characters";
     private readonly PostgreSqlContainer _postgres = new PostgreSqlBuilder("postgres:17.5-alpine").Build();
     private readonly string _directory = Path.Combine(Path.GetTempPath(), "fleet-host-" + Guid.NewGuid().ToString("N"));
+    private const string CliProxyKey = "test-cliproxy-key";
     private WebApplicationFactory<Program> _factory = null!;
     private HttpClient _operator = null!;
+    private string _cliProxyKeyPath = null!;
 
     public async Task InitializeAsync()
     {
@@ -38,7 +40,13 @@ public sealed class HostingTests : IAsyncLifetime
         var keyPath = Path.Combine(_directory, "ca.key");
         await File.WriteAllTextAsync(certificatePath, certificate.ExportCertificatePem());
         await File.WriteAllTextAsync(keyPath, key.ExportPkcs8PrivateKeyPem());
-        if (!OperatingSystem.IsWindows()) File.SetUnixFileMode(keyPath, UnixFileMode.UserRead | UnixFileMode.UserWrite);
+        _cliProxyKeyPath = Path.Combine(_directory, "cliproxy.key");
+        await File.WriteAllTextAsync(_cliProxyKeyPath, CliProxyKey + "\n");
+        if (!OperatingSystem.IsWindows())
+        {
+            File.SetUnixFileMode(keyPath, UnixFileMode.UserRead | UnixFileMode.UserWrite);
+            File.SetUnixFileMode(_cliProxyKeyPath, UnixFileMode.UserRead | UnixFileMode.UserWrite);
+        }
         _factory = new WebApplicationFactory<Program>().WithWebHostBuilder(builder => builder.ConfigureAppConfiguration((_, config) =>
             config.AddInMemoryCollection(new Dictionary<string, string?>
             {
@@ -47,6 +55,7 @@ public sealed class HostingTests : IAsyncLifetime
                 ["Fleet:OperatorTokenSha256"] = Convert.ToHexStringLower(SHA256.HashData(Encoding.UTF8.GetBytes(Token))),
                 ["Fleet:IssuerCertificatePath"] = certificatePath,
                 ["Fleet:IssuerKeyPath"] = keyPath,
+                ["Fleet:CliProxyApiKeyPath"] = _cliProxyKeyPath,
                 ["Fleet:PublicUrl"] = "https://localhost",
                 ["Source:Remote"] = "",
                 ["urls"] = "https://localhost:7443",
@@ -327,6 +336,51 @@ public sealed class HostingTests : IAsyncLifetime
     }
 
     [Fact]
+    public async Task CLIProxy_credential_is_served_only_to_nodes_with_a_current_proxy_assignment()
+    {
+        var assigned = await EnrollNode("cliproxy-assigned");
+        var unassigned = await EnrollNode("cliproxy-unassigned");
+        var proxyTarget = new SnapshotTarget(assigned.NodeId, "ai-client/codex", new("home", ".codex"), [],
+            AiClient: new("fleet.ai-client/v1", "codex", "cliproxy", "https://proxy.example/v1", "gpt-6-astra"));
+        using (var scope = _factory.Services.CreateScope())
+            await scope.ServiceProvider.GetRequiredService<IFleetCoordinator>().AcceptSourceSnapshotAsync(new(
+                "cliproxy-assignment", [], [proxyTarget], [], DateTimeOffset.UtcNow));
+
+        const string route = "/agent/v1/cliproxy/credential";
+        var allowed = await SendNodeAsync(route, assigned.Certificate, method: "GET");
+
+        Assert.Equal(200, allowed.Response.StatusCode);
+        Assert.Equal(CliProxyKey, Encoding.UTF8.GetString(((MemoryStream)allowed.Response.Body).ToArray()));
+        Assert.Equal("no-store", allowed.Response.Headers.CacheControl.ToString());
+        Assert.Equal(403, (await SendNodeAsync(route, unassigned.Certificate, method: "GET")).Response.StatusCode);
+        Assert.Equal(HttpStatusCode.Unauthorized, (await _operator.GetAsync(route)).StatusCode);
+
+        if (!OperatingSystem.IsWindows())
+        {
+            File.SetUnixFileMode(_cliProxyKeyPath, UnixFileMode.UserRead | UnixFileMode.GroupRead);
+            Assert.Equal(503, (await SendNodeAsync(route, assigned.Certificate, method: "GET")).Response.StatusCode);
+            File.SetUnixFileMode(_cliProxyKeyPath, UnixFileMode.UserRead | UnixFileMode.UserWrite);
+            var realKeyPath = _cliProxyKeyPath + ".real";
+            File.Move(_cliProxyKeyPath, realKeyPath);
+            File.CreateSymbolicLink(_cliProxyKeyPath, realKeyPath);
+            Assert.Equal(503, (await SendNodeAsync(route, assigned.Certificate, method: "GET")).Response.StatusCode);
+            File.Delete(_cliProxyKeyPath);
+            File.Move(realKeyPath, _cliProxyKeyPath);
+        }
+
+        await File.WriteAllBytesAsync(_cliProxyKeyPath, new byte[4_097]);
+        var unavailable = await SendNodeAsync(route, assigned.Certificate, method: "GET");
+        Assert.Equal(503, unavailable.Response.StatusCode);
+        Assert.Equal("cliproxy_credential_unavailable",
+            (await JsonSerializer.DeserializeAsync<JsonElement>(unavailable.Response.Body)).GetProperty("code").GetString());
+
+        using (var scope = _factory.Services.CreateScope())
+            await scope.ServiceProvider.GetRequiredService<IFleetCoordinator>().AcceptSourceSnapshotAsync(new(
+                "native-assignment", [], [proxyTarget with { AiClient = new("fleet.ai-client/v1", "codex", "native") }], [], DateTimeOffset.UtcNow));
+        Assert.Equal(403, (await SendNodeAsync(route, assigned.Certificate, method: "GET")).Response.StatusCode);
+    }
+
+    [Fact]
     public async Task Operator_alias_changes_validate_names_preserve_identity_and_audit_the_operator()
     {
         using var anonymous = _factory.CreateClient(new() { BaseAddress = new Uri("https://localhost") });
@@ -401,8 +455,27 @@ public sealed class HostingTests : IAsyncLifetime
         using var response = await client.SendAsync(request);
         var result = new DefaultHttpContext();
         result.Response.StatusCode = (int)response.StatusCode;
+        foreach (var header in response.Headers)
+            result.Response.Headers[header.Key] = header.Value.ToArray();
+        foreach (var header in response.Content.Headers)
+            result.Response.Headers[header.Key] = header.Value.ToArray();
         result.Response.Body = new MemoryStream(await response.Content.ReadAsByteArrayAsync());
         return result;
+    }
+
+    private async Task<(NodeId NodeId, X509Certificate2 Certificate)> EnrollNode(string alias)
+    {
+        var authorization = await _operator.PostAsJsonAsync("/operator/v1/enrollment-tokens", new { expiresInSeconds = 900 });
+        var token = (await authorization.Content.ReadFromJsonAsync<JsonElement>()).GetProperty("token").GetString();
+        using var key = ECDsa.Create(ECCurve.NamedCurves.nistP256);
+        var csr = new CertificateRequest("CN=ignored", key, HashAlgorithmName.SHA256).CreateSigningRequestPem();
+        using var anonymous = _factory.CreateClient(new() { BaseAddress = new Uri("https://localhost") });
+        var enrollment = await anonymous.PostAsJsonAsync("/agent/v1/enroll",
+            new { token, certificateRequestPem = csr, nodeName = alias, platform = "linux" });
+        enrollment.EnsureSuccessStatusCode();
+        var issued = await enrollment.Content.ReadFromJsonAsync<JsonElement>();
+        return (new(issued.GetProperty("nodeId").GetGuid()),
+            X509Certificate2.CreateFromPem(issued.GetProperty("certificatePem").GetString()!));
     }
 
     public async Task DisposeAsync()

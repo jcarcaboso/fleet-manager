@@ -6,6 +6,7 @@ use uuid::Uuid;
 
 const MAX_JSON_BYTES: usize = 1024 * 1024;
 const MAX_BUNDLE_BYTES: usize = 16 * 1024 * 1024;
+const MAX_CLIPROXY_CREDENTIAL_BYTES: usize = 4096;
 
 #[derive(Debug)]
 pub enum ProtocolError {
@@ -138,6 +139,22 @@ impl Api {
     pub async fn poll(&self) -> Result<PollResponse, ProtocolError> {
         self.json::<(), _>(self.authenticated()?, Method::POST, "agent/v1/poll", None)
             .await
+    }
+
+    pub async fn cliproxy_credential(&self) -> Result<Vec<u8>, ProtocolError> {
+        let response = self
+            .authenticated()?
+            .get(self.endpoint("agent/v1/cliproxy/credential")?)
+            .send()
+            .await
+            .map_err(ProtocolError::Transport)?;
+        let bytes = read_bounded(success(response)?, MAX_CLIPROXY_CREDENTIAL_BYTES).await?;
+        if bytes.is_empty() || !bytes.iter().all(u8::is_ascii_graphic) {
+            return Err(ProtocolError::InvalidResponse(
+                "CLIProxy credential is invalid",
+            ));
+        }
+        Ok(bytes)
     }
 
     pub async fn bundle(&self, skill: &AssignmentSkill) -> Result<Bundle, ProtocolError> {
@@ -351,6 +368,18 @@ pub struct Assignment {
     pub skills: Vec<AssignmentSkill>,
     #[serde(default)]
     pub file: Option<AssignmentFile>,
+    #[serde(default)]
+    pub ai_client: Option<AiClientAssignment>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct AiClientAssignment {
+    pub schema: String,
+    pub client: String,
+    pub mode: String,
+    pub base_url: Option<String>,
+    pub model: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -463,6 +492,15 @@ mod tests {
         )
         .unwrap();
         assert!(removal.bundle_digest.is_none());
+    }
+
+    #[test]
+    fn ai_client_fixture_matches_server_wire_contract() {
+        let poll: PollResponse = serde_json::from_str(r#"{"workspaceId":"00000000-0000-0000-0000-000000000001","nodeId":"00000000-0000-0000-0000-000000000002","assignment":{"assignmentId":"00000000-0000-0000-0000-000000000003","attemptId":"00000000-0000-0000-0000-000000000004","rolloutId":"00000000-0000-0000-0000-000000000005","desiredRevisionId":"00000000-0000-0000-0000-000000000006","targetName":"ai-client/codex","target":{"base":"home","path":".codex"},"skills":[],"aiClient":{"schema":"fleet.ai-client/v1","client":"codex","mode":"cliproxy","baseUrl":"https://proxy.example/v1","model":"gpt-6-astra"}},"nextPollSeconds":30}"#).unwrap();
+        let ai = poll.assignment.unwrap().ai_client.unwrap();
+        assert_eq!(ai.client, "codex");
+        assert_eq!(ai.base_url.as_deref(), Some("https://proxy.example/v1"));
+        assert_eq!(ai.model.as_deref(), Some("gpt-6-astra"));
     }
 
     #[test]

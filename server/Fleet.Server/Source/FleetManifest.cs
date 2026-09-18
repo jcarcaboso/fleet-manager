@@ -1,51 +1,52 @@
-using YamlDotNet.Serialization;
-
 namespace Fleet.Server.Source;
 
+// Versioned YAML contracts normalize into these records. The scanner and publisher
+// deliberately do not depend on a particular manifest version.
 internal sealed class FleetManifest
 {
-    [YamlMember(Alias = "schema")]
     public required string Schema { get; init; }
-    [YamlMember(Alias = "targets")]
     public required ManifestDefaults Targets { get; init; }
-    [YamlMember(Alias = "nodes")]
     public required Dictionary<string, ManifestNode> Nodes { get; init; }
+    public ManifestCliProxy? CliProxy { get; init; }
 }
 
 internal sealed class ManifestDefaults
 {
-    [YamlMember(Alias = "skills")]
     public required ManifestTarget Skills { get; init; }
 }
 
 internal sealed class ManifestNodeTargets
 {
-    [YamlMember(Alias = "skills")]
     public required ManifestTarget Skills { get; init; }
-    [YamlMember(Alias = "agents")]
     public List<ManifestAgentTarget>? Agents { get; init; }
+    public Dictionary<string, ManifestAiClientTarget>? AiClients { get; init; }
 }
 
 internal sealed class ManifestAgentTarget
 {
-    [YamlMember(Alias = "source")]
     public string? Source { get; init; }
-    [YamlMember(Alias = "clients")]
     public List<string>? Clients { get; init; }
 }
 
 internal sealed class ManifestTarget
 {
-    [YamlMember(Alias = "base")]
     public string? Base { get; init; }
-    [YamlMember(Alias = "path")]
     public string? Path { get; init; }
-    [YamlMember(Alias = "groups")]
     public List<string>? Groups { get; init; }
 }
 
 internal sealed class ManifestNode
 {
-    [YamlMember(Alias = "targets")]
     public required ManifestNodeTargets Targets { get; init; }
+}
+
+internal sealed class ManifestCliProxy
+{
+    public string? BaseUrl { get; init; }
+}
+
+internal sealed class ManifestAiClientTarget
+{
+    public string? Mode { get; init; }
+    public string? Model { get; init; }
 }

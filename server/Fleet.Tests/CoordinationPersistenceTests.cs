@@ -115,6 +115,51 @@ public sealed class CoordinationPersistenceTests : IAsyncLifetime
     }
 
     [Fact]
+    public async Task AI_client_assignments_persist_poll_and_narrow_credential_authorization()
+    {
+        await using var db = Database();
+        var coordinator = Coordinator(db);
+        var assigned = await Enroll(coordinator, "assigned");
+        var unassigned = await Enroll(coordinator, "unassigned");
+        var cliproxy = new SnapshotTarget(assigned.NodeId, "ai-client/codex", new("home", ".codex"), [],
+            AiClient: new("fleet.ai-client/v1", "codex", "cliproxy", "https://proxy.example/v1", "gpt-6-astra"));
+        await coordinator.AcceptSourceSnapshotAsync(Snapshot("ai-source-1", [], cliproxy));
+
+        var work = (await coordinator.PollTargetAsync(assigned.Authentication, "ai-client/codex", clock.GetUtcNow())).Assignment!;
+
+        Assert.Equal(cliproxy.AiClient, work.AiClient);
+        await coordinator.AuthorizeCliProxyCredentialAsync(assigned.Authentication);
+        var denied = await Assert.ThrowsAsync<CoordinationException>(
+            () => coordinator.AuthorizeCliProxyCredentialAsync(unassigned.Authentication));
+        Assert.Equal("cliproxy_credential_not_authorized", denied.Code);
+        var stored = await db.AssignmentAiClients.SingleAsync();
+        Assert.Equal(("codex", "cliproxy", "https://proxy.example/v1", "gpt-6-astra"),
+            (stored.Client, stored.Mode, stored.BaseUrl, stored.Model));
+
+        var native = cliproxy with { AiClient = new("fleet.ai-client/v1", "codex", "native") };
+        await coordinator.AcceptSourceSnapshotAsync(Snapshot("ai-source-2", [], native));
+        denied = await Assert.ThrowsAsync<CoordinationException>(
+            () => coordinator.AuthorizeCliProxyCredentialAsync(assigned.Authentication));
+        Assert.Equal("cliproxy_credential_not_authorized", denied.Code);
+
+        var invalid = cliproxy with
+        {
+            AiClient = new("fleet.ai-client/v1", "codex", "cliproxy", "https://proxy.example/v1", "gpt model")
+        };
+        var rejected = await Assert.ThrowsAsync<CoordinationException>(
+            () => coordinator.AcceptSourceSnapshotAsync(Snapshot("ai-source-3", [], invalid)));
+        Assert.Equal("invalid_ai_client", rejected.Code);
+
+        invalid = cliproxy with
+        {
+            AiClient = new("fleet.ai-client/v1", "codex", "cliproxy", "http://user:password@proxy.example/unsafe", "gpt-6-astra")
+        };
+        rejected = await Assert.ThrowsAsync<CoordinationException>(
+            () => coordinator.AcceptSourceSnapshotAsync(Snapshot("ai-source-4", [], invalid)));
+        Assert.Equal("invalid_ai_client", rejected.Code);
+    }
+
+    [Fact]
     public async Task Concurrent_exact_enrollment_consumption_creates_one_node_and_returns_one_retry()
     {
         EnrollmentAuthorization authorization;

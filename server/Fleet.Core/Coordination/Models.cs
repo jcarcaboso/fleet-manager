@@ -17,12 +17,20 @@ public sealed record SnapshotSkill(string Name, string BundleDigest);
 
 public sealed record SnapshotFile(string Name, string? BundleDigest);
 
+public sealed record AiClientAssignment(
+    string Schema,
+    string Client,
+    string Mode,
+    [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] string? BaseUrl = null,
+    [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] string? Model = null);
+
 public sealed record SnapshotTarget(
     NodeId NodeId,
     string TargetName,
     TargetDescriptor Descriptor,
     IReadOnlyList<SnapshotSkill> Skills,
-    SnapshotFile? File = null);
+    SnapshotFile? File = null,
+    AiClientAssignment? AiClient = null);
 
 public sealed record SourceWarning(
     string Code,
@@ -131,7 +139,8 @@ public sealed record AgentAssignment(
     string TargetName,
     TargetDescriptor Target,
     IReadOnlyList<AssignmentSkill> Skills,
-    [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] AssignmentFile? File = null);
+    [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] AssignmentFile? File = null,
+    [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] AiClientAssignment? AiClient = null);
 
 public sealed record PollResult(AgentAssignment? Assignment);
 
