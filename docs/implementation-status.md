@@ -55,7 +55,7 @@ and user service. It works with the deployed Server 0.2.0 API.
 
 The pending 0.6.0 integration adds strict `fleet/v2` parsing and typed
 AI-client Assignments for Codex and OpenCode. Assigned Nodes retrieve a
-deployment-mounted CLIProxyAPI key over mTLS, discover and cache models, and
+deployment-configured CLIProxyAPI key over mTLS, discover and cache models, and
 edit only Fleet-owned client settings with receipt and journal recovery.
 `fleet/v1` remains available for repositories that manage only Skills and Agent
 instruction files. See the [operations guide](technical-design/cliproxy-operations.md)

@@ -32,8 +32,8 @@ substitution. The complete temporary client homes and response files were
 deleted after inspection. Credential-value scans found no key in captured
 client output or error logs.
 
-This only describes the compatibility test. Fleet's production design still
-uses the deployment-managed Server secret file and Agent-private key file.
+This only describes the compatibility test. Fleet's production design uses a
+deployment-configured Server setting and an Agent-private key file.
 
 ## Environment
 

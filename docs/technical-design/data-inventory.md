@@ -36,7 +36,7 @@ separate protected backups. The [backup tool](backup-restore.md) supports a manu
 dump/restore drill. The local Compose environment does not implement encryption
 or an automatic backup policy.
 
-The Server reads the CLIProxyAPI key from a deployment-mounted file. It does not
+The Server reads the CLIProxyAPI key from deployment configuration. It does not
 write the key to PostgreSQL, a Bundle, an audit event, or an Assignment. Each
 assigned Agent stores a private key copy and a model cache below its local state
 directory, plus ownership receipts and recovery journals for client

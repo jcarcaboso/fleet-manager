@@ -115,13 +115,12 @@ to a Fleet-owned field fail closed. Unrelated valid settings and comments remain
 
 ## CLIProxyAPI credential delivery
 
-Configure the key outside Fleet and have the deployment materialize it as a
-private file mounted read-only into the Server. Fleet receives only the path:
+Configure the key through the Server's ordinary .NET configuration sources:
 
 ```json
 {
   "Fleet": {
-    "CliProxyApiKeyPath": "/run/fleet/cliproxy-api-key"
+    "CliProxyApiKey": "replace-with-a-dedicated-proxy-key"
   }
 }
 ```
@@ -132,16 +131,15 @@ credential. The endpoint must:
 
 - require the existing Node mTLS authentication;
 - authorize only a Node with a current `cliproxy` AI-client Assignment;
-- read a bounded regular file with Server-only permissions;
-- return raw bytes with `Cache-Control: no-store`;
+- require a configured non-empty key and return it with `Cache-Control: no-store`;
 - omit the value from logs, errors, metrics, audit records, PostgreSQL, Bundles,
   and backups.
 
-The deployment's secret system owns storage and injection. This can be
-Infisical, a Kubernetes or Docker secret, a systemd credential, or another tool
-that can materialize a file. The Fleet Server only reads the mounted file and
-authorizes delivery. It must not copy the key into its database or desired-state
-model.
+The deployment owns storage and injection. Infisical or any other secret
+manager can set `Fleet__CliProxyApiKey` directly. The homelab Compose file also
+maps the host variable `FLEET_CLIPROXY_API_KEY` to that setting. Fleet does not
+need a secret-manager-specific adapter and must not copy the key into its
+database or desired-state model.
 
 The Agent fetches the key at the same bounded interval as the model catalog and
 stores it under its existing private state directory with mode `0600`. Reading
@@ -260,10 +258,10 @@ The main Fleet touch points are deliberately narrow:
 |---|---|
 | `server/Fleet.Server/Source` | Parse and validate the new manifest fields and build AI-client Targets. |
 | `server/Fleet.Core/Coordination` and persistence | Add the structured Assignment payload and its one-to-one persisted row. |
-| `server/Fleet.Server/Transport` and security options | Expose the authorized credential endpoint and key-file setting. |
+| `server/Fleet.Server/Transport` and security options | Expose the authorized credential endpoint and API-key setting. |
 | `clients/bins/fleet-agent` | Fetch the key and models, dispatch the new Target type, and maintain its refresh interval. |
 | `clients/crates/fleet-reconcile` | Apply and restore semantic Codex and OpenCode configuration transactions. |
-| homelab deployment and technical design docs | Mount the secret and record the changed security boundary. |
+| homelab deployment and technical design docs | Inject the setting and record the changed security boundary. |
 
 ## Implementation tasks
 
@@ -333,17 +331,17 @@ Status: implemented on 2026-09-17.
 
 Scope:
 
-- Add the Server configuration for a mounted key-file path.
+- Add the Server's `Fleet:CliProxyApiKey` configuration setting.
 - Add `GET /agent/v1/cliproxy/credential` behind existing Node mTLS.
 - Authorize only Nodes with a current `cliproxy` AI-client Assignment.
-- Read a bounded regular file, return raw bytes with `Cache-Control: no-store`,
-  and redact the value from every diagnostic path.
-- Test missing files, invalid file types, unauthorized Nodes, revoked Nodes,
-  size limits, and accidental persistence or logging.
+- Return the configured key with `Cache-Control: no-store` and redact the value
+  from every diagnostic path.
+- Test missing and empty settings, unauthorized Nodes, revoked Nodes, size
+  limits, and accidental persistence or logging.
 
 Acceptance:
 
-- An assigned Node can retrieve the exact mounted key.
+- An assigned Node can retrieve the exact configured key.
 - Other Nodes cannot retrieve it.
 - The key does not appear in PostgreSQL, Bundles, logs, audit records, or test
   snapshots.
@@ -479,7 +477,7 @@ Estimate: 1.5 to 2 days.
 
 ### CP-7: deploy and release the integration
 
-Status: release assets prepared on 2026-09-18. The generic secret mount,
+Status: release assets prepared on 2026-09-18. The generic configuration path,
 operations guidance, security documentation, example manifest, release notes,
 and pinned container compatibility check are complete. The environment-specific
 rollout, transition, rotation, outage, and revocation drills remain operator
@@ -487,8 +485,8 @@ steps.
 
 Scope:
 
-- Add a generic read-only secret-file mount to the example deployment. Document
-  Infisical as one way to materialize it.
+- Map an optional Compose host variable to the standard .NET setting. Document
+  that Infisical or another secret manager can inject either variable.
 - Update the threat model, data inventory, backup notes, setup guide, and
   rotation runbook. Add MIT attribution only if upstream code or data is copied.
 - Exercise `unmanaged -> cliproxy -> native -> cliproxy` for both clients.
@@ -500,7 +498,7 @@ Acceptance:
 
 - The complete flow converges on a clean Node and a Node with existing client
   configuration.
-- Rotating the mounted key requires no Git change and causes no OAuth changes.
+- Rotating the configured key requires no Git change and causes no OAuth changes.
 - The release checklist confirms the raw key is absent from Git, durable Server
   state, Bundles, diagnostics, and backups.
 
@@ -511,7 +509,7 @@ Estimate: 1 to 1.5 days.
 | Risk | Plan response |
 |---|---|
 | Whole-file ownership overwrites personal client settings | Add semantic adapters and field-level receipts. Do not reuse Managed files. |
-| Shared proxy key leaks from durable Server state | Serve it from a mounted file and never put it in an Assignment or Bundle. |
+| Shared proxy key leaks from durable Server state | Read it from deployment configuration and never put it in an Assignment or Bundle. |
 | Model metadata changes independently of Git | Refresh and cache on the Node's active reconciliation loop. |
 | OAuth state is destroyed when changing modes | Never manage OAuth credential files; restore only Fleet-owned config fields. |
 | Upstream Codex catalog format changes | Pin the supported Codex version in the live compatibility gate and update the clean-room schema deliberately. |

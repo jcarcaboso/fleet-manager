@@ -30,7 +30,7 @@ builder.Services.AddOptions<FleetOptions>().BindConfiguration("Fleet").ValidateD
     .Validate(x => x.WorkspaceId != Guid.Empty, "A stable WorkspaceId is required.")
     .Validate(x => x.HasValidOperators(), "Configure 1 to 100 uniquely named Operators with distinct SHA-256 token digests.")
     .Validate(x => x.HasValidPublicUrl(), "Fleet:PublicUrl must be an HTTPS origin without a path, credentials, query, or fragment.")
-    .Validate(x => x.HasValidCliProxyApiKeyPath(), "Fleet:CliProxyApiKeyPath must be empty or an absolute path no longer than 4096 characters.")
+    .Validate(x => x.HasValidCliProxyApiKey(), "Fleet:CliProxyApiKey must be empty or contain at most 4096 printable ASCII characters.")
     .ValidateOnStart();
 builder.Services.AddSingleton<NodeCertificateIssuer>();
 builder.Services.AddDbContext<FleetDbContext>((services, options) => options.UseNpgsql(

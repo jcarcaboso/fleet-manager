@@ -18,16 +18,16 @@ public sealed class FleetOptions
     // Empty disables the browser dashboard. Never derive enrollment origins from Host headers.
     public string PublicUrl { get; set; } = "";
     public string EnrollmentCaCertificatePath { get; set; } = "";
-    // Optional mounted secret file. The manifest never contains this credential.
-    public string CliProxyApiKeyPath { get; set; } = "";
+    // Optional deployment setting. The manifest never contains this credential.
+    public string CliProxyApiKey { get; set; } = "";
 
     public bool HasValidPublicUrl() => PublicUrl.Length == 0 ||
         (Uri.TryCreate(PublicUrl, UriKind.Absolute, out var uri) && uri.Scheme == "https" &&
          uri.Host.Length > 0 && uri.UserInfo.Length == 0 && uri.AbsolutePath == "/" &&
          uri.Query.Length == 0 && uri.Fragment.Length == 0);
 
-    public bool HasValidCliProxyApiKeyPath() => CliProxyApiKeyPath.Length == 0 ||
-        CliProxyApiKeyPath.Length <= 4_096 && Path.IsPathFullyQualified(CliProxyApiKeyPath);
+    public bool HasValidCliProxyApiKey() => CliProxyApiKey.Length <= 4_096 &&
+        CliProxyApiKey.All(character => character is >= '!' and <= '~');
 
     public IEnumerable<KeyValuePair<string, string>> OperatorCredentials()
     {

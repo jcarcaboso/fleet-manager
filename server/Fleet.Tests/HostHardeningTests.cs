@@ -48,14 +48,18 @@ public sealed class HostHardeningTests
     }
 
     [Fact]
-    public void CLIProxy_credential_path_is_optional_but_must_be_absolute_and_bounded()
+    public void CLIProxy_credential_is_optional_but_must_be_printable_and_bounded()
     {
         var options = new FleetOptions();
-        Assert.True(options.HasValidCliProxyApiKeyPath());
-        options.CliProxyApiKeyPath = "relative/key";
-        Assert.False(options.HasValidCliProxyApiKeyPath());
-        options.CliProxyApiKeyPath = Path.GetFullPath("mounted-secret");
-        Assert.True(options.HasValidCliProxyApiKeyPath());
+        Assert.True(options.HasValidCliProxyApiKey());
+        options.CliProxyApiKey = "valid-key";
+        Assert.True(options.HasValidCliProxyApiKey());
+        options.CliProxyApiKey = "line\nbreak";
+        Assert.False(options.HasValidCliProxyApiKey());
+        options.CliProxyApiKey = new string('x', 4_096);
+        Assert.True(options.HasValidCliProxyApiKey());
+        options.CliProxyApiKey = new string('x', 4_097);
+        Assert.False(options.HasValidCliProxyApiKey());
     }
 
     [Fact]

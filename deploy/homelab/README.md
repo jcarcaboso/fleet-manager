@@ -59,20 +59,20 @@ Server root access. The Git mirror is an ephemeral cache rebuilt from the source
 ## CLIProxyAPI key
 
 Fleet can supply one Workspace CLIProxyAPI key to assigned Nodes without putting
-it in Git or PostgreSQL. Materialize the key as an owner-only regular file, set
-its absolute path in `.env`, and include the opt-in Compose file:
+it in Git or PostgreSQL. Set `FLEET_CLIPROXY_API_KEY` in the environment used to
+start Compose:
 
 ```sh
 sed -i 's|^FLEET_IMAGE=.*|FLEET_IMAGE=skorcius/fleet-manager:0.6.0|' .env
-printf '\nFLEET_CLIPROXY_API_KEY_FILE=%s\n' "$PWD/secrets/cliproxy-api-key" >> .env
-docker compose -f compose.yaml -f compose.cliproxy.yaml up -d --wait
+export FLEET_CLIPROXY_API_KEY='replace-with-a-dedicated-proxy-key'
+docker compose up -d --wait
 ```
 
-The override mounts the source file read-only into a networkless setup container
-and installs a mode-`0600` copy for the unprivileged Server. Infisical can
-materialize the source file, but it is not required. Any secret system or manual
-process that produces the same private file works. Do not put the value in
-`.env`, `fleet.yml`, or `server.json`.
+Compose maps the value to the Server's standard .NET setting
+`Fleet__CliProxyApiKey`. Infisical or another secret manager can inject either
+environment variable, depending on whether it launches Compose or the Server
+container directly. You can also set `FLEET_CLIPROXY_API_KEY` in `.env`; protect
+that file and keep it out of source control. Never put the key in `fleet.yml`.
 
 Read the [CLIProxyAPI operations guide](../../docs/technical-design/cliproxy-operations.md)
 before publishing `fleet/v2` assignments. It covers the manifest, Agent-first

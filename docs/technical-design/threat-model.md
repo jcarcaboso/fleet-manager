@@ -15,7 +15,7 @@ only. The Server does not run Skill content or access a Node filesystem.
 | Concurrent reports overwrite terminal state | Coordination owns transactions and terminal transition checks. | PostgreSQL duplicate, stale, and concurrent report tests. |
 | Source entry escapes its Skill tree | Read Git objects without checkout; reject links, unsafe paths, portable-name collisions, and bounded source content. | Git fixture tests. Agent extraction and filesystem containment remain later work. |
 | Credential or content leak through errors | No body logging; CLI omits failed response bodies; source errors use bounded diagnostics. | Hosting and CLI error-redaction tests. Operator CLI enrollment output deliberately contains the new token. |
-| Unassigned or revoked Node requests the CLIProxyAPI key | The key endpoint requires Node mTLS and a current `cliproxy` Assignment. The Server reads the key from a bounded owner-only regular file and sends `Cache-Control: no-store`. | Authorization and unavailable-file tests cover unassigned and revoked Nodes. Every assigned Node receives the same Workspace key, so revoke that key if an assigned Node account is compromised. |
+| Unassigned or revoked Node requests the CLIProxyAPI key | The key endpoint requires Node mTLS and a current `cliproxy` Assignment. The Server reads the key from ordinary deployment configuration and sends `Cache-Control: no-store`. | Authorization and unavailable-key tests cover unassigned and revoked Nodes. Every assigned Node receives the same Workspace key, so revoke that key if an assigned Node account is compromised. |
 | Proxy key leaks through desired state or client configuration | Assignments contain only mode, endpoint, and model. The Agent stores the key in private state; Codex command authentication and OpenCode file substitution reference that file. | Wire and configuration tests reject inline secrets and leave OAuth stores unchanged. A same-user process on an assigned Node can still read the key. |
 | Malicious or compromised CLIProxyAPI endpoint | The Agent requires HTTPS, rejects redirects, bounds time and response bytes, and validates a non-empty model list before replacing its cache. | The proxy still receives prompts, responses, and tool traffic. Operators must trust it as an inference provider and use a dedicated endpoint and key. |
 | Oversized input exhausts memory | Request, response, page, tree, file, entry-count, concurrency and time limits. | Boundary tests. Git fetch still needs disk quotas and a measured repository-transfer budget before release. |
@@ -40,7 +40,7 @@ never a command-line token argument. Credential and report state use bounded
 regular files in a private directory with atomic replacement and fsync.
 
 CLIProxyAPI adds one shared Workspace secret to this boundary. The Server loads
-it from deployment-managed storage only after authorizing the Node. The Agent
+it from deployment-managed configuration only after authorizing the Node. The Agent
 keeps its copy in private state and refreshes it during normal reconciliation.
 The source manifest, Assignment, Bundle, database, audit log, and client config
 contain no raw key. Key rotation and revocation procedures are in the

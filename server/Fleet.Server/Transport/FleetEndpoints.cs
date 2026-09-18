@@ -93,11 +93,11 @@ public static class FleetEndpoints
             IOptions<FleetOptions> options, CancellationToken ct) =>
         {
             await coordinator.AuthorizeCliProxyCredentialAsync(Node(context), ct);
-            var credential = await CliProxyCredentialFile.ReadAsync(options.Value.CliProxyApiKeyPath, ct);
+            var credential = options.Value.CliProxyApiKey;
             context.Response.Headers.CacheControl = "no-store";
-            return credential is null
+            return credential.Length == 0
                 ? Results.Json(new { code = "cliproxy_credential_unavailable" }, statusCode: StatusCodes.Status503ServiceUnavailable)
-                : Results.Bytes(credential, "application/octet-stream");
+                : Results.Bytes(Encoding.UTF8.GetBytes(credential), "application/octet-stream");
         });
         agents.MapPost("/reports", async (ReportRequest request, HttpContext context, IFleetCoordinator coordinator,
             TimeProvider time, CancellationToken ct) =>

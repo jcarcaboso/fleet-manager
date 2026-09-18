@@ -44,16 +44,14 @@ restarting. No Operator credential administration endpoint exists yet.
 ## CLIProxyAPI credential
 
 The optional CLIProxyAPI key is a deployment secret, not Server desired state.
-Configure `Fleet__CliProxyApiKeyPath` with an absolute path to a non-empty
-owner-only regular file of at most 4 KiB. The Server rejects links, directories,
-shared permissions, and non-printable content. Only an authenticated Node with a
-current proxy Assignment may fetch it.
-
-The homelab override materializes a mode-`0600` copy in the private runtime
-volume. Follow the [CLIProxyAPI operations guide](cliproxy-operations.md) to set
-it up and rotate with an old/new key overlap. The Agent-first rollout order is a
-protocol requirement: older strict clients do not understand AI-client
-Assignments.
+Configure `Fleet:CliProxyApiKey` through the Server's ordinary .NET
+configuration. Environment variables use the name `Fleet__CliProxyApiKey`; the
+homelab Compose file maps `FLEET_CLIPROXY_API_KEY` to it. The value must contain
+1 to 4,096 printable ASCII characters when configured. Only an authenticated
+Node with a current proxy Assignment may fetch it. Follow the
+[CLIProxyAPI operations guide](cliproxy-operations.md) to set it up and rotate
+with an old/new key overlap. The Agent-first rollout order is a protocol
+requirement: older strict clients do not understand AI-client Assignments.
 
 ## Metrics
 

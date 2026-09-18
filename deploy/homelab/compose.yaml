@@ -1,16 +1,18 @@
 name: fleet-manager
 
+x-server-environment: &server-environment
+  Source__Remote: ${FLEET_SOURCE_REMOTE:-}
+  Fleet__PublicUrl: ${FLEET_PUBLIC_URL:-https://${FLEET_HOSTNAME:-localhost}:${FLEET_PORT:-7443}}
+  ASPNETCORE_CONTENTROOT: /run/fleet
+  HOME: /home/app
+
 x-server: &server
   image: ${FLEET_IMAGE:-skorcius/fleet-manager:0.6.0}
   user: "1654:1654"
   read_only: true
   cap_drop: [ALL]
   security_opt: [no-new-privileges:true]
-  environment:
-    Source__Remote: ${FLEET_SOURCE_REMOTE:-}
-    Fleet__PublicUrl: ${FLEET_PUBLIC_URL:-https://${FLEET_HOSTNAME:-localhost}:${FLEET_PORT:-7443}}
-    ASPNETCORE_CONTENTROOT: /run/fleet
-    HOME: /home/app
+  environment: *server-environment
   volumes:
     - runtime-config:/run/fleet:ro
     - runtime-config:/home/app:ro
@@ -82,6 +84,9 @@ services:
   server:
     <<: *server
     restart: unless-stopped
+    environment:
+      <<: *server-environment
+      Fleet__CliProxyApiKey: ${FLEET_CLIPROXY_API_KEY:-}
     ports:
       - "${FLEET_BIND_IP:-127.0.0.1}:${FLEET_PORT:-7443}:7443"
     depends_on:

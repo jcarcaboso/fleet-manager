@@ -2,6 +2,12 @@
 
 Research date: 2026-09-17
 
+Implementation note (2026-09-18): this document records the initial design
+options. Fleet 0.6 uses one optional Workspace key supplied through the
+Server's `Fleet:CliProxyApiKey` deployment setting; `fleet.yml` contains no
+credential reference. See the [operations guide](../technical-design/cliproxy-operations.md)
+for the implemented behavior.
+
 Source snapshots:
 
 - EasyCLIProxyAPI `e7f96e12d724ae3f541f65e4c32da78f9ef3003b`

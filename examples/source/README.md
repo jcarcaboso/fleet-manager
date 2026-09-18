@@ -18,7 +18,7 @@ Node's `targets.agents`. Omit `clients` to install one source for every
 supported AI client.
 
 [`fleet-cliproxy.yml`](fleet-cliproxy.yml) is an opt-in `fleet/v2` example. Copy
-it over `fleet.yml` only after the Server key file is configured and compatible
-Agents run on the selected Node. Replace the proxy hostname and placeholder
-model with a model advertised by the authenticated `/v1/models` endpoint. The
-key never belongs in either manifest.
+it over `fleet.yml` only after the Server API-key setting is configured and
+compatible Agents run on the selected Node. Replace the proxy hostname and
+placeholder model with a model advertised by the authenticated `/v1/models`
+endpoint. The key never belongs in either manifest.

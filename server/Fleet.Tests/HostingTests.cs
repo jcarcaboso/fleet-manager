@@ -25,7 +25,6 @@ public sealed class HostingTests : IAsyncLifetime
     private const string CliProxyKey = "test-cliproxy-key";
     private WebApplicationFactory<Program> _factory = null!;
     private HttpClient _operator = null!;
-    private string _cliProxyKeyPath = null!;
 
     public async Task InitializeAsync()
     {
@@ -40,13 +39,8 @@ public sealed class HostingTests : IAsyncLifetime
         var keyPath = Path.Combine(_directory, "ca.key");
         await File.WriteAllTextAsync(certificatePath, certificate.ExportCertificatePem());
         await File.WriteAllTextAsync(keyPath, key.ExportPkcs8PrivateKeyPem());
-        _cliProxyKeyPath = Path.Combine(_directory, "cliproxy.key");
-        await File.WriteAllTextAsync(_cliProxyKeyPath, CliProxyKey + "\n");
         if (!OperatingSystem.IsWindows())
-        {
             File.SetUnixFileMode(keyPath, UnixFileMode.UserRead | UnixFileMode.UserWrite);
-            File.SetUnixFileMode(_cliProxyKeyPath, UnixFileMode.UserRead | UnixFileMode.UserWrite);
-        }
         _factory = new WebApplicationFactory<Program>().WithWebHostBuilder(builder => builder.ConfigureAppConfiguration((_, config) =>
             config.AddInMemoryCollection(new Dictionary<string, string?>
             {
@@ -55,7 +49,7 @@ public sealed class HostingTests : IAsyncLifetime
                 ["Fleet:OperatorTokenSha256"] = Convert.ToHexStringLower(SHA256.HashData(Encoding.UTF8.GetBytes(Token))),
                 ["Fleet:IssuerCertificatePath"] = certificatePath,
                 ["Fleet:IssuerKeyPath"] = keyPath,
-                ["Fleet:CliProxyApiKeyPath"] = _cliProxyKeyPath,
+                ["Fleet:CliProxyApiKey"] = CliProxyKey,
                 ["Fleet:PublicUrl"] = "https://localhost",
                 ["Source:Remote"] = "",
                 ["urls"] = "https://localhost:7443",
@@ -355,24 +349,19 @@ public sealed class HostingTests : IAsyncLifetime
         Assert.Equal(403, (await SendNodeAsync(route, unassigned.Certificate, method: "GET")).Response.StatusCode);
         Assert.Equal(HttpStatusCode.Unauthorized, (await _operator.GetAsync(route)).StatusCode);
 
-        if (!OperatingSystem.IsWindows())
+        using (var scope = _factory.Services.CreateScope())
         {
-            File.SetUnixFileMode(_cliProxyKeyPath, UnixFileMode.UserRead | UnixFileMode.GroupRead);
-            Assert.Equal(503, (await SendNodeAsync(route, assigned.Certificate, method: "GET")).Response.StatusCode);
-            File.SetUnixFileMode(_cliProxyKeyPath, UnixFileMode.UserRead | UnixFileMode.UserWrite);
-            var realKeyPath = _cliProxyKeyPath + ".real";
-            File.Move(_cliProxyKeyPath, realKeyPath);
-            File.CreateSymbolicLink(_cliProxyKeyPath, realKeyPath);
-            Assert.Equal(503, (await SendNodeAsync(route, assigned.Certificate, method: "GET")).Response.StatusCode);
-            File.Delete(_cliProxyKeyPath);
-            File.Move(realKeyPath, _cliProxyKeyPath);
+            var options = scope.ServiceProvider.GetRequiredService<Microsoft.Extensions.Options.IOptions<FleetOptions>>().Value;
+            options.CliProxyApiKey = "";
+            try
+            {
+                var unavailable = await SendNodeAsync(route, assigned.Certificate, method: "GET");
+                Assert.Equal(503, unavailable.Response.StatusCode);
+                Assert.Equal("cliproxy_credential_unavailable",
+                    (await JsonSerializer.DeserializeAsync<JsonElement>(unavailable.Response.Body)).GetProperty("code").GetString());
+            }
+            finally { options.CliProxyApiKey = CliProxyKey; }
         }
-
-        await File.WriteAllBytesAsync(_cliProxyKeyPath, new byte[4_097]);
-        var unavailable = await SendNodeAsync(route, assigned.Certificate, method: "GET");
-        Assert.Equal(503, unavailable.Response.StatusCode);
-        Assert.Equal("cliproxy_credential_unavailable",
-            (await JsonSerializer.DeserializeAsync<JsonElement>(unavailable.Response.Body)).GetProperty("code").GetString());
 
         using (var scope = _factory.Services.CreateScope())
             await scope.ServiceProvider.GetRequiredService<IFleetCoordinator>().AcceptSourceSnapshotAsync(new(

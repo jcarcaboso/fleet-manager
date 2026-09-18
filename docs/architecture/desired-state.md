@@ -193,7 +193,7 @@ An omitted AI client is unmanaged. `cliproxy` publishes the normalized
 Workspace endpoint and required model but never the API key. `native` instructs
 the Agent to remove Fleet-owned proxy settings without handling OAuth. The
 operator signs in locally through the AI client's normal flow. The Server reads
-the proxy API key from the optional absolute `Fleet:CliProxyApiKeyPath` and
+the proxy API key from the optional `Fleet:CliProxyApiKey` setting and
 serves it only to Nodes with a current `cliproxy` Assignment.
 
 The Server owns the enrolled Node registry. Keys under `nodes` are unique Node
