@@ -30,7 +30,7 @@ as documented by
 
 The Agent adds these direct dependencies to the Rust workspace. Versions below
 are the resolved versions in `Cargo.lock`; manifests constrain their compatible
-release lines. Each lists `MIT OR Apache-2.0` in its upstream crate metadata.
+release lines. Their upstream crate metadata lists MIT or `MIT OR Apache-2.0`.
 
 | Package | Purpose |
 |---|---|
@@ -39,8 +39,17 @@ release lines. Each lists `MIT OR Apache-2.0` in its upstream crate metadata.
 | dirs 6.0.0 | Resolve the local user's home directory. |
 | sha2 0.10.9 | Verify Bundle and observed Skill-tree digests. |
 | unicode-normalization 0.1.25 | Reject noncanonical and colliding portable Bundle paths. |
+| toml_edit 0.25.15 | Preserve unrelated Codex TOML while changing Fleet-owned provider fields. |
+| jsonc-parser 0.33.2 | Preserve unrelated OpenCode JSONC and comments while changing Fleet-owned provider fields. |
 
 `tempfile` is test-only. The Agent uses standard-library file locks and filesystem
 operations. The RustSec audit on 2026-09-08 loaded 1,242 advisories and reported no
 vulnerabilities across the 193 locked packages. The separate crates.io index
 refresh emitted a local registry warning; the advisory database fetch succeeded.
+
+The CLIProxyAPI integration is an independent implementation of public HTTP and
+client configuration formats. Compatibility research consulted the
+MIT-licensed EasyCLIProxyAPI and CLIProxyAPI projects at the revisions recorded
+in [the provisioning research](../research/cliproxy-client-provisioning.md).
+Fleet does not vendor their source, catalog templates, or model data, so this
+release adds no copied third-party notice.

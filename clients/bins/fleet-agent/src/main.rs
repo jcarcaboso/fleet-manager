@@ -1,3 +1,5 @@
+mod actions;
+mod ai_client;
 mod credentials;
 mod protocol;
 mod service;
@@ -8,9 +10,8 @@ use clap::{Parser, Subcommand};
 use credentials::{CredentialStore, StoredIdentity};
 use protocol::{Api, Assignment, ConvergenceState};
 use serde::{Deserialize, Serialize};
-use sha2::{Digest, Sha256};
 use std::{
-    collections::{BTreeMap, HashSet},
+    collections::BTreeMap,
     fs,
     io::{self, BufRead, Write},
     path::{Path, PathBuf},
@@ -258,19 +259,13 @@ async fn main() -> Result<()> {
             state::private_directory(&cache)?;
             let reconciler =
                 fleet_reconcile::Reconciler::new(&config.home, directory.join("targets"))?;
+            let ai_reconciler =
+                ai_client::Reconciler::new(&config.home, directory.join("ai-clients"))?;
+            let actions = actions::Registry::new(&reconciler, &ai_reconciler, &cache);
             let path = directory.join("run.json");
             let mut run = state::read_json::<RunState>(&path)?.unwrap_or_default();
             loop {
-                let result = cycle(
-                    &config,
-                    &store,
-                    &mut identity,
-                    &mut run,
-                    &path,
-                    &cache,
-                    &reconciler,
-                )
-                .await;
+                let result = cycle(&config, &store, &mut identity, &mut run, &path, &actions).await;
                 let outcome = match result {
                     Ok(outcome) => outcome,
                     Err(error) if once => return Err(error),
@@ -456,20 +451,6 @@ fn api(config: &state::Config, identity: &StoredIdentity) -> Result<Api> {
     )?)
 }
 
-fn target(assignment: &Assignment) -> Result<fleet_reconcile::TargetDescriptor> {
-    let is_skills = assignment.target_name == "skills" && assignment.file.is_none();
-    let is_file = assignment.target_name.starts_with("agent-file/")
-        && assignment.skills.is_empty()
-        && assignment.file.is_some();
-    if (!is_skills && !is_file) || assignment.target.base != "home" {
-        bail!("unsupported Target descriptor");
-    }
-    Ok(fleet_reconcile::TargetDescriptor {
-        base: fleet_reconcile::TargetBase::Home,
-        path: PathBuf::from(&assignment.target.path),
-    })
-}
-
 fn migrate_run_state(run: &mut RunState) {
     if let Some(assignment) = run.active.take() {
         let target_name = assignment.target_name.clone();
@@ -482,215 +463,6 @@ fn migrate_run_state(run: &mut RunState) {
             .or_default()
             .pending_assignment = Some(assignment);
     }
-}
-
-fn cache_path(cache: &Path, digest: &str) -> Result<PathBuf> {
-    let hex = digest
-        .strip_prefix("sha256:")
-        .context("unsupported Bundle digest")?;
-    if hex.len() != 64
-        || !hex
-            .bytes()
-            .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
-    {
-        bail!("invalid Bundle digest");
-    }
-    Ok(cache.join(hex))
-}
-
-fn clean_cache(cache: &Path, run: &RunState) -> Result<()> {
-    let mut keep = HashSet::new();
-    for assignment in run
-        .targets
-        .values()
-        .flat_map(|target| target.active.iter().chain(target.pending_assignment.iter()))
-    {
-        for skill in &assignment.skills {
-            keep.insert(cache_path(cache, &skill.bundle_digest)?);
-        }
-        if let Some(digest) = assignment
-            .file
-            .as_ref()
-            .and_then(|file| file.bundle_digest.as_deref())
-        {
-            keep.insert(cache_path(cache, digest)?);
-        }
-    }
-    for entry in fs::read_dir(cache)? {
-        let entry = entry?;
-        if !entry.file_type()?.is_file() {
-            bail!("Bundle cache contains a non-file entry");
-        }
-        if !keep.contains(&entry.path()) {
-            fs::remove_file(entry.path())?;
-        }
-    }
-    Ok(())
-}
-
-fn local_assignment(assignment: &Assignment, cache: &Path) -> Result<fleet_reconcile::Assignment> {
-    let mut total = 0u64;
-    let mut skills = Vec::new();
-    if assignment.skills.len() > 10_000 {
-        bail!("Assignment contains too many Skills");
-    }
-    for skill in &assignment.skills {
-        if skill.size < 0 || skill.size > 16 * 1024 * 1024 {
-            bail!("Bundle exceeds 16 MiB");
-        }
-        total = total
-            .checked_add(skill.size as u64)
-            .context("Assignment size overflow")?;
-        if total > 256 * 1024 * 1024 {
-            bail!("Assignment exceeds 256 MiB");
-        }
-        skills.push(fleet_reconcile::DesiredSkill {
-            name: skill.name.clone(),
-            digest: skill.bundle_digest.clone(),
-            size: skill.size as u64,
-            schema: skill.schema.clone(),
-            bundle: state::read_bytes(&cache_path(cache, &skill.bundle_digest)?, 16 * 1024 * 1024)?,
-        });
-    }
-    Ok(fleet_reconcile::Assignment {
-        assignment_id: assignment.assignment_id.to_string(),
-        desired_revision_id: assignment.desired_revision_id.to_string(),
-        skills,
-    })
-}
-
-fn local_file_assignment(
-    assignment: &Assignment,
-    cache: &Path,
-) -> Result<fleet_reconcile::FileAssignment> {
-    let file = assignment
-        .file
-        .as_ref()
-        .context("managed-file Target has no file")?;
-    let content = match &file.bundle_digest {
-        Some(digest) => state::read_bytes(&cache_path(cache, digest)?, 16 * 1024 * 1024)?,
-        None => Vec::new(),
-    };
-    Ok(fleet_reconcile::FileAssignment {
-        assignment_id: assignment.assignment_id.to_string(),
-        desired_revision_id: assignment.desired_revision_id.to_string(),
-        file: fleet_reconcile::DesiredFile {
-            name: file.name.clone(),
-            digest: file.bundle_digest.clone(),
-            size: file
-                .size
-                .map(|size| u64::try_from(size).context("invalid managed file size"))
-                .transpose()?,
-            schema: file.schema.clone(),
-            content,
-        },
-    })
-}
-
-fn verify_bundle(skill: &protocol::AssignmentSkill, bytes: &[u8]) -> bool {
-    skill.schema == "fleet.bundle/v1"
-        && skill.size >= 0
-        && bytes.len() as i64 == skill.size
-        && format!("sha256:{:x}", Sha256::digest(bytes)) == skill.bundle_digest
-}
-
-fn verify_file(file: &protocol::AssignmentFile, bytes: &[u8]) -> bool {
-    let mut digest = Sha256::new();
-    digest.update(b"fleet.file/v1\0");
-    digest.update(bytes);
-    let digest = digest.finalize();
-    file.schema.as_deref() == Some("fleet.file/v1")
-        && file
-            .size
-            .is_some_and(|size| size >= 0 && bytes.len() as i64 == size)
-        && file
-            .bundle_digest
-            .as_ref()
-            .is_some_and(|expected| format!("sha256:{digest:x}") == *expected)
-}
-
-async fn ensure_bundles(client: &Api, assignment: &Assignment, cache: &Path) -> Result<()> {
-    let mut total = 0u64;
-    if assignment.skills.len() > 10_000 {
-        bail!("Assignment contains too many Skills");
-    }
-    for skill in &assignment.skills {
-        let size = u64::try_from(skill.size).context("invalid Bundle size")?;
-        total = total
-            .checked_add(size)
-            .context("Assignment size overflow")?;
-        if size > 16 * 1024 * 1024 || total > 256 * 1024 * 1024 || skill.schema != "fleet.bundle/v1"
-        {
-            bail!("unsupported Bundle size or schema");
-        }
-        let destination = cache_path(cache, &skill.bundle_digest)?;
-        let valid = match fs::symlink_metadata(&destination) {
-            Ok(metadata) => {
-                if !metadata.is_file() || metadata.file_type().is_symlink() {
-                    bail!("unsafe Bundle cache entry");
-                }
-                if metadata.len() <= 16 * 1024 * 1024
-                    && verify_bundle(skill, &state::read_bytes(&destination, 16 * 1024 * 1024)?)
-                {
-                    true
-                } else {
-                    fs::remove_file(&destination)?;
-                    false
-                }
-            }
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => false,
-            Err(error) => return Err(error.into()),
-        };
-        if !valid {
-            let bundle = client.bundle(skill).await?;
-            if bundle.digest != skill.bundle_digest
-                || bundle.schema != skill.schema
-                || !verify_bundle(skill, &bundle.bytes)
-            {
-                bail!("downloaded Bundle failed integrity validation");
-            }
-            state::write_bytes(&destination, &bundle.bytes)?;
-        }
-    }
-    if let Some(file) = assignment.file.as_ref()
-        && let Some(digest) = file.bundle_digest.as_deref()
-    {
-        let size = file.size.context("managed file size is missing")?;
-        if !(0..=16 * 1024 * 1024).contains(&size)
-            || file.schema.as_deref() != Some("fleet.file/v1")
-        {
-            bail!("unsupported managed file size or schema");
-        }
-        let destination = cache_path(cache, digest)?;
-        let valid = match fs::symlink_metadata(&destination) {
-            Ok(metadata) => {
-                if !metadata.is_file() || metadata.file_type().is_symlink() {
-                    bail!("unsafe Bundle cache entry");
-                }
-                if metadata.len() <= 16 * 1024 * 1024
-                    && verify_file(file, &state::read_bytes(&destination, 16 * 1024 * 1024)?)
-                {
-                    true
-                } else {
-                    fs::remove_file(&destination)?;
-                    false
-                }
-            }
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => false,
-            Err(error) => return Err(error.into()),
-        };
-        if !valid {
-            let downloaded = client.file(file).await?;
-            if downloaded.digest != digest
-                || downloaded.schema != "fleet.file/v1"
-                || !verify_file(file, &downloaded.bytes)
-            {
-                bail!("downloaded managed file failed integrity validation");
-            }
-            state::write_bytes(&destination, &downloaded.bytes)?;
-        }
-    }
-    Ok(())
 }
 
 async fn deliver_report(client: &Api, run: &mut RunState, path: &Path) -> Result<()> {
@@ -714,53 +486,13 @@ async fn deliver_report(client: &Api, run: &mut RunState, path: &Path) -> Result
     Ok(())
 }
 
-fn recover_assignment(
-    reconciler: &fleet_reconcile::Reconciler,
-    assignment: &Assignment,
-) -> Result<()> {
-    let descriptor = target(assignment)?;
-    if let Some(file) = &assignment.file {
-        reconciler.recover_file(&descriptor, &file.name)?;
-    } else {
-        reconciler.recover(&descriptor)?;
-    }
-    Ok(())
-}
-
-fn assignment_within_budget(assignment: &Assignment) -> bool {
-    if assignment.skills.len() > 10_000 {
-        return false;
-    }
-    let skill_bytes = assignment.skills.iter().try_fold(0u64, |sum, skill| {
-        u64::try_from(skill.size)
-            .ok()
-            .and_then(|size| sum.checked_add(size))
-    });
-    if skill_bytes.is_none_or(|sum| sum > 256 * 1024 * 1024) {
-        return false;
-    }
-    match &assignment.file {
-        None => assignment.target_name == "skills",
-        Some(file) if assignment.target_name.starts_with("agent-file/") => matches!(
-            (
-                file.bundle_digest.as_ref(),
-                file.size,
-                file.schema.as_deref(),
-            ),
-            (None, None, None) | (Some(_), Some(0..=16_777_216), Some("fleet.file/v1"))
-        ),
-        Some(_) => false,
-    }
-}
-
 async fn cycle(
     config: &state::Config,
     store: &CredentialStore,
     identity: &mut StoredIdentity,
     run: &mut RunState,
     path: &Path,
-    cache: &Path,
-    reconciler: &fleet_reconcile::Reconciler,
+    actions: &actions::Registry<'_>,
 ) -> Result<CycleOutcome> {
     migrate_run_state(run);
     for assignment in run
@@ -768,7 +500,7 @@ async fn cycle(
         .values()
         .flat_map(|target| target.active.iter().chain(target.pending_assignment.iter()))
     {
-        recover_assignment(reconciler, assignment)?;
+        actions.recover(assignment)?;
     }
     let expires = OffsetDateTime::parse(&identity.expires_at, &Rfc3339)
         .context("invalid credential expiration")?;
@@ -792,10 +524,7 @@ async fn cycle(
     }
     let delay = poll.next_poll_seconds;
     if let Some(assignment) = poll.assignment {
-        target(&assignment)?;
-        if !assignment_within_budget(&assignment) {
-            bail!("Assignment exceeds the supported size budget");
-        }
+        actions.validate(&assignment)?;
         let target_state = run
             .targets
             .entry(assignment.target_name.clone())
@@ -808,14 +537,18 @@ async fn cycle(
         target_state.pending_assignment = Some(assignment);
         state::write_json(path, run)?;
     }
-    clean_cache(cache, run)?;
+    actions.clean_cache(
+        run.targets
+            .values()
+            .flat_map(|target| target.active.iter().chain(target.pending_assignment.iter())),
+    )?;
     let pending = run
         .targets
         .values()
         .find_map(|target| target.pending_assignment.clone());
     let progressed = pending.is_some();
     if let Some(assignment) = pending {
-        ensure_bundles(&client, &assignment, cache).await?;
+        actions.prepare(&client, &assignment).await?;
         let applying = client
             .report(assignment.attempt_id, ConvergenceState::Applying, None)
             .await?;
@@ -839,16 +572,8 @@ async fn cycle(
         if applying.state != ConvergenceState::Applying {
             bail!("Server did not acknowledge applying state");
         }
-        let descriptor = target(&assignment)?;
-        let outcome = if assignment.file.is_some() {
-            reconciler
-                .reconcile_file(&descriptor, &local_file_assignment(&assignment, cache)?)
-                .map(|_| ())
-        } else {
-            reconciler
-                .reconcile(&descriptor, &local_assignment(&assignment, cache)?)
-                .map(|_| ())
-        };
+        let outcome = actions.apply(&client, &assignment).await;
+        let error_code = outcome.as_ref().err().map(|error| error.code().to_owned());
         let target_state = run
             .targets
             .entry(assignment.target_name.clone())
@@ -857,18 +582,19 @@ async fn cycle(
         run.pending_report = Some(PendingReport {
             attempt_id: assignment.attempt_id,
             succeeded: outcome.is_ok(),
-            error_code: outcome
-                .as_ref()
-                .err()
-                .map(|error| error.code_str().to_owned()),
+            error_code,
         });
         if outcome.is_ok() {
             target_state.active = Some(assignment);
         }
         state::write_json(path, run)?;
         deliver_report(&client, run, path).await?;
-        clean_cache(cache, run)?;
-        outcome?;
+        actions.clean_cache(
+            run.targets
+                .values()
+                .flat_map(|target| target.active.iter().chain(target.pending_assignment.iter())),
+        )?;
+        outcome.map_err(anyhow::Error::new)?;
         println!("{{\"outcome\":\"succeeded\"}}");
     } else {
         let active = run
@@ -877,14 +603,11 @@ async fn cycle(
             .filter_map(|target| target.active.clone())
             .collect::<Vec<_>>();
         for assignment in active {
-            ensure_bundles(&client, &assignment, cache).await?;
-            let descriptor = target(&assignment)?;
-            if assignment.file.is_some() {
-                reconciler
-                    .reconcile_file(&descriptor, &local_file_assignment(&assignment, cache)?)?;
-            } else {
-                reconciler.reconcile(&descriptor, &local_assignment(&assignment, cache)?)?;
-            }
+            actions.prepare(&client, &assignment).await?;
+            actions
+                .apply(&client, &assignment)
+                .await
+                .map_err(anyhow::Error::new)?;
         }
     }
     Ok(CycleOutcome {
@@ -1042,21 +765,5 @@ mod tests {
         let error = parse_enrollment_link(&link).err().unwrap().to_string();
         assert_eq!(error, "invalid enrollment link payload");
         assert!(!error.contains(secret));
-    }
-
-    #[test]
-    fn bundle_cache_rejects_digest_path_injection() {
-        for digest in [
-            "../identity.json",
-            "sha256:../identity.json",
-            "sha256:ABCDEF",
-            "sha512:abc",
-        ] {
-            assert!(cache_path(Path::new("/cache"), digest).is_err());
-        }
-        assert_eq!(
-            cache_path(Path::new("/cache"), &format!("sha256:{}", "a".repeat(64))).unwrap(),
-            PathBuf::from("/cache").join("a".repeat(64))
-        );
     }
 }

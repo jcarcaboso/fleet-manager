@@ -31,7 +31,7 @@ migrations with Docker Compose. The dashboard is part of the Server image, so
 it does not need a separate container. Follow the
 [homelab setup](deploy/homelab/README.md) for a first installation.
 
-The amd64 Server image is `skorcius/fleet-manager:0.5.1`.
+The amd64 Server image is `skorcius/fleet-manager:0.6.0`.
 For an existing installation, back up PostgreSQL and private configuration,
 replace `compose.yaml` with the current release copy, and preserve `.env`, `secrets/`,
 `operator.env`, `ssh/`, and Docker volumes. Set the image in `.env`, then run:
@@ -190,6 +190,13 @@ are.
 Upgrade `fleet-agent` on managed Nodes before committing instruction sources;
 older Agents do not understand Managed-file Assignments.
 
+`fleet/v2` can also select `native` or `cliproxy` connections for Codex and
+OpenCode. Configure the Server's `Fleet:CliProxyApiKey` setting and upgrade
+every selected Agent before publishing those entries. The key stays out of Git
+and client configuration. See the
+[CLIProxyAPI operations guide](docs/technical-design/cliproxy-operations.md)
+and [example manifest](examples/source/fleet-cliproxy.yml).
+
 For a private source, use SSH with a dedicated read-only deploy key, a verified
 `known_hosts`, and an explicit SSH configuration under the homelab deployment's
 `ssh/` directory. Fleet rejects credentials embedded in HTTPS URLs. See the
@@ -241,6 +248,7 @@ The main design references are:
 - [Engineering standards](docs/engineering-standards.md)
 - [Fleet Manager 0.5.1 release notes](docs/releases/0.5.1.md)
 - [Fleet Manager 0.5.2 release notes](docs/releases/0.5.2.md)
+- [Fleet Manager 0.6.0 release notes](docs/releases/0.6.0.md)
 - [Fleet Manager 0.5.0 release notes](docs/releases/0.5.0.md)
 - [Server 0.4.1 release notes](docs/releases/0.4.1.md)
 - [Fleet Manager 0.4.0 release notes](docs/releases/0.4.0.md)

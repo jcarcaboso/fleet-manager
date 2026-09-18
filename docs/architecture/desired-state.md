@@ -91,6 +91,11 @@ protocol decisions.
 
 ## Conceptual YAML
 
+Manifest versions are independent strict contracts. `fleet/v1` supports Skills
+and Agent instruction files. `fleet/v2` retains those fields and adds AI client
+connections. Both versions normalize to the same internal desired-state model;
+unknown fields are rejected according to the declared version.
+
 ```yaml
 schema: fleet/v1
 
@@ -161,6 +166,36 @@ accepted desired revision active. To retire a source, first update every Node
 that references it. Use `agents: []` and wait for that Rollout when all of its
 supported client files should be cleared.
 
+`fleet/v2` can additionally select how Codex and OpenCode connect:
+
+```yaml
+schema: fleet/v2
+cliproxy:
+  base-url: https://proxy.example/v1
+targets:
+  skills:
+    base: home
+    path: .agents/skills
+nodes:
+  homelab-mini:
+    targets:
+      skills:
+        groups: []
+      ai-clients:
+        codex:
+          mode: cliproxy
+          model: gpt-6-astra
+        opencode:
+          mode: native
+```
+
+An omitted AI client is unmanaged. `cliproxy` publishes the normalized
+Workspace endpoint and required model but never the API key. `native` instructs
+the Agent to remove Fleet-owned proxy settings without handling OAuth. The
+operator signs in locally through the AI client's normal flow. The Server reads
+the proxy API key from the optional `Fleet:CliProxyApiKey` setting and
+serves it only to Nodes with a current `cliproxy` Assignment.
+
 The Server owns the enrolled Node registry. Keys under `nodes` are unique Node
 aliases, resolved by the Server to stable internal Node IDs. The alias is the
 exact, case-sensitive name supplied at enrollment. The YAML supplies desired
@@ -179,6 +214,15 @@ old alias for a different Node. Previously published Assignments retain their
 resolved Node IDs; an alias change does not rewrite an accepted revision.
 Existing UUID-based manifests must remove each `id` field and use the enrolled
 Node's current name as the mapping key. Certificate identities do not change.
+
+For a `cliproxy` Assignment, the Agent retrieves the credential over its
+existing mTLS session, stores it only in its private state directory, and
+discovers models from the configured `/v1/models` endpoint. The last valid
+non-empty catalog is retained across transient failures. Codex receives a
+command-backed provider that reads the key file; OpenCode receives a file
+reference. Neither adapter reads or changes the client's OAuth store. A
+Fleet-owned receipt permits restart and native restoration while preserving
+unrelated TOML or JSONC settings and comments.
 
 ## Target resolution
 

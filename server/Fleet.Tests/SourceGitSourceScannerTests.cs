@@ -250,6 +250,167 @@ public sealed class SourceGitSourceScannerTests : IDisposable
     }
 
     [Fact]
+    public async Task Target_publishers_keep_registered_action_order()
+    {
+        var repository = CreateRepository();
+        Write(repository, "fleet.yml", """
+            schema: fleet/v2
+            cliproxy:
+              base-url: https://proxy.example
+            targets:
+              skills:
+                base: home
+                path: .agents/skills
+            nodes:
+              fixture:
+                targets:
+                  skills:
+                    groups: []
+                  agents:
+                    - source: personal
+                      clients: [codex]
+                  ai-clients:
+                    codex:
+                      mode: cliproxy
+                      model: gpt-6-astra
+            """);
+        Write(repository, "agents/personal/AGENTS.md", "# Personal instructions\n");
+        Commit(repository, "all registered target publishers");
+
+        var snapshot = Assert.IsType<SourceScanResult.Snapshot>(
+            await Scanner(repository).ScanAsync(null, CancellationToken.None));
+
+        Assert.Equal(
+            ["skills", "agent-file/codex", "ai-client/codex"],
+            snapshot.Value.Targets.Select(target => target.TargetName));
+    }
+
+    [Fact]
+    public async Task Fleet_v2_builds_typed_AI_client_targets_and_normalizes_the_proxy_endpoint()
+    {
+        var repository = CreateRepository();
+        Write(repository, "fleet.yml", """
+            schema: fleet/v2
+            cliproxy:
+              base-url: https://proxy.hlab.alpetxino.com/
+            targets:
+              skills:
+                base: home
+                path: .agents/skills
+            nodes:
+              fixture:
+                targets:
+                  skills:
+                    groups: []
+                  ai-clients:
+                    codex:
+                      mode: cliproxy
+                      model: gpt-6-astra
+                    opencode:
+                      mode: native
+            """);
+        Commit(repository, "v2 AI clients");
+
+        var snapshot = Assert.IsType<SourceScanResult.Snapshot>(
+            await Scanner(repository).ScanAsync(null, CancellationToken.None));
+        var targets = snapshot.Value.Targets.Where(target => target.AiClient is not null).ToDictionary(target => target.TargetName);
+
+        var codex = targets["ai-client/codex"];
+        Assert.Equal(("home", ".codex"), (codex.Descriptor.Base, codex.Descriptor.Path));
+        Assert.Equal(new AiClientAssignment("fleet.ai-client/v1", "codex", "cliproxy",
+            "https://proxy.hlab.alpetxino.com/v1", "gpt-6-astra"), codex.AiClient);
+        var opencode = targets["ai-client/opencode"];
+        Assert.Equal(("home", ".config/opencode"), (opencode.Descriptor.Base, opencode.Descriptor.Path));
+        Assert.Equal(new AiClientAssignment("fleet.ai-client/v1", "opencode", "native"), opencode.AiClient);
+    }
+
+    [Fact]
+    public async Task Fleet_v1_remains_strict_and_rejects_v2_fields()
+    {
+        var repository = CreateRepository();
+        Write(repository, "fleet.yml", Manifest([]).Replace(
+            "schema: fleet/v1\n",
+            "schema: fleet/v1\ncliproxy: { base-url: https://proxy.example/ }\n",
+            StringComparison.Ordinal));
+        Commit(repository, "v2 field in v1");
+
+        var invalid = Assert.IsType<SourceScanResult.Invalid>(
+            await Scanner(repository).ScanAsync(null, CancellationToken.None));
+
+        Assert.Equal("invalid_manifest", Assert.Single(invalid.Diagnostics).Code);
+    }
+
+    [Fact]
+    public async Task Fleet_v2_validates_AI_client_modes_models_and_proxy_URLs()
+    {
+        var repository = CreateRepository();
+        Write(repository, "fleet.yml", """
+            schema: fleet/v2
+            cliproxy:
+              base-url: http://user:password@proxy.example/v1?unsafe=true
+            targets:
+              skills:
+                base: home
+                path: .agents/skills
+            nodes:
+              fixture:
+                targets:
+                  skills:
+                    groups: []
+                  ai-clients:
+                    codex:
+                      mode: cliproxy
+                    opencode:
+                      mode: native
+                      model: forbidden
+                    unknown:
+                      mode: native
+            """);
+        Commit(repository, "invalid v2 AI clients");
+
+        var invalid = Assert.IsType<SourceScanResult.Invalid>(
+            await Scanner(repository).ScanAsync(null, CancellationToken.None));
+
+        Assert.Contains(invalid.Diagnostics, diagnostic => diagnostic.Code == "invalid_cliproxy_base_url");
+        Assert.Contains(invalid.Diagnostics, diagnostic => diagnostic.Code == "missing_ai_client_model");
+        Assert.Contains(invalid.Diagnostics, diagnostic => diagnostic.Code == "invalid_ai_client_model");
+        Assert.Contains(invalid.Diagnostics, diagnostic => diagnostic.Code == "unknown_ai_client");
+    }
+
+    [Theory]
+    [InlineData("\" gpt-6 \"")]
+    [InlineData("\"gpt model\"")]
+    [InlineData("gpt-六")]
+    public async Task Fleet_v2_rejects_model_identifiers_the_Agent_cannot_use(string yamlModel)
+    {
+        var repository = CreateRepository();
+        Write(repository, "fleet.yml", $$"""
+            schema: fleet/v2
+            cliproxy:
+              base-url: https://proxy.example/v1
+            targets:
+              skills:
+                base: home
+                path: .agents/skills
+            nodes:
+              fixture:
+                targets:
+                  skills:
+                    groups: []
+                  ai-clients:
+                    codex:
+                      mode: cliproxy
+                      model: {{yamlModel}}
+            """);
+        Commit(repository, "invalid AI client model identifier");
+
+        var invalid = Assert.IsType<SourceScanResult.Invalid>(
+            await Scanner(repository).ScanAsync(null, CancellationToken.None));
+
+        Assert.Contains(invalid.Diagnostics, diagnostic => diagnostic.Code == "invalid_ai_client_model");
+    }
+
+    [Fact]
     public async Task Different_nodes_can_select_different_agent_sources()
     {
         var secondNodeId = new NodeId(Guid.NewGuid());

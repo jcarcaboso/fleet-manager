@@ -15,6 +15,7 @@ public sealed class FleetDbContext(DbContextOptions<FleetDbContext> options) : D
     public DbSet<AssignmentRow> Assignments => Set<AssignmentRow>();
     public DbSet<AssignmentSkillRow> AssignmentSkills => Set<AssignmentSkillRow>();
     public DbSet<AssignmentFileRow> AssignmentFiles => Set<AssignmentFileRow>();
+    public DbSet<AssignmentAiClientRow> AssignmentAiClients => Set<AssignmentAiClientRow>();
     public DbSet<AttemptRow> Attempts => Set<AttemptRow>();
     public DbSet<SourceScanRow> SourceScans => Set<SourceScanRow>();
     public DbSet<AuditEventRow> AuditEvents => Set<AuditEventRow>();
@@ -61,6 +62,8 @@ public sealed class FleetDbContext(DbContextOptions<FleetDbContext> options) : D
         model.Entity<AssignmentFileRow>().HasIndex(x => x.BundleDigest);
         model.Entity<AssignmentFileRow>().HasOne<AssignmentRow>().WithOne().HasForeignKey<AssignmentFileRow>(x => x.AssignmentId).OnDelete(DeleteBehavior.Cascade);
         model.Entity<AssignmentFileRow>().HasOne<BundleRow>().WithMany().HasForeignKey(x => x.BundleDigest).OnDelete(DeleteBehavior.Restrict);
+        model.Entity<AssignmentAiClientRow>().ToTable("assignment_ai_clients").HasKey(x => x.AssignmentId);
+        model.Entity<AssignmentAiClientRow>().HasOne<AssignmentRow>().WithOne().HasForeignKey<AssignmentAiClientRow>(x => x.AssignmentId).OnDelete(DeleteBehavior.Cascade);
         model.Entity<AttemptRow>().ToTable("attempts").HasKey(x => x.Id);
         model.Entity<AttemptRow>().HasIndex(x => new { x.AssignmentId, x.Id });
         model.Entity<AttemptRow>().HasIndex(x => new { x.RolloutId, x.Id });
@@ -165,6 +168,15 @@ public sealed class AssignmentFileRow
     public Guid AssignmentId { get; set; }
     public required string Name { get; set; }
     public string? BundleDigest { get; set; }
+}
+public sealed class AssignmentAiClientRow
+{
+    public Guid AssignmentId { get; set; }
+    public required string Schema { get; set; }
+    public required string Client { get; set; }
+    public required string Mode { get; set; }
+    public string? BaseUrl { get; set; }
+    public string? Model { get; set; }
 }
 public sealed class AttemptRow
 {

@@ -41,5 +41,24 @@ public sealed class WireContractTests
         var json = JsonSerializer.SerializeToNode(assignment, options)!.AsObject();
 
         Assert.False(json.ContainsKey("file"));
+        Assert.False(json.ContainsKey("aiClient"));
+    }
+
+    [Fact]
+    public void AI_client_assignments_use_a_typed_extension_without_a_credential()
+    {
+        var assignment = new AgentAssignment(
+            new(Guid.NewGuid()), new(Guid.NewGuid()), new(Guid.NewGuid()), new(Guid.NewGuid()),
+            "ai-client/codex", new("home", ".codex"), [], AiClient: new(
+                "fleet.ai-client/v1", "codex", "cliproxy", "https://proxy.example/v1", "gpt-6-astra"));
+        var options = new JsonSerializerOptions(JsonSerializerDefaults.Web);
+        WireJson.Configure(options);
+
+        var json = JsonSerializer.SerializeToNode(assignment, options)!.AsObject();
+        var aiClient = json["aiClient"]!.AsObject();
+
+        Assert.Equal("cliproxy", aiClient["mode"]!.GetValue<string>());
+        Assert.Equal("https://proxy.example/v1", aiClient["baseUrl"]!.GetValue<string>());
+        Assert.False(json.ToJsonString().Contains("apiKey", StringComparison.OrdinalIgnoreCase));
     }
 }

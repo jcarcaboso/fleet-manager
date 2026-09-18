@@ -41,6 +41,18 @@ settings remain supported as one additional Operator. Audit records use the
 authenticated name. Rotate or revoke a token by changing configuration and
 restarting. No Operator credential administration endpoint exists yet.
 
+## CLIProxyAPI credential
+
+The optional CLIProxyAPI key is a deployment secret, not Server desired state.
+Configure `Fleet:CliProxyApiKey` through the Server's ordinary .NET
+configuration. Environment variables use the name `Fleet__CliProxyApiKey`; the
+homelab Compose file maps `FLEET_CLIPROXY_API_KEY` to it. The value must contain
+1 to 4,096 printable ASCII characters when configured. Only an authenticated
+Node with a current proxy Assignment may fetch it. Follow the
+[CLIProxyAPI operations guide](cliproxy-operations.md) to set it up and rotate
+with an old/new key overlap. The Agent-first rollout order is a protocol
+requirement: older strict clients do not understand AI-client Assignments.
+
 ## Metrics
 
 The `Fleet.Server` .NET Meter exposes request counts and duration, database

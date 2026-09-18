@@ -17,3 +17,5 @@ time = { version = "0.3.44", features = ["parsing"] }
 sha2 = "0.10.9"
 dirs = "6.0.0"
 fleet-reconcile = { path = "../../crates/fleet-reconcile" }
+toml_edit = "0.25.13"
+jsonc-parser = { version = "0.33.2", features = ["cst", "serde_json"] }

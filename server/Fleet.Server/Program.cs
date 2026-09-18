@@ -30,6 +30,7 @@ builder.Services.AddOptions<FleetOptions>().BindConfiguration("Fleet").ValidateD
     .Validate(x => x.WorkspaceId != Guid.Empty, "A stable WorkspaceId is required.")
     .Validate(x => x.HasValidOperators(), "Configure 1 to 100 uniquely named Operators with distinct SHA-256 token digests.")
     .Validate(x => x.HasValidPublicUrl(), "Fleet:PublicUrl must be an HTTPS origin without a path, credentials, query, or fragment.")
+    .Validate(x => x.HasValidCliProxyApiKey(), "Fleet:CliProxyApiKey must be empty or contain at most 4096 printable ASCII characters.")
     .ValidateOnStart();
 builder.Services.AddSingleton<NodeCertificateIssuer>();
 builder.Services.AddDbContext<FleetDbContext>((services, options) => options.UseNpgsql(
@@ -97,7 +98,8 @@ app.Use(async (context, next) =>
     var path = context.Request.Path;
     var operation = path == "/agent/v1/poll" ? "poll" : path == "/agent/v1/reports" ? "report" :
         path.StartsWithSegments("/agent/v1/bundles") ? "bundle" : path == "/agent/v1/enroll" ? "enrollment" :
-        path == "/agent/v1/credentials/renew" ? "renewal" : path.StartsWithSegments("/operator/v1") ? "operator" : "other";
+        path == "/agent/v1/credentials/renew" ? "renewal" : path == "/agent/v1/cliproxy/credential" ? "cliproxy_credential" :
+        path.StartsWithSegments("/operator/v1") ? "operator" : "other";
     try { await next(context); }
     finally
     {
@@ -126,7 +128,7 @@ app.Use(async (context, next) =>
     {
         context.Response.StatusCode = exception.Code switch
         {
-            "unauthorized" or "invalid_credential" or "node_unauthorized" or "bundle_not_authorized" => 403,
+            "unauthorized" or "invalid_credential" or "node_unauthorized" or "bundle_not_authorized" or "cliproxy_credential_not_authorized" => 403,
             "not_found" or "node_not_found" or "credential_not_found" or "attempt_not_found" => 404,
             "node_alias_in_use" or "node_revoked" or "node_alias_changed" => 409,
             _ => 400

@@ -108,9 +108,16 @@ ownership conflict. Move your own directory elsewhere before publishing a new
 Assignment. The Agent never executes installed Skill scripts.
 
 The private state contains ownership receipts, the last Assignment, a Bundle
-cache, and unacknowledged reports. Preserve it across restarts and upgrades.
-Deleting it does not safely uninstall Skills: without a receipt, the Agent
-refuses to take ownership of existing directories.
+cache, and unacknowledged reports. A Node assigned to CLIProxyAPI also stores
+the shared proxy key and last valid model list there. Preserve the directory
+across restarts and upgrades, protect its backups as credential material, and
+never copy it to another Node. Deleting it does not safely uninstall managed
+content: without a receipt, the Agent refuses to take ownership of existing
+directories or client settings.
+
+The [CLIProxyAPI operations guide](../../docs/technical-design/cliproxy-operations.md)
+explains `fleet/v2`, key rotation, and the `native` restoration mode. Complete
+client OAuth login locally. Fleet does not copy, refresh, or remove OAuth state.
 
 ## Run continuously
 

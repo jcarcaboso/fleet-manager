@@ -427,6 +427,16 @@ public sealed class PostgresFleetCoordinator(
                         Name = target.File.Name,
                         BundleDigest = target.File.BundleDigest,
                     });
+                if (target.AiClient is not null)
+                    db.AssignmentAiClients.Add(new AssignmentAiClientRow
+                    {
+                        AssignmentId = assignment.Id,
+                        Schema = target.AiClient.Schema,
+                        Client = target.AiClient.Client,
+                        Mode = target.AiClient.Mode,
+                        BaseUrl = target.AiClient.BaseUrl,
+                        Model = target.AiClient.Model,
+                    });
                 db.Attempts.Add(new AttemptRow
                 {
                     Id = Guid.NewGuid(),
@@ -504,8 +514,24 @@ public sealed class PostgresFleetCoordinator(
                           select new AssignmentFile(item.Name, item.BundleDigest,
                               bundle == null ? null : bundle.Size, bundle == null ? null : bundle.Schema))
             .SingleOrDefaultAsync(cancellationToken);
+        var aiClient = await db.AssignmentAiClients.AsNoTracking()
+            .Where(item => item.AssignmentId == assignment.Id)
+            .Select(item => new AiClientAssignment(item.Schema, item.Client, item.Mode, item.BaseUrl, item.Model))
+            .SingleOrDefaultAsync(cancellationToken);
         return new(new(new(assignment.Id), new(attempt.Id), new(assignment.RolloutId), new(assignment.DesiredRevisionId),
-            assignment.TargetName, new(assignment.TargetBase, assignment.TargetPath), skills, file));
+            assignment.TargetName, new(assignment.TargetBase, assignment.TargetPath), skills, file, aiClient));
+    }
+
+    public async Task AuthorizeCliProxyCredentialAsync(NodeAuthentication authentication, CancellationToken cancellationToken = default)
+    {
+        await Authenticate(authentication, clock.GetUtcNow(), false, cancellationToken);
+        var authorized = await (from assignment in db.Assignments.AsNoTracking()
+                                join aiClient in db.AssignmentAiClients.AsNoTracking() on assignment.Id equals aiClient.AssignmentId
+                                where assignment.NodeId == authentication.NodeId.Value && assignment.IsCurrent &&
+                                      aiClient.Mode == "cliproxy"
+                                select assignment.Id).AnyAsync(cancellationToken);
+        if (!authorized)
+            throw Error("cliproxy_credential_not_authorized", "CLIProxy credential is not assigned to this Node.");
     }
 
     public async Task<BundleContent> GetBundleAsync(NodeAuthentication authentication, string digest, CancellationToken cancellationToken = default)
@@ -685,9 +711,17 @@ public sealed class PostgresFleetCoordinator(
             x.First.Name == x.Second.Name && x.First.BundleDigest == x.Second.BundleDigest)) return false;
         var file = await db.AssignmentFiles.AsNoTracking().Where(x => x.AssignmentId == current.Id)
             .Select(x => new { x.Name, x.BundleDigest }).SingleOrDefaultAsync(cancellationToken);
-        return file is null
+        var sameFile = file is null
             ? target.File is null
             : target.File is not null && file.Name == target.File.Name && file.BundleDigest == target.File.BundleDigest;
+        if (!sameFile) return false;
+        var aiClient = await db.AssignmentAiClients.AsNoTracking().Where(x => x.AssignmentId == current.Id)
+            .Select(x => new { x.Schema, x.Client, x.Mode, x.BaseUrl, x.Model }).SingleOrDefaultAsync(cancellationToken);
+        return aiClient is null
+            ? target.AiClient is null
+            : target.AiClient is not null && aiClient.Schema == target.AiClient.Schema &&
+              aiClient.Client == target.AiClient.Client && aiClient.Mode == target.AiClient.Mode &&
+              aiClient.BaseUrl == target.AiClient.BaseUrl && aiClient.Model == target.AiClient.Model;
     }
 
     private static void ValidateSnapshot(AcceptedSourceSnapshot snapshot)
@@ -715,10 +749,14 @@ public sealed class PostgresFleetCoordinator(
                 throw Error("invalid_target_descriptor", "Target must be a non-empty relative path below home.");
             if (target.Skills.Count > 10_000 || target.Skills.Select(x => x.Name).Distinct(StringComparer.Ordinal).Count() != target.Skills.Count)
                 throw Error("invalid_skills", "Target Skills exceed the limit or contain duplicate names.");
-            if ((target.File is null) == (target.TargetName.StartsWith("agent-file/", StringComparison.Ordinal)))
-                throw Error("invalid_target_content", "A Target must contain either Skills or one managed file.");
-            if (target.File is not null && target.Skills.Count != 0)
-                throw Error("invalid_target_content", "A managed-file Target cannot also contain Skills.");
+            var isSkills = target.TargetName == "skills";
+            var isFile = target.TargetName.StartsWith("agent-file/", StringComparison.Ordinal);
+            var isAiClient = target.TargetName.StartsWith("ai-client/", StringComparison.Ordinal);
+            if ((isSkills ? 1 : 0) + (isFile ? 1 : 0) + (isAiClient ? 1 : 0) != 1 ||
+                isSkills && (target.File is not null || target.AiClient is not null) ||
+                isFile && (target.File is null || target.AiClient is not null || target.Skills.Count != 0) ||
+                isAiClient && (target.AiClient is null || target.File is not null || target.Skills.Count != 0))
+                throw Error("invalid_target_content", "Target content does not match its Target type.");
             foreach (var skill in target.Skills)
             {
                 Required(skill.Name, 200, "skill_name");
@@ -730,6 +768,22 @@ public sealed class PostgresFleetCoordinator(
                 if (target.File.Name.Contains('/') || target.File.Name.Contains('\\') || target.File.Name is "." or "..")
                     throw Error("invalid_file_name", "Managed file name must be one portable path segment.");
                 if (target.File.BundleDigest is not null) ValidateSha256(target.File.BundleDigest, "bundle_digest");
+            }
+            if (target.AiClient is not null)
+            {
+                Required(target.AiClient.Schema, 100, "ai_client_schema");
+                Required(target.AiClient.Client, 100, "ai_client");
+                Required(target.AiClient.Mode, 20, "ai_client_mode");
+                if (target.AiClient.Schema != "fleet.ai-client/v1" ||
+                    target.TargetName != $"ai-client/{target.AiClient.Client}" ||
+                    target.AiClient.Client is not ("codex" or "opencode") ||
+                    target.AiClient.Mode is not ("native" or "cliproxy") ||
+                    target.AiClient.Mode == "native" && (target.AiClient.BaseUrl is not null || target.AiClient.Model is not null) ||
+                    target.AiClient.Mode == "cliproxy" && (!IsValidCliProxyBaseUrl(target.AiClient.BaseUrl) ||
+                        target.AiClient.Model is null || !IsValidModelId(target.AiClient.Model)))
+                    throw Error("invalid_ai_client", "AI client assignment is invalid.");
+                if (target.AiClient.BaseUrl?.Length > 2_048 || target.AiClient.Model?.Length > 200)
+                    throw Error("invalid_ai_client", "AI client assignment exceeds a text limit.");
             }
         }
         foreach (var warning in snapshot.Warnings)
@@ -749,6 +803,15 @@ public sealed class PostgresFleetCoordinator(
         var actual = await db.Workspaces.AsNoTracking().Select(x => x.Id).SingleAsync(cancellationToken);
         if (actual != workspaceId) throw Error("workspace_mismatch", "The database belongs to a different Workspace.");
     }
+
+    private static bool IsValidModelId(string value) => value.Length is > 0 and <= 200 &&
+        value.All(character => character is >= '!' and <= '~');
+
+    private static bool IsValidCliProxyBaseUrl(string? value) =>
+        Uri.TryCreate(value, UriKind.Absolute, out var uri) && uri.Scheme == Uri.UriSchemeHttps &&
+        !string.IsNullOrEmpty(uri.Host) && string.IsNullOrEmpty(uri.UserInfo) &&
+        string.IsNullOrEmpty(uri.Query) && string.IsNullOrEmpty(uri.Fragment) &&
+        uri.AbsolutePath.TrimEnd('/') == "/v1";
 
     private async Task<int> DeleteAuditEvents(Guid workspaceId, DateTimeOffset cutoff, int batchSize, CancellationToken cancellationToken) =>
         await db.Database.ExecuteSqlInterpolatedAsync($$"""

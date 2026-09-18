@@ -1,0 +1,27 @@
+schema: fleet/v2
+
+cliproxy:
+  base-url: https://proxy.example.com/v1
+
+targets:
+  skills:
+    base: home
+    path: .agents/skills
+
+nodes:
+  example-node:
+    targets:
+      skills:
+        groups: []
+      agents:
+        - source: personal
+          clients:
+            - codex
+            - opencode
+      ai-clients:
+        codex:
+          mode: cliproxy
+          model: replace-with-advertised-model-id
+        opencode:
+          mode: cliproxy
+          model: replace-with-advertised-model-id

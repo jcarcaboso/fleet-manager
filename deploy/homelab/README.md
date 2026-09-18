@@ -56,6 +56,28 @@ container copies configuration into a private volume with the correct ownership
 for both rootful and rootless Docker. Its brief root execution does not grant the
 Server root access. The Git mirror is an ephemeral cache rebuilt from the source.
 
+## CLIProxyAPI key
+
+Fleet can supply one Workspace CLIProxyAPI key to assigned Nodes without putting
+it in Git or PostgreSQL. Set `FLEET_CLIPROXY_API_KEY` in the environment used to
+start Compose:
+
+```sh
+sed -i 's|^FLEET_IMAGE=.*|FLEET_IMAGE=skorcius/fleet-manager:0.6.0|' .env
+export FLEET_CLIPROXY_API_KEY='replace-with-a-dedicated-proxy-key'
+docker compose up -d --wait
+```
+
+Compose maps the value to the Server's standard .NET setting
+`Fleet__CliProxyApiKey`. Infisical or another secret manager can inject either
+environment variable, depending on whether it launches Compose or the Server
+container directly. You can also set `FLEET_CLIPROXY_API_KEY` in `.env`; protect
+that file and keep it out of source control. Never put the key in `fleet.yml`.
+
+Read the [CLIProxyAPI operations guide](../../docs/technical-design/cliproxy-operations.md)
+before publishing `fleet/v2` assignments. It covers the manifest, Agent-first
+rollout, key rotation, rollback, and release checks.
+
 ## CLI
 
 Extract `fleet-linux-amd64.tar.gz` on your Linux amd64 client and run `./fleet`
@@ -118,7 +140,7 @@ The Server terminates HTTPS itself to validate Node client certificates. A proxy
 in front must preserve TLS with TCP passthrough; ordinary HTTP termination does
 not preserve this authentication.
 
-The pinned POC image tag is `skorcius/fleet-manager:0.5.1`. To upgrade,
+The pinned POC image tag is `skorcius/fleet-manager:0.6.0`. To upgrade,
 back up PostgreSQL and the private configuration, change `FLEET_IMAGE` in `.env`,
 then run `docker compose pull` and `docker compose up -d --force-recreate --wait`.
 Migrations run before the Server starts. Do not run `docker compose down -v` on
@@ -127,7 +149,7 @@ an installation whose database or configuration you want to retain.
 When upgrading from `0.2.0`, first replace `compose.yaml` with this release's
 copy so it supplies the dashboard's public URL. Preserve `.env`, `secrets/`,
 `operator.env`, `ssh/`, and Docker volumes. Set `FLEET_IMAGE` to
-`skorcius/fleet-manager:0.5.1` in `.env`. Do not rerun `setup.py` on an existing
+`skorcius/fleet-manager:0.6.0` in `.env`. Do not rerun `setup.py` on an existing
 installation. The dashboard uses the existing Operator token and CA.
 
 From the source repository, build and publish a new server tag with:

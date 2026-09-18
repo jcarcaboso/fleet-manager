@@ -3,8 +3,6 @@ using System.Security.Cryptography;
 using Fleet.Core.Coordination;
 using YamlDotNet.Core;
 using YamlDotNet.Core.Events;
-using YamlDotNet.Serialization;
-using YamlDotNet.Serialization.NamingConventions;
 
 namespace Fleet.Server.Source;
 
@@ -26,6 +24,19 @@ public sealed class GitSourceScanner(
             ["opencode"] = new(".config/opencode", "AGENTS.md"),
             ["claude"] = new(".claude", "CLAUDE.md"),
         };
+    private static readonly IReadOnlyDictionary<string, string> AiClientPaths =
+        new Dictionary<string, string>(StringComparer.Ordinal)
+        {
+            ["codex"] = ".codex",
+            ["opencode"] = ".config/opencode",
+        };
+    private delegate IEnumerable<SnapshotTarget> TargetPublisher(TargetPublication context);
+    private static readonly TargetPublisher[] TargetPublishers =
+    [
+        context => BuildTargets(context.Manifest, context.NodeAliases, context.SkillGroups),
+        context => BuildAgentTargets(context.Manifest, context.NodeAliases, context.AgentSources),
+        context => BuildAiClientTargets(context.Manifest, context.NodeAliases),
+    ];
     private static readonly SnapshotBundle EmptyAgentInstructions = AgentInstructionsBundle([]);
 
     public async Task<SourceScanResult> ScanAsync(string? lastObservedRevision, CancellationToken cancellationToken)
@@ -66,15 +77,15 @@ public sealed class GitSourceScanner(
             {
                 var yaml = StrictUtf8.GetString(manifestBytes);
                 ValidateYamlEvents(yaml);
-                manifest = new DeserializerBuilder()
-                    .WithNamingConvention(NullNamingConvention.Instance)
-                    .WithDuplicateKeyChecking()
-                    .Build()
-                    .Deserialize<FleetManifest>(yaml);
+                manifest = ManifestSchemaParser.Parse(yaml);
+            }
+            catch (UnsupportedManifestSchemaException)
+            {
+                return Invalid(revision, "unsupported_schema", "fleet.yml schema must be one of: fleet/v1, fleet/v2.", "fleet.yml");
             }
             catch (Exception exception) when (exception is YamlException or DecoderFallbackException)
             {
-                return Invalid(revision, "invalid_manifest", "fleet.yml does not match the fleet/v1 schema.", "fleet.yml");
+                return Invalid(revision, "invalid_manifest", "fleet.yml does not match its declared schema.", "fleet.yml");
             }
 
             var nodeAliases = (await nodes.GetNodeAliasesAsync(scanToken))
@@ -88,14 +99,14 @@ public sealed class GitSourceScanner(
             var warnings = BuildWarnings(manifest, nodeAliases, skillsByGroup, diagnostics, scanToken);
             if (diagnostics.Any)
                 return new SourceScanResult.Invalid(revision, diagnostics.Items);
-            var agentTargets = BuildAgentTargets(manifest, nodeAliases, agentSources);
+            var publication = new TargetPublication(manifest, nodeAliases, skillsByGroup, agentSources);
+            var targets = TargetPublishers.SelectMany(publisher => publisher(publication)).ToArray();
             var bundles = skillsByGroup.Values.SelectMany(x => x.Values).Select(x => x.Bundle)
                 .Concat(agentSources.Values)
-                .Concat(agentTargets.Any(x => x.File?.BundleDigest == EmptyAgentInstructions.Digest)
+                .Concat(targets.Any(x => x.File?.BundleDigest == EmptyAgentInstructions.Digest)
                     ? [EmptyAgentInstructions]
                     : [])
                 .DistinctBy(x => x.Digest, StringComparer.Ordinal).OrderBy(x => x.Digest, StringComparer.Ordinal).ToArray();
-            var targets = BuildTargets(manifest, nodeAliases, skillsByGroup).Concat(agentTargets).ToArray();
             return new SourceScanResult.Snapshot(new AcceptedSourceSnapshot(revision, bundles, targets, warnings, DateTimeOffset.UtcNow));
         }
         catch (Exception exception) when (exception is GitSourceException or IOException or UnauthorizedAccessException or DecoderFallbackException or FormatException or OverflowException)
@@ -282,7 +293,6 @@ public sealed class GitSourceScanner(
         DiagnosticBag diagnostics)
     {
         if (manifest is null) { diagnostics.Add("invalid_manifest", "fleet.yml must contain a mapping."); return; }
-        if (manifest.Schema != "fleet/v1") diagnostics.Add("unsupported_schema", "schema must be fleet/v1.", "fleet.yml");
         var defaultTarget = manifest.Targets?.Skills;
         ValidateTarget(defaultTarget?.Base, defaultTarget?.Path, diagnostics);
         if (manifest.Nodes is null) { diagnostics.Add("missing_nodes", "nodes is required.", "fleet.yml"); return; }
@@ -330,7 +340,32 @@ public sealed class GitSourceScanner(
                     }
                 }
             }
+            if (node.Targets.AiClients is not null)
+            {
+                foreach (var (client, aiTarget) in node.Targets.AiClients)
+                {
+                    if (!AiClientPaths.ContainsKey(client))
+                    {
+                        diagnostics.Add("unknown_ai_client", $"Node '{alias}' configures unknown AI client '{client}'.", "fleet.yml");
+                        continue;
+                    }
+                    if (aiTarget is null || aiTarget.Mode is not ("native" or "cliproxy"))
+                    {
+                        diagnostics.Add("invalid_ai_client_mode", $"Node '{alias}' AI client '{client}' mode must be native or cliproxy.", "fleet.yml");
+                        continue;
+                    }
+                    if (aiTarget.Mode == "native" && aiTarget.Model is not null)
+                        diagnostics.Add("invalid_ai_client_model", $"Node '{alias}' native AI client '{client}' must not configure a model.", "fleet.yml");
+                    if (aiTarget.Mode == "cliproxy" && string.IsNullOrWhiteSpace(aiTarget.Model))
+                        diagnostics.Add("missing_ai_client_model", $"Node '{alias}' CLIProxy AI client '{client}' must configure a model.", "fleet.yml");
+                    else if (aiTarget.Mode == "cliproxy" && !IsValidModelId(aiTarget.Model!))
+                        diagnostics.Add("invalid_ai_client_model", $"Node '{alias}' AI client '{client}' has an invalid model.", "fleet.yml");
+                }
+            }
         }
+        var usesCliProxy = manifest.Nodes.Values.Any(node => node?.Targets?.AiClients?.Values.Any(target => target?.Mode == "cliproxy") == true);
+        if (usesCliProxy && !TryNormalizeCliProxyBaseUrl(manifest.CliProxy?.BaseUrl, out _))
+            diagnostics.Add("invalid_cliproxy_base_url", "cliproxy.base-url must be an HTTPS origin or its /v1 endpoint, without credentials, query, or fragment.", "fleet.yml");
     }
 
     private static void ValidateTarget(string? @base, string? path, DiagnosticBag diagnostics)
@@ -401,6 +436,56 @@ public sealed class GitSourceScanner(
         }
         return targets;
     }
+
+    private static IReadOnlyList<SnapshotTarget> BuildAiClientTargets(
+        FleetManifest manifest,
+        IReadOnlyDictionary<string, NodeId> nodeAliases)
+    {
+        var targets = new List<SnapshotTarget>();
+        TryNormalizeCliProxyBaseUrl(manifest.CliProxy?.BaseUrl, out var baseUrl);
+        foreach (var node in manifest.Nodes.OrderBy(x => x.Key, StringComparer.Ordinal))
+        {
+            var configuredClients = node.Value.Targets.AiClients ?? new Dictionary<string, ManifestAiClientTarget>();
+            foreach (var configured in configuredClients.OrderBy(x => x.Key, StringComparer.Ordinal))
+            {
+                var client = configured.Key;
+                var desired = configured.Value;
+                targets.Add(new SnapshotTarget(
+                    nodeAliases[node.Key],
+                    $"ai-client/{client}",
+                    new TargetDescriptor("home", AiClientPaths[client]),
+                    [],
+                    AiClient: new AiClientAssignment(
+                        "fleet.ai-client/v1",
+                        client,
+                        desired.Mode!,
+                        desired.Mode == "cliproxy" ? baseUrl : null,
+                        desired.Mode == "cliproxy" ? desired.Model : null)));
+            }
+        }
+        return targets;
+    }
+
+    private static bool TryNormalizeCliProxyBaseUrl(string? value, out string? normalized)
+    {
+        normalized = null;
+        if (!Uri.TryCreate(value, UriKind.Absolute, out var uri) || uri.Scheme != Uri.UriSchemeHttps ||
+            string.IsNullOrEmpty(uri.Host) || !string.IsNullOrEmpty(uri.UserInfo) ||
+            !string.IsNullOrEmpty(uri.Query) || !string.IsNullOrEmpty(uri.Fragment) ||
+            uri.AbsolutePath.TrimEnd('/') is not ("" or "/v1"))
+            return false;
+        normalized = new UriBuilder(uri) { Path = "/v1", Query = "", Fragment = "" }.Uri.AbsoluteUri.TrimEnd('/');
+        return true;
+    }
+
+    private static bool IsValidModelId(string value) => value.Length is > 0 and <= 200 &&
+        value.All(character => character is >= '!' and <= '~');
+
+    private sealed record TargetPublication(
+        FleetManifest Manifest,
+        IReadOnlyDictionary<string, NodeId> NodeAliases,
+        Dictionary<string, Dictionary<string, BuiltSkill>> SkillGroups,
+        IReadOnlyDictionary<string, SnapshotBundle> AgentSources);
 
     private IReadOnlyList<SourceWarning> BuildWarnings(FleetManifest manifest, IReadOnlyDictionary<string, NodeId> nodeAliases,
         Dictionary<string, Dictionary<string, BuiltSkill>> groups, DiagnosticBag diagnostics, CancellationToken cancellationToken)
