@@ -1,12 +1,10 @@
+mod adapters;
+
 use crate::{
     protocol::{AiClientAssignment, Api},
     state,
 };
 use anyhow::{Context, Result, bail};
-use jsonc_parser::{
-    ParseOptions,
-    cst::{CstInputValue, CstObject, CstObjectProp, CstRootNode},
-};
 use reqwest::{Client, Url, redirect::Policy};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -19,8 +17,9 @@ use std::{
     path::{Path, PathBuf},
     time::Duration,
 };
-use toml_edit::{DocumentMut, Item, Table, value};
 use uuid::Uuid;
+
+use adapters::Adapter;
 
 const MODEL_FIELDS: [&str; 5] = ["id", "slug", "name", "model", "value"];
 const MAX_MODEL_RESPONSE_BYTES: usize = 4 * 1024 * 1024;
@@ -120,9 +119,7 @@ impl Reconciler {
     }
 
     fn validate_assignment(&self, assignment: &AiClientAssignment) -> Result<()> {
-        if assignment.schema != "fleet.ai-client/v1"
-            || !matches!(assignment.client.as_str(), "codex" | "opencode")
-        {
+        if assignment.schema != "fleet.ai-client/v1" || Adapter::find(&assignment.client).is_err() {
             bail!("unsupported AI client assignment");
         }
         match assignment.mode.as_str() {
@@ -191,62 +188,37 @@ impl Reconciler {
         model: &str,
         models: &[String],
     ) -> Result<()> {
-        let path = self.config_path(client)?;
+        let adapter = Adapter::find(client)?;
+        let path = adapter.config_path(self);
         let old = read_optional_config(&path)?;
         let previous = state::read_json::<Receipt>(&self.receipt_path(client)?)?;
-        let key_path = self.state.join("api-key");
-        let (new, receipt) = match client {
-            "codex" => {
-                let catalog_path = self.state.join("codex-model-catalog.json");
-                let catalog = render_codex_catalog(models)?;
-                let rendered = render_codex(
-                    old.as_deref(),
-                    previous.as_ref(),
-                    base_url,
-                    model,
-                    models,
-                    &key_path,
-                    &catalog_path,
-                )?;
-                state::write_bytes(&catalog_path, &catalog)?;
-                rendered
-            }
-            "opencode" => render_opencode(
-                old.as_deref(),
-                previous.as_ref(),
-                base_url,
-                model,
-                models,
-                &key_path,
-            )?,
-            _ => bail!("unsupported AI client"),
-        };
+        let (new, receipt) = adapter.apply_proxy(
+            self,
+            old.as_deref(),
+            previous.as_ref(),
+            base_url,
+            model,
+            models,
+        )?;
         self.commit(client, &path, old.as_deref(), Some(&new), Some(receipt))
     }
 
     fn restore_native(&self, client: &str) -> Result<()> {
+        let adapter = Adapter::find(client)?;
         let Some(receipt) = state::read_json::<Receipt>(&self.receipt_path(client)?)? else {
-            if client == "codex" {
-                remove_state_file(&self.state.join("codex-model-catalog.json"))?;
-            }
+            adapter.remove_auxiliary_state(self)?;
             return Ok(());
         };
-        let path = self.config_path(client)?;
+        let path = adapter.config_path(self);
         let old = read_optional_config(&path)?;
-        let restored = match client {
-            "codex" => restore_codex(old.as_deref(), &receipt)?,
-            "opencode" => restore_opencode(old.as_deref(), &receipt)?,
-            _ => bail!("unsupported AI client"),
-        };
-        let new = if !receipt.config_existed && config_is_empty(client, &restored)? {
+        let restored = adapter.restore(old.as_deref(), &receipt)?;
+        let new = if !receipt.config_existed && adapter.config_is_empty(&restored)? {
             None
         } else {
             Some(restored.as_slice())
         };
         self.commit(client, &path, old.as_deref(), new, None)?;
-        if client == "codex" {
-            remove_state_file(&self.state.join("codex-model-catalog.json"))?;
-        }
+        adapter.remove_auxiliary_state(self)?;
         Ok(())
     }
 
@@ -289,11 +261,7 @@ impl Reconciler {
     }
 
     fn config_path(&self, client: &str) -> Result<PathBuf> {
-        match client {
-            "codex" => Ok(self.home.join(".codex/config.toml")),
-            "opencode" => Ok(self.home.join(".config/opencode/opencode.json")),
-            _ => bail!("unsupported AI client"),
-        }
+        Ok(Adapter::find(client)?.config_path(self))
     }
 
     fn receipt_path(&self, client: &str) -> Result<PathBuf> {
@@ -448,407 +416,6 @@ fn usable_cache(cache: Option<ModelCache>, base_url: &str, selected: &str) -> Op
     })
 }
 
-fn render_codex(
-    old: Option<&[u8]>,
-    previous: Option<&Receipt>,
-    base_url: &str,
-    model: &str,
-    models: &[String],
-    key_path: &Path,
-    catalog_path: &Path,
-) -> Result<(Vec<u8>, Receipt)> {
-    let existed = old.is_some();
-    let text = std::str::from_utf8(old.unwrap_or_default()).context("Codex config is not UTF-8")?;
-    let mut document = if existed {
-        text.parse::<DocumentMut>().context("invalid Codex TOML")?
-    } else {
-        DocumentMut::new()
-    };
-    let current_model = optional_toml_string(&document, "model")?;
-    let current_provider = optional_toml_string(&document, "model_provider")?;
-    let current_catalog = optional_toml_string(&document, "model_catalog_json")?;
-    let fleet_provider = document
-        .get("model_providers")
-        .and_then(Item::as_table)
-        .and_then(|table| table.get(PROVIDER_NAME));
-    let key_path = key_path
-        .to_str()
-        .context("Codex key path is not UTF-8")?
-        .to_owned();
-    let catalog_path = catalog_path
-        .to_str()
-        .context("Codex catalog path is not UTF-8")?
-        .to_owned();
-    let (original_model, original_provider, original_catalog) = match previous {
-        Some(receipt) => {
-            validate_receipt(receipt, "codex")?;
-            if current_model.as_deref() != Some(receipt.expected_model.as_str())
-                || current_provider.as_deref() != Some(PROVIDER_NAME)
-                || current_catalog.as_deref() != receipt.expected_catalog_path.as_deref()
-                || !codex_provider_matches(fleet_provider, receipt)
-            {
-                bail!("Fleet-owned Codex settings changed outside Fleet");
-            }
-            (
-                receipt.original_model.clone(),
-                receipt.original_provider.clone(),
-                receipt.original_catalog.clone(),
-            )
-        }
-        None => {
-            if fleet_provider.is_some() {
-                bail!("Codex provider name fleet-cliproxy is already in use");
-            }
-            (current_model, current_provider, current_catalog)
-        }
-    };
-    document["model_provider"] = value(PROVIDER_NAME);
-    document["model"] = value(model);
-    document["model_catalog_json"] = value(catalog_path.as_str());
-    let providers = table_or_create(&mut document, "model_providers")?;
-    let mut provider = Table::new();
-    provider["name"] = value("Fleet CLIProxy");
-    provider["base_url"] = value(base_url);
-    provider["wire_api"] = value("responses");
-    let mut auth = Table::new();
-    auth["command"] = value("/bin/cat");
-    let mut args = toml_edit::Array::new();
-    args.push(key_path.as_str());
-    auth["args"] = value(args);
-    auth["timeout_ms"] = value(5000);
-    auth["refresh_interval_ms"] = value(300000);
-    provider["auth"] = Item::Table(auth);
-    providers[PROVIDER_NAME] = Item::Table(provider);
-    Ok((
-        document.to_string().into_bytes(),
-        Receipt {
-            version: 1,
-            client: "codex".to_owned(),
-            config_existed: previous.map_or(existed, |receipt| receipt.config_existed),
-            original_model,
-            original_provider,
-            original_catalog,
-            expected_model: model.to_owned(),
-            expected_base_url: base_url.to_owned(),
-            expected_key_path: key_path,
-            expected_catalog_path: Some(catalog_path),
-            expected_models: models.to_vec(),
-        },
-    ))
-}
-
-fn restore_codex(old: Option<&[u8]>, receipt: &Receipt) -> Result<Vec<u8>> {
-    validate_receipt(receipt, "codex")?;
-    let text = std::str::from_utf8(old.context("managed Codex config is missing")?)
-        .context("Codex config is not UTF-8")?;
-    let mut document = text.parse::<DocumentMut>().context("invalid Codex TOML")?;
-    let current_catalog = optional_toml_string(&document, "model_catalog_json")?;
-    let provider = document
-        .get("model_providers")
-        .and_then(Item::as_table)
-        .and_then(|table| table.get(PROVIDER_NAME));
-    if optional_toml_string(&document, "model")?.as_deref() != Some(receipt.expected_model.as_str())
-        || optional_toml_string(&document, "model_provider")?.as_deref() != Some(PROVIDER_NAME)
-        || current_catalog.as_deref() != receipt.expected_catalog_path.as_deref()
-        || !codex_provider_matches(provider, receipt)
-    {
-        bail!("Fleet-owned Codex settings changed outside Fleet");
-    }
-    restore_toml_string(&mut document, "model", receipt.original_model.as_deref());
-    restore_toml_string(
-        &mut document,
-        "model_provider",
-        receipt.original_provider.as_deref(),
-    );
-    restore_toml_string(
-        &mut document,
-        "model_catalog_json",
-        receipt.original_catalog.as_deref(),
-    );
-    if let Some(providers) = document
-        .get_mut("model_providers")
-        .and_then(Item::as_table_mut)
-    {
-        providers.remove(PROVIDER_NAME);
-        if providers.is_empty() {
-            document.remove("model_providers");
-        }
-    }
-    Ok(document.to_string().into_bytes())
-}
-
-fn render_codex_catalog(models: &[String]) -> Result<Vec<u8>> {
-    const BASE_INSTRUCTIONS: &str = "You are Codex, a coding agent. Work in the user's repository, follow applicable AGENTS.md instructions, and use the provided tools to complete the request.";
-
-    if models.is_empty() || models.iter().any(|model| !valid_model_id(model)) {
-        bail!("cannot build Codex catalog from invalid models");
-    }
-    let models = models
-        .iter()
-        .enumerate()
-        .map(|(index, model)| {
-            let priority = i32::try_from(index + 1).context("too many Codex models")?;
-            Ok(serde_json::json!({
-                "slug": model,
-                "display_name": model,
-                "description": null,
-                "default_reasoning_level": null,
-                "supported_reasoning_levels": [],
-                "shell_type": "unified_exec",
-                "visibility": "list",
-                "supported_in_api": true,
-                "priority": priority,
-                "availability_nux": null,
-                "upgrade": null,
-                "include_apps_usage_instructions": false,
-                "supports_reasoning_summary_parameter": false,
-                "support_verbosity": false,
-                "default_verbosity": null,
-                "apply_patch_tool_type": "freeform",
-                "truncation_policy": { "mode": "bytes", "limit": 10_000 },
-                "experimental_supported_tools": [],
-                "base_instructions": BASE_INSTRUCTIONS
-            }))
-        })
-        .collect::<Result<Vec<_>>>()?;
-    let mut catalog = serde_json::to_vec_pretty(&serde_json::json!({ "models": models }))?;
-    catalog.push(b'\n');
-    if catalog.len() > MAX_MODEL_RESPONSE_BYTES {
-        bail!("generated Codex model catalog exceeds 4 MiB");
-    }
-    Ok(catalog)
-}
-
-fn codex_provider_matches(item: Option<&Item>, receipt: &Receipt) -> bool {
-    let Some(table) = item.and_then(Item::as_table) else {
-        return false;
-    };
-    let auth = table.get("auth").and_then(Item::as_table);
-    table.get("name").and_then(Item::as_str) == Some("Fleet CLIProxy")
-        && table.get("base_url").and_then(Item::as_str) == Some(receipt.expected_base_url.as_str())
-        && table.get("wire_api").and_then(Item::as_str) == Some("responses")
-        && auth
-            .and_then(|table| table.get("command"))
-            .and_then(Item::as_str)
-            == Some("/bin/cat")
-        && auth
-            .and_then(|table| table.get("args"))
-            .and_then(Item::as_array)
-            .is_some_and(|args| {
-                args.len() == 1
-                    && args.get(0).and_then(toml_edit::Value::as_str)
-                        == Some(receipt.expected_key_path.as_str())
-            })
-        && auth
-            .and_then(|table| table.get("timeout_ms"))
-            .and_then(Item::as_integer)
-            == Some(5000)
-        && auth
-            .and_then(|table| table.get("refresh_interval_ms"))
-            .and_then(Item::as_integer)
-            == Some(300000)
-}
-
-fn render_opencode(
-    old: Option<&[u8]>,
-    previous: Option<&Receipt>,
-    base_url: &str,
-    model: &str,
-    models: &[String],
-    key_path: &Path,
-) -> Result<(Vec<u8>, Receipt)> {
-    let existed = old.is_some();
-    let text =
-        std::str::from_utf8(old.unwrap_or(b"{}\n")).context("OpenCode config is not UTF-8")?;
-    let root =
-        CstRootNode::parse(text, &ParseOptions::default()).context("invalid OpenCode JSONC")?;
-    let object = root
-        .object_value()
-        .context("OpenCode config root must be an object")?;
-    let current_model = optional_json_string(&object, "model")?;
-    let provider = object.object_value("provider");
-    let fleet_provider = provider
-        .as_ref()
-        .and_then(|providers| providers.get(PROVIDER_NAME));
-    let key_path = key_path
-        .to_str()
-        .context("OpenCode key path is not UTF-8")?
-        .to_owned();
-    if key_path.contains('}') || key_path.chars().any(char::is_control) {
-        bail!("OpenCode key path contains unsupported characters");
-    }
-    let original_model = match previous {
-        Some(receipt) => {
-            validate_receipt(receipt, "opencode")?;
-            if current_model.as_deref()
-                != Some(format!("{PROVIDER_NAME}/{}", receipt.expected_model).as_str())
-                || !opencode_provider_matches(fleet_provider.as_ref(), receipt)
-            {
-                bail!("Fleet-owned OpenCode settings changed outside Fleet");
-            }
-            receipt.original_model.clone()
-        }
-        None => {
-            if fleet_provider.is_some() {
-                bail!("OpenCode provider name fleet-cliproxy is already in use");
-            }
-            current_model
-        }
-    };
-    set_json_property(&object, "model", format!("{PROVIDER_NAME}/{model}").into());
-    let providers = match provider {
-        Some(provider) => provider,
-        None => object
-            .object_value_or_create("provider")
-            .context("OpenCode provider must be an object")?,
-    };
-    let models_value = models
-        .iter()
-        .map(|model| {
-            (
-                model.clone(),
-                CstInputValue::Object(vec![("name".to_owned(), model.clone().into())]),
-            )
-        })
-        .collect();
-    set_json_property(
-        &providers,
-        PROVIDER_NAME,
-        CstInputValue::Object(vec![
-            ("npm".to_owned(), "@ai-sdk/openai-compatible".into()),
-            ("name".to_owned(), "Fleet CLIProxy".into()),
-            (
-                "options".to_owned(),
-                CstInputValue::Object(vec![
-                    ("baseURL".to_owned(), base_url.to_owned().into()),
-                    ("apiKey".to_owned(), format!("{{file:{key_path}}}").into()),
-                ]),
-            ),
-            ("models".to_owned(), CstInputValue::Object(models_value)),
-        ]),
-    );
-    Ok((
-        root.to_string().into_bytes(),
-        Receipt {
-            version: 1,
-            client: "opencode".to_owned(),
-            config_existed: previous.map_or(existed, |receipt| receipt.config_existed),
-            original_model,
-            original_provider: None,
-            original_catalog: None,
-            expected_model: model.to_owned(),
-            expected_base_url: base_url.to_owned(),
-            expected_key_path: key_path,
-            expected_catalog_path: None,
-            expected_models: models.to_vec(),
-        },
-    ))
-}
-
-fn restore_opencode(old: Option<&[u8]>, receipt: &Receipt) -> Result<Vec<u8>> {
-    validate_receipt(receipt, "opencode")?;
-    let text = std::str::from_utf8(old.context("managed OpenCode config is missing")?)
-        .context("OpenCode config is not UTF-8")?;
-    let root =
-        CstRootNode::parse(text, &ParseOptions::default()).context("invalid OpenCode JSONC")?;
-    let object = root
-        .object_value()
-        .context("OpenCode config root must be an object")?;
-    if optional_json_string(&object, "model")?.as_deref()
-        != Some(format!("{PROVIDER_NAME}/{}", receipt.expected_model).as_str())
-    {
-        bail!("Fleet-owned OpenCode model changed outside Fleet");
-    }
-    let providers = object
-        .object_value("provider")
-        .context("managed OpenCode provider is missing")?;
-    let provider = providers.get(PROVIDER_NAME);
-    if !opencode_provider_matches(provider.as_ref(), receipt) {
-        bail!("Fleet-owned OpenCode provider changed outside Fleet");
-    }
-    match receipt.original_model.as_deref() {
-        Some(model) => set_json_property(&object, "model", model.into()),
-        None => object.get("model").unwrap().remove(),
-    }
-    provider.unwrap().remove();
-    if providers.properties().is_empty() {
-        object.get("provider").unwrap().remove();
-    }
-    Ok(root.to_string().into_bytes())
-}
-
-fn opencode_provider_matches(property: Option<&CstObjectProp>, receipt: &Receipt) -> bool {
-    let Some(value) = property.and_then(CstObjectProp::to_serde_value) else {
-        return false;
-    };
-    value.get("npm").and_then(Value::as_str) == Some("@ai-sdk/openai-compatible")
-        && value.get("name").and_then(Value::as_str) == Some("Fleet CLIProxy")
-        && value.pointer("/options/baseURL").and_then(Value::as_str)
-            == Some(receipt.expected_base_url.as_str())
-        && value.pointer("/options/apiKey").and_then(Value::as_str)
-            == Some(format!("{{file:{}}}", receipt.expected_key_path).as_str())
-        && value
-            .get("models")
-            .and_then(Value::as_object)
-            .is_some_and(|map| {
-                map.len() == receipt.expected_models.len()
-                    && receipt.expected_models.iter().all(|model| {
-                        map.get(model)
-                            .and_then(|entry| entry.get("name"))
-                            .and_then(Value::as_str)
-                            == Some(model)
-                    })
-            })
-}
-
-fn table_or_create<'a>(document: &'a mut DocumentMut, name: &str) -> Result<&'a mut Table> {
-    if !document.contains_key(name) {
-        document[name] = Item::Table(Table::new());
-    }
-    document[name]
-        .as_table_mut()
-        .with_context(|| format!("Codex {name} must be a table"))
-}
-
-fn optional_toml_string(document: &DocumentMut, name: &str) -> Result<Option<String>> {
-    match document.get(name) {
-        None => Ok(None),
-        Some(item) => item
-            .as_str()
-            .map(|value| Some(value.to_owned()))
-            .with_context(|| format!("Codex {name} must be a string")),
-    }
-}
-
-fn restore_toml_string(document: &mut DocumentMut, name: &str, original: Option<&str>) {
-    match original {
-        Some(original) => document[name] = value(original),
-        None => {
-            document.remove(name);
-        }
-    }
-}
-
-fn optional_json_string(object: &CstObject, name: &str) -> Result<Option<String>> {
-    match object.get(name) {
-        None => Ok(None),
-        Some(property) => property
-            .to_serde_value()
-            .and_then(|value| value.as_str().map(ToOwned::to_owned))
-            .map(Some)
-            .with_context(|| format!("OpenCode {name} must be a string")),
-    }
-}
-
-fn set_json_property(object: &CstObject, name: &str, value: CstInputValue) {
-    match object.get(name) {
-        Some(property) => property.set_value(value),
-        None => {
-            object.append(name, value);
-        }
-    }
-}
-
 fn validate_receipt(receipt: &Receipt, client: &str) -> Result<()> {
     if receipt.version != 1 || receipt.client != client {
         bail!("invalid AI client receipt");
@@ -857,25 +424,7 @@ fn validate_receipt(receipt: &Receipt, client: &str) -> Result<()> {
 }
 
 fn validate_client(client: &str) -> Result<()> {
-    if !matches!(client, "codex" | "opencode") {
-        bail!("unsupported AI client");
-    }
-    Ok(())
-}
-
-fn config_is_empty(client: &str, bytes: &[u8]) -> Result<bool> {
-    match client {
-        "codex" => Ok(std::str::from_utf8(bytes)?
-            .parse::<DocumentMut>()?
-            .is_empty()),
-        "opencode" => {
-            let root = CstRootNode::parse(std::str::from_utf8(bytes)?, &ParseOptions::default())?;
-            Ok(root
-                .object_value()
-                .is_some_and(|object| object.properties().is_empty()))
-        }
-        _ => bail!("unsupported AI client"),
-    }
+    Adapter::find(client).map(|_| ())
 }
 
 fn read_optional_config(path: &Path) -> Result<Option<Vec<u8>>> {
@@ -1141,7 +690,7 @@ mod tests {
 }
 "#;
         let models = vec!["gpt-6-astra".to_owned(), "gpt-5.6-sol".to_owned()];
-        let (applied, receipt) = render_opencode(
+        let (applied, receipt) = adapters::opencode::render_opencode(
             Some(original),
             None,
             "https://proxy.example/v1",
@@ -1150,7 +699,7 @@ mod tests {
             &key,
         )
         .unwrap();
-        let (restarted, _) = render_opencode(
+        let (restarted, _) = adapters::opencode::render_opencode(
             Some(&applied),
             Some(&receipt),
             "https://proxy.example/v1",
@@ -1160,8 +709,10 @@ mod tests {
         )
         .unwrap();
         assert_eq!(applied, restarted);
-        let restored =
-            String::from_utf8(restore_opencode(Some(&applied), &receipt).unwrap()).unwrap();
+        let restored = String::from_utf8(
+            adapters::opencode::restore_opencode(Some(&applied), &receipt).unwrap(),
+        )
+        .unwrap();
         assert!(restored.contains("// keep me"));
         assert!(restored.contains("\"theme\": \"dark\""));
         assert!(restored.contains("\"other\""));
