@@ -1,5 +1,4 @@
 using System.Text;
-using System.Security.Cryptography;
 using Fleet.Core.Coordination;
 using YamlDotNet.Core;
 using YamlDotNet.Core.Events;
@@ -17,27 +16,6 @@ public sealed class GitSourceScanner(
     private readonly GitProcess _git = new();
     private static readonly UTF8Encoding StrictUtf8 = new(false, true);
     private static readonly StringComparer PortableComparer = StringComparer.OrdinalIgnoreCase;
-    private static readonly IReadOnlyDictionary<string, AgentClient> AgentClients =
-        new Dictionary<string, AgentClient>(StringComparer.Ordinal)
-        {
-            ["codex"] = new(".codex", "AGENTS.md"),
-            ["opencode"] = new(".config/opencode", "AGENTS.md"),
-            ["claude"] = new(".claude", "CLAUDE.md"),
-        };
-    private static readonly IReadOnlyDictionary<string, string> AiClientPaths =
-        new Dictionary<string, string>(StringComparer.Ordinal)
-        {
-            ["codex"] = ".codex",
-            ["opencode"] = ".config/opencode",
-        };
-    private delegate IEnumerable<SnapshotTarget> TargetPublisher(TargetPublication context);
-    private static readonly TargetPublisher[] TargetPublishers =
-    [
-        context => BuildTargets(context.Manifest, context.NodeAliases, context.SkillGroups),
-        context => BuildAgentTargets(context.Manifest, context.NodeAliases, context.AgentSources),
-        context => BuildAiClientTargets(context.Manifest, context.NodeAliases),
-    ];
-    private static readonly SnapshotBundle EmptyAgentInstructions = AgentInstructionsBundle([]);
 
     public async Task<SourceScanResult> ScanAsync(string? lastObservedRevision, CancellationToken cancellationToken)
     {
@@ -100,11 +78,11 @@ public sealed class GitSourceScanner(
             if (diagnostics.Any)
                 return new SourceScanResult.Invalid(revision, diagnostics.Items);
             var publication = new TargetPublication(manifest, nodeAliases, skillsByGroup, agentSources);
-            var targets = TargetPublishers.SelectMany(publisher => publisher(publication)).ToArray();
+            var targets = SourceTargetPublishers.Publish(publication);
             var bundles = skillsByGroup.Values.SelectMany(x => x.Values).Select(x => x.Bundle)
                 .Concat(agentSources.Values)
-                .Concat(targets.Any(x => x.File?.BundleDigest == EmptyAgentInstructions.Digest)
-                    ? [EmptyAgentInstructions]
+                .Concat(targets.Any(x => x.File?.BundleDigest == SourceTargetPublishers.EmptyAgentInstructions.Digest)
+                    ? [SourceTargetPublishers.EmptyAgentInstructions]
                     : [])
                 .DistinctBy(x => x.Digest, StringComparer.Ordinal).OrderBy(x => x.Digest, StringComparer.Ordinal).ToArray();
             return new SourceScanResult.Snapshot(new AcceptedSourceSnapshot(revision, bundles, targets, warnings, DateTimeOffset.UtcNow));
@@ -165,14 +143,7 @@ public sealed class GitSourceScanner(
             return null;
         }
         var content = await ReadBlobAsync(entry, cancellationToken);
-        return AgentInstructionsBundle(content);
-    }
-
-    private static SnapshotBundle AgentInstructionsBundle(byte[] content)
-    {
-        var digestInput = Encoding.UTF8.GetBytes("fleet.file/v1\0").Concat(content).ToArray();
-        var digest = $"sha256:{Convert.ToHexStringLower(SHA256.HashData(digestInput))}";
-        return new SnapshotBundle(digest, "fleet.file/v1", content.LongLength, content);
+        return SourceTargetPublishers.AgentInstructionsBundle(content);
     }
 
     private async Task PrepareMirrorAsync(CancellationToken cancellationToken)
@@ -328,9 +299,9 @@ public sealed class GitSourceScanner(
                         diagnostics.Add("unknown_agent_source", $"Node '{alias}' refers to unknown agent source '{agentTarget.Source}'.", "fleet.yml");
                     if (agentTarget.Clients is { Count: 0 })
                         diagnostics.Add("empty_agent_clients", $"Node '{alias}' contains an agent Target with an empty clients list.", "fleet.yml");
-                    foreach (var client in agentTarget.Clients ?? AgentClients.Keys)
+                    foreach (var client in agentTarget.Clients ?? SourceTargetPublishers.AgentClients.Keys)
                     {
-                        if (client is null || !AgentClients.ContainsKey(client))
+                        if (client is null || !SourceTargetPublishers.AgentClients.ContainsKey(client))
                         {
                             diagnostics.Add("unknown_agent_client", $"Node '{alias}' configures unknown agent client '{client}'.", "fleet.yml");
                             continue;
@@ -344,7 +315,7 @@ public sealed class GitSourceScanner(
             {
                 foreach (var (client, aiTarget) in node.Targets.AiClients)
                 {
-                    if (!AiClientPaths.ContainsKey(client))
+                    if (!SourceTargetPublishers.AiClientPaths.ContainsKey(client))
                     {
                         diagnostics.Add("unknown_ai_client", $"Node '{alias}' configures unknown AI client '{client}'.", "fleet.yml");
                         continue;
@@ -358,13 +329,13 @@ public sealed class GitSourceScanner(
                         diagnostics.Add("invalid_ai_client_model", $"Node '{alias}' native AI client '{client}' must not configure a model.", "fleet.yml");
                     if (aiTarget.Mode == "cliproxy" && string.IsNullOrWhiteSpace(aiTarget.Model))
                         diagnostics.Add("missing_ai_client_model", $"Node '{alias}' CLIProxy AI client '{client}' must configure a model.", "fleet.yml");
-                    else if (aiTarget.Mode == "cliproxy" && !IsValidModelId(aiTarget.Model!))
+                    else if (aiTarget.Mode == "cliproxy" && !SourceTargetPublishers.IsValidModelId(aiTarget.Model!))
                         diagnostics.Add("invalid_ai_client_model", $"Node '{alias}' AI client '{client}' has an invalid model.", "fleet.yml");
                 }
             }
         }
         var usesCliProxy = manifest.Nodes.Values.Any(node => node?.Targets?.AiClients?.Values.Any(target => target?.Mode == "cliproxy") == true);
-        if (usesCliProxy && !TryNormalizeCliProxyBaseUrl(manifest.CliProxy?.BaseUrl, out _))
+        if (usesCliProxy && !SourceTargetPublishers.TryNormalizeCliProxyBaseUrl(manifest.CliProxy?.BaseUrl, out _))
             diagnostics.Add("invalid_cliproxy_base_url", "cliproxy.base-url must be an HTTPS origin or its /v1 endpoint, without credentials, query, or fragment.", "fleet.yml");
     }
 
@@ -380,112 +351,6 @@ public sealed class GitSourceScanner(
         if (string.IsNullOrEmpty(name) || name.Length > 63 || name.Any(c => !(c is >= 'a' and <= 'z' or >= '0' and <= '9' or '-')) || name[0] == '-' || name[^1] == '-')
             diagnostics.Add($"invalid_{kind}_name", $"{kind} names must use lowercase letters, numbers, and interior hyphens.", path);
     }
-
-    private static IReadOnlyList<SnapshotTarget> BuildTargets(FleetManifest manifest, IReadOnlyDictionary<string, NodeId> nodeAliases,
-        Dictionary<string, Dictionary<string, BuiltSkill>> groups)
-        => manifest.Nodes.OrderBy(x => x.Key, StringComparer.Ordinal).Select(pair =>
-        {
-            var target = pair.Value.Targets.Skills;
-            var skills = new Dictionary<string, SnapshotSkill>(StringComparer.Ordinal);
-            foreach (var group in SelectedGroups(target, groups))
-                foreach (var skill in groups[group].OrderBy(x => x.Key, StringComparer.Ordinal))
-                    skills.TryAdd(skill.Key, new SnapshotSkill(skill.Key, skill.Value.Bundle.Digest));
-            return new SnapshotTarget(nodeAliases[pair.Key], "skills", new TargetDescriptor("home", target.Path ?? manifest.Targets.Skills.Path!), skills.Values.ToArray());
-        }).ToArray();
-
-    private static IEnumerable<string> SelectedGroups(
-        ManifestTarget target,
-        IReadOnlyDictionary<string, Dictionary<string, BuiltSkill>> groups)
-        => target.Groups is { Count: > 0 } ? target.Groups : groups.Keys.Order(StringComparer.Ordinal);
-
-    private static IReadOnlyList<SnapshotTarget> BuildAgentTargets(
-        FleetManifest manifest,
-        IReadOnlyDictionary<string, NodeId> nodeAliases,
-        IReadOnlyDictionary<string, SnapshotBundle> sources)
-    {
-        var targets = new List<SnapshotTarget>();
-        foreach (var node in manifest.Nodes.OrderBy(x => x.Key, StringComparer.Ordinal))
-        {
-            var configured = node.Value.Targets.Agents;
-            if (configured is null) continue;
-            if (configured.Count == 0)
-            {
-                foreach (var client in AgentClients.OrderBy(x => x.Key, StringComparer.Ordinal))
-                    targets.Add(new SnapshotTarget(
-                        nodeAliases[node.Key],
-                        $"agent-file/{client.Key}",
-                        new TargetDescriptor("home", client.Value.TargetPath),
-                        [],
-                        new SnapshotFile(client.Value.TargetFileName, EmptyAgentInstructions.Digest)));
-                continue;
-            }
-            var desiredByClient = new Dictionary<string, SnapshotBundle>(StringComparer.Ordinal);
-            foreach (var agentTarget in configured)
-                foreach (var client in agentTarget!.Clients ?? AgentClients.Keys)
-                    desiredByClient.Add(client, sources[agentTarget.Source!]);
-            foreach (var desired in desiredByClient.OrderBy(x => x.Key, StringComparer.Ordinal))
-            {
-                var client = AgentClients[desired.Key];
-                targets.Add(new SnapshotTarget(
-                    nodeAliases[node.Key],
-                    $"agent-file/{desired.Key}",
-                    new TargetDescriptor("home", client.TargetPath),
-                    [],
-                    new SnapshotFile(client.TargetFileName, desired.Value.Digest)));
-            }
-        }
-        return targets;
-    }
-
-    private static IReadOnlyList<SnapshotTarget> BuildAiClientTargets(
-        FleetManifest manifest,
-        IReadOnlyDictionary<string, NodeId> nodeAliases)
-    {
-        var targets = new List<SnapshotTarget>();
-        TryNormalizeCliProxyBaseUrl(manifest.CliProxy?.BaseUrl, out var baseUrl);
-        foreach (var node in manifest.Nodes.OrderBy(x => x.Key, StringComparer.Ordinal))
-        {
-            var configuredClients = node.Value.Targets.AiClients ?? new Dictionary<string, ManifestAiClientTarget>();
-            foreach (var configured in configuredClients.OrderBy(x => x.Key, StringComparer.Ordinal))
-            {
-                var client = configured.Key;
-                var desired = configured.Value;
-                targets.Add(new SnapshotTarget(
-                    nodeAliases[node.Key],
-                    $"ai-client/{client}",
-                    new TargetDescriptor("home", AiClientPaths[client]),
-                    [],
-                    AiClient: new AiClientAssignment(
-                        "fleet.ai-client/v1",
-                        client,
-                        desired.Mode!,
-                        desired.Mode == "cliproxy" ? baseUrl : null,
-                        desired.Mode == "cliproxy" ? desired.Model : null)));
-            }
-        }
-        return targets;
-    }
-
-    private static bool TryNormalizeCliProxyBaseUrl(string? value, out string? normalized)
-    {
-        normalized = null;
-        if (!Uri.TryCreate(value, UriKind.Absolute, out var uri) || uri.Scheme != Uri.UriSchemeHttps ||
-            string.IsNullOrEmpty(uri.Host) || !string.IsNullOrEmpty(uri.UserInfo) ||
-            !string.IsNullOrEmpty(uri.Query) || !string.IsNullOrEmpty(uri.Fragment) ||
-            uri.AbsolutePath.TrimEnd('/') is not ("" or "/v1"))
-            return false;
-        normalized = new UriBuilder(uri) { Path = "/v1", Query = "", Fragment = "" }.Uri.AbsoluteUri.TrimEnd('/');
-        return true;
-    }
-
-    private static bool IsValidModelId(string value) => value.Length is > 0 and <= 200 &&
-        value.All(character => character is >= '!' and <= '~');
-
-    private sealed record TargetPublication(
-        FleetManifest Manifest,
-        IReadOnlyDictionary<string, NodeId> NodeAliases,
-        Dictionary<string, Dictionary<string, BuiltSkill>> SkillGroups,
-        IReadOnlyDictionary<string, SnapshotBundle> AgentSources);
 
     private IReadOnlyList<SourceWarning> BuildWarnings(FleetManifest manifest, IReadOnlyDictionary<string, NodeId> nodeAliases,
         Dictionary<string, Dictionary<string, BuiltSkill>> groups, DiagnosticBag diagnostics, CancellationToken cancellationToken)
@@ -507,7 +372,7 @@ public sealed class GitSourceScanner(
                 .Select(node =>
                 {
                     cancellationToken.ThrowIfCancellationRequested();
-                    return (Id: nodeAliases[node.Key].Value.ToString(), Groups: SelectedGroups(node.Value.Targets.Skills, groups).Where(g => groups[g].ContainsKey(duplicate.Key)).ToArray());
+                    return (Id: nodeAliases[node.Key].Value.ToString(), Groups: SourceTargetPublishers.SelectedGroups(node.Value.Targets.Skills, groups).Where(g => groups[g].ContainsKey(duplicate.Key)).ToArray());
                 })
                 .Where(x => x.Groups.Length > 1)
                 .OrderBy(x => x.Id, StringComparer.Ordinal)
@@ -693,8 +558,6 @@ public sealed class GitSourceScanner(
     private static string Bound(string value) => value.Length <= 512 ? value : value[..512];
     private static SourceScanResult.Invalid Invalid(string? revision, string code, string message, string? path = null) => new(revision, [new(code, message, path)]);
     private sealed record TreeEntry(string Mode, string Type, string ObjectId, long Size, string Path);
-    private sealed record BuiltSkill(SnapshotBundle Bundle, string Location);
-    private sealed record AgentClient(string TargetPath, string TargetFileName);
     private sealed class DiagnosticBag(int max)
     {
         private readonly List<SourceDiagnostic> _items = [];
