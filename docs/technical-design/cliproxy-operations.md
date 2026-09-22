@@ -14,13 +14,13 @@ The Server reads the key from the standard .NET configuration setting
 `Fleet__CliProxyApiKey` in the container:
 
 ```sh
-# Set FLEET_IMAGE in .env to the immutable image built from this change.
+sed -i 's|^FLEET_IMAGE=.*|FLEET_IMAGE=skorcius/fleet-manager:0.6.2|' .env
 export FLEET_CLIPROXY_API_KEY='replace-with-a-dedicated-proxy-key'
 docker compose up -d --wait
 ```
 
-Use a Server and Agent build containing server-side catalog discovery. Release
-0.6.1 requires an explicit model and discovers models on each Node. Upgrade the
+Use Server and Agent version 0.6.2 or later for server-side catalog discovery.
+Release 0.6.1 requires an explicit model and discovers models on each Node. Upgrade the
 Server and all selected Agents before removing `model` from existing YAML.
 
 This is ordinary .NET configuration. A deployment outside the homelab Compose
