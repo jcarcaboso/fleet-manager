@@ -5,23 +5,20 @@ use crate::{
     state,
 };
 use anyhow::{Context, Result, bail};
-use reqwest::{Client, Url, redirect::Policy};
+use reqwest::Url;
 use serde::{Deserialize, Serialize};
-use serde_json::Value;
 use sha2::{Digest, Sha256};
 use std::{
-    collections::HashSet,
+    collections::{BTreeMap, HashSet},
     fs::{self, File, OpenOptions},
     io::{Read, Write},
     os::unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt},
     path::{Path, PathBuf},
-    time::Duration,
 };
 use uuid::Uuid;
 
 use adapters::Adapter;
 
-const MODEL_FIELDS: [&str; 5] = ["id", "slug", "name", "model", "value"];
 const MAX_MODEL_RESPONSE_BYTES: usize = 4 * 1024 * 1024;
 const MAX_CLIENT_CONFIG_BYTES: u64 = 4 * 1024 * 1024;
 const PROVIDER_NAME: &str = "fleet-cliproxy";
@@ -37,6 +34,8 @@ struct ModelCache {
     version: u8,
     base_url: String,
     models: Vec<String>,
+    #[serde(default)]
+    reasoning_levels: BTreeMap<String, Vec<String>>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -51,12 +50,16 @@ struct Receipt {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     original_catalog: Option<String>,
     expected_model: String,
+    #[serde(default)]
+    automatic_model: bool,
     expected_base_url: String,
     expected_key_path: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     expected_catalog_path: Option<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     expected_models: Vec<String>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    expected_reasoning_levels: BTreeMap<String, Vec<String>>,
 }
 
 #[derive(Deserialize, Serialize)]
@@ -106,12 +109,9 @@ impl Reconciler {
                     .base_url
                     .as_deref()
                     .context("missing CLIProxy URL")?;
-                let model = assignment
-                    .model
-                    .as_deref()
-                    .context("missing CLIProxy model")?;
-                let key = self.credential(api).await?;
-                let models = self.models(base_url, &key, model).await?;
+                let model = assignment.model.as_deref();
+                self.credential(api).await?;
+                let models = self.models(api, base_url, model).await?;
                 self.apply_proxy(&assignment.client, base_url, model, &models)
             }
             _ => bail!("unsupported AI client mode"),
@@ -126,7 +126,7 @@ impl Reconciler {
             "native" if assignment.base_url.is_none() && assignment.model.is_none() => Ok(()),
             "cliproxy"
                 if assignment.base_url.is_some()
-                    && assignment.model.as_deref().is_some_and(valid_model_id) =>
+                    && assignment.model.as_deref().is_none_or(valid_model_id) =>
             {
                 validate_base_url(assignment.base_url.as_deref().unwrap()).map(|_| ())
             }
@@ -151,31 +151,35 @@ impl Reconciler {
         }
     }
 
-    async fn models(&self, base_url: &str, key: &[u8], selected: &str) -> Result<Vec<String>> {
+    async fn models(
+        &self,
+        api: &Api,
+        base_url: &str,
+        selected: Option<&str>,
+    ) -> Result<Vec<String>> {
         let cache_path = self.state.join("models.json");
         let cached = state::read_json::<ModelCache>(&cache_path)?;
-        let fetched = CliProxyClient::new(base_url)?.models(key).await;
+        let fetched = async {
+            let bytes = api.cliproxy_models().await?;
+            parse_server_catalog(&bytes, base_url)
+        }
+        .await;
         match fetched {
-            Ok(models) if models.iter().any(|model| model == selected) => {
-                state::write_json(
-                    &cache_path,
-                    &ModelCache {
-                        version: 1,
-                        base_url: base_url.to_owned(),
-                        models: models.clone(),
-                    },
-                )?;
-                Ok(models)
+            Ok(cache)
+                if selected
+                    .is_none_or(|selected| cache.models.iter().any(|model| model == selected)) =>
+            {
+                state::write_json(&cache_path, &cache)?;
+                Ok(cache.models)
             }
             result => {
-                let cached = usable_cache(cached, base_url, selected);
-                if let Some(cache) = cached {
+                if let Some(cache) = usable_cache(cached, base_url, selected) {
                     eprintln!("CLIProxy model refresh failed; using the saved model catalog");
                     return Ok(cache.models);
                 }
                 match result {
                     Ok(_) => bail!("selected model is not advertised by CLIProxy"),
-                    Err(error) => Err(error).context("fetch CLIProxy model catalog"),
+                    Err(error) => Err(error).context("fetch CLIProxy model catalog from Server"),
                 }
             }
         }
@@ -185,7 +189,7 @@ impl Reconciler {
         &self,
         client: &str,
         base_url: &str,
-        model: &str,
+        model: Option<&str>,
         models: &[String],
     ) -> Result<()> {
         let adapter = Adapter::find(client)?;
@@ -287,56 +291,69 @@ fn read_saved_credential(path: &Path) -> Result<Vec<u8>> {
     state::read_bytes(path, 4096)
 }
 
-struct CliProxyClient {
-    client: Client,
-    models_url: Url,
+fn parse_server_catalog(bytes: &[u8], base_url: &str) -> Result<ModelCache> {
+    #[derive(Deserialize)]
+    #[serde(rename_all = "camelCase", deny_unknown_fields)]
+    struct Model {
+        id: String,
+        reasoning_levels: Vec<String>,
+    }
+    #[derive(Deserialize)]
+    #[serde(rename_all = "camelCase", deny_unknown_fields)]
+    struct Catalog {
+        base_url: String,
+        models: Vec<Model>,
+    }
+    let catalog: Catalog = serde_json::from_slice(bytes).context("invalid Server model catalog")?;
+    if catalog.base_url != base_url || catalog.models.is_empty() {
+        bail!("Server model catalog does not match the assignment");
+    }
+    let mut models = Vec::new();
+    let mut reasoning_levels = BTreeMap::new();
+    let mut seen = HashSet::new();
+    for model in catalog.models {
+        if !valid_model_id(&model.id)
+            || !seen.insert(model.id.to_ascii_lowercase())
+            || model
+                .reasoning_levels
+                .iter()
+                .any(|level| !valid_effort(level))
+        {
+            bail!("invalid Server model metadata");
+        }
+        reasoning_levels.insert(model.id.clone(), model.reasoning_levels);
+        models.push(model.id);
+    }
+    Ok(ModelCache {
+        version: 1,
+        base_url: base_url.to_owned(),
+        models,
+        reasoning_levels,
+    })
 }
 
-impl CliProxyClient {
-    fn new(base_url: &str) -> Result<Self> {
-        let base = validate_base_url(base_url)?;
-        let models_url = base
-            .join("models")
-            .context("construct CLIProxy model URL")?;
-        let client = Client::builder()
-            .https_only(true)
-            .redirect(Policy::none())
-            .connect_timeout(Duration::from_secs(3))
-            .timeout(Duration::from_secs(15))
-            .build()?;
-        Ok(Self { client, models_url })
+fn select_model<'a>(
+    configured: Option<&'a str>,
+    current: Option<&'a str>,
+    models: &'a [String],
+) -> Result<&'a str> {
+    if let Some(configured) = configured {
+        if !models.iter().any(|model| model == configured) {
+            bail!("selected model is not advertised by CLIProxy");
+        }
+        return Ok(configured);
     }
+    current
+        .filter(|current| models.iter().any(|model| model == current))
+        .or_else(|| models.first().map(String::as_str))
+        .context("CLIProxy model catalog is empty")
+}
 
-    async fn models(&self, key: &[u8]) -> Result<Vec<String>> {
-        let key = std::str::from_utf8(key).context("CLIProxy credential is not UTF-8")?;
-        let mut response = self
-            .client
-            .get(self.models_url.clone())
-            .bearer_auth(key)
-            .send()
-            .await
-            .context("CLIProxy model request failed")?
-            .error_for_status()
-            .context("CLIProxy model request returned an error")?;
-        if response
-            .content_length()
-            .is_some_and(|length| length > MAX_MODEL_RESPONSE_BYTES as u64)
-        {
-            bail!("CLIProxy model response exceeds 4 MiB");
-        }
-        let mut bytes = Vec::new();
-        while let Some(chunk) = response.chunk().await? {
-            if bytes
-                .len()
-                .checked_add(chunk.len())
-                .is_none_or(|length| length > MAX_MODEL_RESPONSE_BYTES)
-            {
-                bail!("CLIProxy model response exceeds 4 MiB");
-            }
-            bytes.extend_from_slice(&chunk);
-        }
-        parse_models(&bytes)
-    }
+fn valid_effort(value: &str) -> bool {
+    matches!(
+        value,
+        "none" | "minimal" | "low" | "medium" | "high" | "xhigh" | "max" | "ultra"
+    )
 }
 
 fn validate_base_url(value: &str) -> Result<Url> {
@@ -354,51 +371,6 @@ fn validate_base_url(value: &str) -> Result<Url> {
     Ok(url)
 }
 
-pub fn parse_models(bytes: &[u8]) -> Result<Vec<String>> {
-    let value: Value = serde_json::from_slice(bytes).context("invalid CLIProxy model response")?;
-    let candidates: Vec<&Value> = match &value {
-        Value::Array(items) => items.iter().collect(),
-        Value::Object(root) => match root.get("data").or_else(|| root.get("models")) {
-            Some(Value::Array(items)) => items.iter().collect(),
-            Some(Value::Object(items)) => {
-                let mut seen = HashSet::new();
-                let mut models = items
-                    .keys()
-                    .filter(|name| valid_model_id(name) && seen.insert(name.to_ascii_lowercase()))
-                    .cloned()
-                    .collect::<Vec<_>>();
-                if models.is_empty() {
-                    bail!("CLIProxy returned no valid model identifiers");
-                }
-                models.sort();
-                return Ok(models);
-            }
-            _ => bail!("CLIProxy model response has an unsupported shape"),
-        },
-        _ => bail!("CLIProxy model response has an unsupported shape"),
-    };
-    let mut seen = HashSet::new();
-    let mut models = Vec::new();
-    for candidate in candidates {
-        let Some(id) = candidate.as_str().or_else(|| {
-            candidate.as_object().and_then(|item| {
-                MODEL_FIELDS
-                    .iter()
-                    .find_map(|field| item.get(*field)?.as_str())
-            })
-        }) else {
-            continue;
-        };
-        if valid_model_id(id) && seen.insert(id.to_ascii_lowercase()) {
-            models.push(id.to_owned());
-        }
-    }
-    if models.is_empty() {
-        bail!("CLIProxy returned no valid model identifiers");
-    }
-    Ok(models)
-}
-
 fn valid_model_id(value: &str) -> bool {
     !value.is_empty()
         && value.len() <= 200
@@ -406,13 +378,22 @@ fn valid_model_id(value: &str) -> bool {
         && value.bytes().all(|byte| byte.is_ascii_graphic())
 }
 
-fn usable_cache(cache: Option<ModelCache>, base_url: &str, selected: &str) -> Option<ModelCache> {
+fn usable_cache(
+    cache: Option<ModelCache>,
+    base_url: &str,
+    selected: Option<&str>,
+) -> Option<ModelCache> {
     cache.filter(|cache| {
         cache.version == 1
             && cache.base_url == base_url
             && !cache.models.is_empty()
             && cache.models.iter().all(|model| valid_model_id(model))
-            && cache.models.iter().any(|model| model == selected)
+            && selected.is_none_or(|selected| cache.models.iter().any(|model| model == selected))
+            && cache
+                .reasoning_levels
+                .values()
+                .flatten()
+                .all(|level| valid_effort(level))
     })
 }
 
@@ -532,6 +513,7 @@ fn remove_state_file(path: &Path) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serde_json::Value;
     use std::os::unix::fs::symlink;
 
     fn temp_root() -> PathBuf {
@@ -552,24 +534,74 @@ mod tests {
     }
 
     #[test]
-    fn model_catalog_accepts_supported_shapes_and_deduplicates_ids() {
-        let models = parse_models(
-            br#"{"data":[{"id":"gpt-6-astra"},{"slug":"GPT-6-ASTRA"},{"model":"gpt-5.6-sol"}]}"#,
-        )
-        .unwrap();
-        assert_eq!(models, ["gpt-6-astra", "gpt-5.6-sol"]);
-        assert_eq!(
-            parse_models(br#"[{"name":"one"},{"value":"two"}]"#).unwrap(),
-            ["one", "two"]
+    fn server_catalog_preserves_efforts_and_rejects_wrong_endpoint() {
+        let bytes = br#"{"baseUrl":"https://proxy.example/v1","models":[{"id":"one","reasoningLevels":["low","high"]},{"id":"two","reasoningLevels":[]}]}"#;
+        let cache = parse_server_catalog(bytes, "https://proxy.example/v1").unwrap();
+        assert_eq!(cache.models, ["one", "two"]);
+        assert_eq!(cache.reasoning_levels["one"], ["low", "high"]);
+        assert!(parse_server_catalog(bytes, "https://other.example/v1").is_err());
+        assert!(
+            parse_server_catalog(
+                br#"{"baseUrl":"https://proxy.example/v1","models":[]}"#,
+                "https://proxy.example/v1"
+            )
+            .is_err()
         );
         assert_eq!(
-            parse_models(br#"{"models":{"Two":{},"two":{},"one":{}}}"#)
-                .unwrap()
-                .len(),
-            2
+            select_model(None, Some("two"), &cache.models).unwrap(),
+            "two"
         );
-        assert!(parse_models(br#"{"models":[]}"#).is_err());
-        assert!(parse_models(br#"{"data":[{"id":"bad\nmodel"}]}"#).is_err());
+        assert_eq!(
+            select_model(None, Some("removed"), &cache.models).unwrap(),
+            "one"
+        );
+        assert!(select_model(Some("removed"), None, &cache.models).is_err());
+    }
+
+    #[test]
+    fn automatic_catalog_refresh_keeps_local_selection_and_restores_native() {
+        for client in ["codex", "opencode"] {
+            let root = temp_root();
+            let reconciler = disk_reconciler(&root);
+            let base_url = "https://proxy.example/v1";
+            let cache = parse_server_catalog(br#"{"baseUrl":"https://proxy.example/v1","models":[{"id":"one","reasoningLevels":["low","high"]},{"id":"two","reasoningLevels":[]}]}"#, base_url).unwrap();
+            state::write_json(&reconciler.state.join("models.json"), &cache).unwrap();
+            reconciler
+                .apply_proxy(client, base_url, None, &cache.models)
+                .unwrap();
+            let path = reconciler.config_path(client).unwrap();
+            let original = fs::read_to_string(&path).unwrap();
+            let changed = if client == "codex" {
+                let catalog: Value = serde_json::from_slice(
+                    &fs::read(reconciler.state.join("codex-model-catalog.json")).unwrap(),
+                )
+                .unwrap();
+                assert_eq!(
+                    catalog["models"][0]["supported_reasoning_levels"][1]["effort"],
+                    "high"
+                );
+                original.replace("model = \"one\"", "model = \"two\"")
+            } else {
+                assert!(original.contains("reasoningEffort"));
+                original.replace("fleet-cliproxy/one", "fleet-cliproxy/two")
+            };
+            fs::write(&path, &changed).unwrap();
+            reconciler
+                .apply_proxy(client, base_url, None, &cache.models)
+                .unwrap();
+            assert_eq!(fs::read_to_string(&path).unwrap(), changed);
+            let mut refreshed = cache.clone();
+            refreshed
+                .reasoning_levels
+                .insert("one".to_owned(), vec!["medium".to_owned()]);
+            state::write_json(&reconciler.state.join("models.json"), &refreshed).unwrap();
+            reconciler
+                .apply_proxy(client, base_url, None, &refreshed.models)
+                .unwrap();
+            reconciler.restore_native(client).unwrap();
+            assert!(!path.exists());
+            fs::remove_dir_all(root).unwrap();
+        }
     }
 
     #[test]
@@ -586,12 +618,13 @@ mod tests {
             version: 1,
             base_url: "https://proxy.example/v1".to_owned(),
             models: vec!["gpt-6-astra".to_owned()],
+            reasoning_levels: BTreeMap::new(),
         };
         assert!(
             usable_cache(
                 Some(cache.clone()),
                 "https://proxy.example/v1",
-                "gpt-6-astra"
+                Some("gpt-6-astra")
             )
             .is_some()
         );
@@ -599,11 +632,18 @@ mod tests {
             usable_cache(
                 Some(cache.clone()),
                 "https://other.example/v1",
-                "gpt-6-astra"
+                Some("gpt-6-astra")
             )
             .is_none()
         );
-        assert!(usable_cache(Some(cache), "https://proxy.example/v1", "missing-model").is_none());
+        assert!(
+            usable_cache(
+                Some(cache),
+                "https://proxy.example/v1",
+                Some("missing-model")
+            )
+            .is_none()
+        );
     }
 
     #[test]
@@ -623,7 +663,7 @@ mod tests {
             .apply_proxy(
                 "codex",
                 "https://proxy.example/v1",
-                "gpt-6-astra",
+                Some("gpt-6-astra"),
                 &initial_models,
             )
             .unwrap();
@@ -646,7 +686,7 @@ mod tests {
             .apply_proxy(
                 "codex",
                 "https://proxy.example/v1",
-                "gpt-6-astra",
+                Some("gpt-6-astra"),
                 &initial_models,
             )
             .unwrap();
@@ -657,7 +697,7 @@ mod tests {
             .apply_proxy(
                 "codex",
                 "https://proxy.example/v1",
-                "gpt-6-astra",
+                Some("gpt-6-astra"),
                 &refreshed_models,
             )
             .unwrap();
@@ -694,18 +734,20 @@ mod tests {
             Some(original),
             None,
             "https://proxy.example/v1",
-            "gpt-6-astra",
+            Some("gpt-6-astra"),
             &models,
             &key,
+            &BTreeMap::new(),
         )
         .unwrap();
         let (restarted, _) = adapters::opencode::render_opencode(
             Some(&applied),
             Some(&receipt),
             "https://proxy.example/v1",
-            "gpt-6-astra",
+            Some("gpt-6-astra"),
             &models,
             &key,
+            &BTreeMap::new(),
         )
         .unwrap();
         assert_eq!(applied, restarted);
@@ -732,7 +774,7 @@ mod tests {
             .apply_proxy(
                 "codex",
                 "https://proxy.example/v1",
-                "gpt-6-astra",
+                Some("gpt-6-astra"),
                 &["gpt-6-astra".to_owned()],
             )
             .unwrap();
@@ -756,7 +798,7 @@ mod tests {
                 .apply_proxy(
                     "codex",
                     "https://proxy.example/v1",
-                    "gpt-6-astra",
+                    Some("gpt-6-astra"),
                     &["gpt-6-astra".to_owned()],
                 )
                 .is_err()
@@ -773,7 +815,7 @@ mod tests {
             .apply_proxy(
                 "opencode",
                 "https://proxy.example/v1",
-                "gpt-6-astra",
+                Some("gpt-6-astra"),
                 &["gpt-6-astra".to_owned()],
             )
             .unwrap();
@@ -812,7 +854,7 @@ mod tests {
                 .apply_proxy(
                     "codex",
                     "https://proxy.example/v1",
-                    "gpt-6-astra",
+                    Some("gpt-6-astra"),
                     &["gpt-6-astra".to_owned()],
                 )
                 .is_err()

@@ -5,15 +5,16 @@ use jsonc_parser::{
     cst::{CstInputValue, CstObject, CstObjectProp, CstRootNode},
 };
 use serde_json::Value;
-use std::path::Path;
+use std::{collections::BTreeMap, path::Path};
 
 pub(in crate::ai_client) fn render_opencode(
     old: Option<&[u8]>,
     previous: Option<&Receipt>,
     base_url: &str,
-    model: &str,
+    model: Option<&str>,
     models: &[String],
     key_path: &Path,
+    efforts: &BTreeMap<String, Vec<String>>,
 ) -> Result<(Vec<u8>, Receipt)> {
     let existed = old.is_some();
     let text =
@@ -35,11 +36,20 @@ pub(in crate::ai_client) fn render_opencode(
     if key_path.contains('}') || key_path.chars().any(char::is_control) {
         bail!("OpenCode key path contains unsupported characters");
     }
+    let selected = super::super::select_model(
+        model,
+        current_model
+            .as_deref()
+            .and_then(|model| model.strip_prefix("fleet-cliproxy/")),
+        models,
+    )?
+    .to_owned();
     let original_model = match previous {
         Some(receipt) => {
             validate_receipt(receipt, "opencode")?;
-            if current_model.as_deref()
-                != Some(format!("{PROVIDER_NAME}/{}", receipt.expected_model).as_str())
+            if (!receipt.automatic_model
+                && current_model.as_deref()
+                    != Some(format!("{PROVIDER_NAME}/{}", receipt.expected_model).as_str()))
                 || !opencode_provider_matches(fleet_provider.as_ref(), receipt)
             {
                 bail!("Fleet-owned OpenCode settings changed outside Fleet");
@@ -53,7 +63,11 @@ pub(in crate::ai_client) fn render_opencode(
             current_model
         }
     };
-    set_json_property(&object, "model", format!("{PROVIDER_NAME}/{model}").into());
+    set_json_property(
+        &object,
+        "model",
+        format!("{PROVIDER_NAME}/{selected}").into(),
+    );
     let providers = match provider {
         Some(provider) => provider,
         None => object
@@ -65,7 +79,28 @@ pub(in crate::ai_client) fn render_opencode(
         .map(|model| {
             (
                 model.clone(),
-                CstInputValue::Object(vec![("name".to_owned(), model.clone().into())]),
+                CstInputValue::Object(vec![
+                    ("name".to_owned(), model.clone().into()),
+                    (
+                        "variants".to_owned(),
+                        CstInputValue::Object(
+                            efforts
+                                .get(model)
+                                .into_iter()
+                                .flatten()
+                                .map(|effort| {
+                                    (
+                                        effort.clone(),
+                                        CstInputValue::Object(vec![(
+                                            "reasoningEffort".to_owned(),
+                                            effort.clone().into(),
+                                        )]),
+                                    )
+                                })
+                                .collect(),
+                        ),
+                    ),
+                ]),
             )
         })
         .collect();
@@ -94,11 +129,13 @@ pub(in crate::ai_client) fn render_opencode(
             original_model,
             original_provider: None,
             original_catalog: None,
-            expected_model: model.to_owned(),
+            expected_model: selected,
+            automatic_model: model.is_none(),
             expected_base_url: base_url.to_owned(),
             expected_key_path: key_path,
             expected_catalog_path: None,
             expected_models: models.to_vec(),
+            expected_reasoning_levels: efforts.clone(),
         },
     ))
 }
@@ -115,8 +152,9 @@ pub(in crate::ai_client) fn restore_opencode(
     let object = root
         .object_value()
         .context("OpenCode config root must be an object")?;
-    if optional_json_string(&object, "model")?.as_deref()
-        != Some(format!("{PROVIDER_NAME}/{}", receipt.expected_model).as_str())
+    if !receipt.automatic_model
+        && optional_json_string(&object, "model")?.as_deref()
+            != Some(format!("{PROVIDER_NAME}/{}", receipt.expected_model).as_str())
     {
         bail!("Fleet-owned OpenCode model changed outside Fleet");
     }
@@ -158,8 +196,25 @@ fn opencode_provider_matches(property: Option<&CstObjectProp>, receipt: &Receipt
                             .and_then(|entry| entry.get("name"))
                             .and_then(Value::as_str)
                             == Some(model)
+                            && variants_match(
+                                map.get(model).and_then(|entry| entry.get("variants")),
+                                receipt
+                                    .expected_reasoning_levels
+                                    .get(model)
+                                    .map(Vec::as_slice)
+                                    .unwrap_or_default(),
+                            )
                     })
             })
+}
+
+fn variants_match(value: Option<&Value>, levels: &[String]) -> bool {
+    let expected = levels
+        .iter()
+        .map(|level| (level.clone(), serde_json::json!({"reasoningEffort": level})))
+        .collect::<serde_json::Map<_, _>>();
+    value.is_none_or(|value| value == &Value::Object(expected))
+        && (value.is_some() || levels.is_empty())
 }
 
 fn optional_json_string(object: &CstObject, name: &str) -> Result<Option<String>> {

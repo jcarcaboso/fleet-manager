@@ -157,6 +157,16 @@ impl Api {
         Ok(bytes)
     }
 
+    pub async fn cliproxy_models(&self) -> Result<Vec<u8>, ProtocolError> {
+        let response = self
+            .authenticated()?
+            .get(self.endpoint("agent/v1/cliproxy/models")?)
+            .send()
+            .await
+            .map_err(ProtocolError::Transport)?;
+        read_bounded(success(response)?, 4 * 1024 * 1024).await
+    }
+
     pub async fn bundle(&self, skill: &AssignmentSkill) -> Result<Bundle, ProtocolError> {
         self.bundle_content(&skill.bundle_digest, skill.size, &skill.schema)
             .await

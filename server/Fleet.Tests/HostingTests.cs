@@ -54,7 +54,8 @@ public sealed class HostingTests : IAsyncLifetime
                 ["Source:Remote"] = "",
                 ["urls"] = "https://localhost:7443",
                 ["Fleet:Operators:second-admin"] = Convert.ToHexStringLower(SHA256.HashData(Encoding.UTF8.GetBytes(Token + "-second")))
-            })));
+            })).ConfigureServices(services => services.AddHttpClient("cliproxy")
+                .ConfigurePrimaryHttpMessageHandler(() => new CliProxyCatalogTests.Handler())));
         _operator = _factory.CreateClient(new() { BaseAddress = new Uri("https://localhost") });
         _operator.DefaultRequestHeaders.Authorization = new("Bearer", Token);
         using var scope = _factory.Services.CreateScope();
@@ -329,22 +330,31 @@ public sealed class HostingTests : IAsyncLifetime
         Assert.Equal(401, (await SendNodeAsync("/agent/v1/alias", certificate, new { alias = "revoked" }, "PUT")).Response.StatusCode);
     }
 
-    [Fact]
-    public async Task CLIProxy_credential_is_served_only_to_nodes_with_a_current_proxy_assignment()
+    [Theory]
+    [InlineData("credential")]
+    [InlineData("models")]
+    public async Task CLIProxy_resources_are_served_only_to_nodes_with_a_current_proxy_assignment(string resource)
     {
         var assigned = await EnrollNode("cliproxy-assigned");
         var unassigned = await EnrollNode("cliproxy-unassigned");
         var proxyTarget = new SnapshotTarget(assigned.NodeId, "ai-client/codex", new("home", ".codex"), [],
-            AiClient: new("fleet.ai-client/v1", "codex", "cliproxy", "https://proxy.example/v1", "gpt-6-astra"));
+            AiClient: new("fleet.ai-client/v1", "codex", "cliproxy", "https://proxy.example/v1"));
         using (var scope = _factory.Services.CreateScope())
             await scope.ServiceProvider.GetRequiredService<IFleetCoordinator>().AcceptSourceSnapshotAsync(new(
                 "cliproxy-assignment", [], [proxyTarget], [], DateTimeOffset.UtcNow));
 
-        const string route = "/agent/v1/cliproxy/credential";
+        var route = $"/agent/v1/cliproxy/{resource}";
         var allowed = await SendNodeAsync(route, assigned.Certificate, method: "GET");
 
         Assert.Equal(200, allowed.Response.StatusCode);
-        Assert.Equal(CliProxyKey, Encoding.UTF8.GetString(((MemoryStream)allowed.Response.Body).ToArray()));
+        if (resource == "credential")
+            Assert.Equal(CliProxyKey, Encoding.UTF8.GetString(((MemoryStream)allowed.Response.Body).ToArray()));
+        else
+        {
+            var catalog = await JsonSerializer.DeserializeAsync<JsonElement>(allowed.Response.Body);
+            Assert.Equal("https://proxy.example/v1", catalog.GetProperty("baseUrl").GetString());
+            Assert.Equal("one", catalog.GetProperty("models")[0].GetProperty("id").GetString());
+        }
         Assert.Equal("no-store", allowed.Response.Headers.CacheControl.ToString());
         Assert.Equal(403, (await SendNodeAsync(route, unassigned.Certificate, method: "GET")).Response.StatusCode);
         Assert.Equal(HttpStatusCode.Unauthorized, (await _operator.GetAsync(route)).StatusCode);
@@ -357,7 +367,7 @@ public sealed class HostingTests : IAsyncLifetime
             {
                 var unavailable = await SendNodeAsync(route, assigned.Certificate, method: "GET");
                 Assert.Equal(503, unavailable.Response.StatusCode);
-                Assert.Equal("cliproxy_credential_unavailable",
+                Assert.Equal($"cliproxy_{resource}_unavailable",
                     (await JsonSerializer.DeserializeAsync<JsonElement>(unavailable.Response.Body)).GetProperty("code").GetString());
             }
             finally { options.CliProxyApiKey = CliProxyKey; }
@@ -367,6 +377,8 @@ public sealed class HostingTests : IAsyncLifetime
             await scope.ServiceProvider.GetRequiredService<IFleetCoordinator>().AcceptSourceSnapshotAsync(new(
                 "native-assignment", [], [proxyTarget with { AiClient = new("fleet.ai-client/v1", "codex", "native") }], [], DateTimeOffset.UtcNow));
         Assert.Equal(403, (await SendNodeAsync(route, assigned.Certificate, method: "GET")).Response.StatusCode);
+        (await _operator.PostAsync($"/operator/v1/nodes/{assigned.NodeId.Value:D}/revoke", null)).EnsureSuccessStatusCode();
+        Assert.Equal(401, (await SendNodeAsync(route, assigned.Certificate, method: "GET")).Response.StatusCode);
     }
 
     [Fact]

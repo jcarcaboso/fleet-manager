@@ -41,14 +41,20 @@ impl Adapter {
         old: Option<&[u8]>,
         previous: Option<&Receipt>,
         base_url: &str,
-        model: &str,
+        model: Option<&str>,
         models: &[String],
     ) -> Result<(Vec<u8>, Receipt)> {
+        let cache =
+            crate::state::read_json::<super::ModelCache>(&reconciler.state.join("models.json"))?;
+        let efforts = cache
+            .filter(|cache| cache.base_url == base_url)
+            .map(|cache| cache.reasoning_levels)
+            .unwrap_or_default();
         let key_path = reconciler.state.join("api-key");
         match self {
             Self::Codex => {
                 let catalog_path = reconciler.state.join("codex-model-catalog.json");
-                let catalog = codex::render_codex_catalog(models)?;
+                let catalog = codex::render_codex_catalog(models, &efforts)?;
                 let rendered = codex::render_codex(
                     old,
                     previous,
@@ -61,9 +67,9 @@ impl Adapter {
                 crate::state::write_bytes(&catalog_path, &catalog)?;
                 Ok(rendered)
             }
-            Self::OpenCode => {
-                opencode::render_opencode(old, previous, base_url, model, models, &key_path)
-            }
+            Self::OpenCode => opencode::render_opencode(
+                old, previous, base_url, model, models, &key_path, &efforts,
+            ),
         }
     }
 

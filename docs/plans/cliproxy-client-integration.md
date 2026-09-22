@@ -3,6 +3,10 @@
 Status: CP-0 through CP-6 implemented and verified; CP-7 release assets prepared,
 2026-09-18. Production rollout remains an operator step.
 
+The original Node-side discovery and mandatory-model design below is historical.
+Server-side catalog discovery and optional defaults supersede it; current behavior
+is documented in the [operations guide](../technical-design/cliproxy-operations.md).
+
 ## Verdict
 
 This is viable. The model lookup and client rendering logic can be ported from

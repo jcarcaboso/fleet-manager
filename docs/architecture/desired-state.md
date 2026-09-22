@@ -184,13 +184,12 @@ nodes:
       ai-clients:
         codex:
           mode: cliproxy
-          model: gpt-6-astra
         opencode:
           mode: native
 ```
 
 An omitted AI client is unmanaged. `cliproxy` publishes the normalized
-Workspace endpoint and required model but never the API key. `native` instructs
+Workspace endpoint and optional default model but never the API key. `native` instructs
 the Agent to remove Fleet-owned proxy settings without handling OAuth. The
 operator signs in locally through the AI client's normal flow. The Server reads
 the proxy API key from the optional `Fleet:CliProxyApiKey` setting and
@@ -216,9 +215,15 @@ Existing UUID-based manifests must remove each `id` field and use the enrolled
 Node's current name as the mapping key. Certificate identities do not change.
 
 For a `cliproxy` Assignment, the Agent retrieves the credential over its
-existing mTLS session, stores it only in its private state directory, and
-discovers models from the configured `/v1/models` endpoint. The last valid
-non-empty catalog is retained across transient failures. Codex receives a
+existing mTLS session and stores it only in its private state directory. The
+Server discovers models and advertised reasoning efforts from CLIProxy and
+serves the catalog only to Nodes with a current proxy Assignment. Agents fetch
+it during reconciliation; no model list or effort list belongs in YAML. Without
+an explicit `model`, the client keeps its selected advertised model or uses the
+first model in the catalog. The last valid non-empty catalog for the same
+endpoint is retained across transient failures. See the
+[operations guide](../technical-design/cliproxy-operations.md) for refresh and
+upgrade behavior. Codex receives a
 command-backed provider that reads the key file; OpenCode receives a file
 reference. Neither adapter reads or changes the client's OAuth store. A
 Fleet-owned receipt permits restart and native restoration while preserving

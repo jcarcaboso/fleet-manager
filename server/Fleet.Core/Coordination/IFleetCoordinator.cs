@@ -73,7 +73,7 @@ public interface IFleetCoordinator
         string digest,
         CancellationToken cancellationToken = default);
 
-    Task AuthorizeCliProxyCredentialAsync(
+    Task<string> AuthorizeCliProxyCredentialAsync(
         NodeAuthentication authentication,
         CancellationToken cancellationToken = default);
 
