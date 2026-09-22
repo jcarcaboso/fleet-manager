@@ -13,12 +13,12 @@ The Server reads the key from the standard .NET configuration setting
 `Fleet__CliProxyApiKey` in the container:
 
 ```sh
-sed -i 's|^FLEET_IMAGE=.*|FLEET_IMAGE=skorcius/fleet-manager:0.6.0|' .env
+sed -i 's|^FLEET_IMAGE=.*|FLEET_IMAGE=skorcius/fleet-manager:0.6.1|' .env
 export FLEET_CLIPROXY_API_KEY='replace-with-a-dedicated-proxy-key'
 docker compose up -d --wait
 ```
 
-Use the released 0.6.0 image or an immutable tag built from this change. The
+Use the released 0.6.1 image or an immutable tag built from this change. The
 older image in an existing `.env` does not implement the key endpoint or
 `fleet/v2`.
 
