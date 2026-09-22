@@ -327,9 +327,7 @@ public sealed class GitSourceScanner(
                     }
                     if (aiTarget.Mode == "native" && aiTarget.Model is not null)
                         diagnostics.Add("invalid_ai_client_model", $"Node '{alias}' native AI client '{client}' must not configure a model.", "fleet.yml");
-                    if (aiTarget.Mode == "cliproxy" && string.IsNullOrWhiteSpace(aiTarget.Model))
-                        diagnostics.Add("missing_ai_client_model", $"Node '{alias}' CLIProxy AI client '{client}' must configure a model.", "fleet.yml");
-                    else if (aiTarget.Mode == "cliproxy" && !SourceTargetPublishers.IsValidModelId(aiTarget.Model!))
+                    if (aiTarget.Mode == "cliproxy" && aiTarget.Model is not null && !SourceTargetPublishers.IsValidModelId(aiTarget.Model))
                         diagnostics.Add("invalid_ai_client_model", $"Node '{alias}' AI client '{client}' has an invalid model.", "fleet.yml");
                 }
             }

@@ -10,7 +10,7 @@ pub fn validate(assignment: &Assignment) -> Result<()> {
         "native" => ai.base_url.is_none() && ai.model.is_none(),
         "cliproxy" => {
             ai.base_url.as_ref().is_some_and(|url| url.len() <= 2048)
-                && ai.model.as_ref().is_some_and(|model| model.len() <= 200)
+                && ai.model.as_ref().is_none_or(|model| model.len() <= 200)
         }
         _ => false,
     };

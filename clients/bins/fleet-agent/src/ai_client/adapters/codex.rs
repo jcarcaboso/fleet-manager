@@ -2,14 +2,14 @@ use crate::ai_client::{
     MAX_MODEL_RESPONSE_BYTES, PROVIDER_NAME, Receipt, valid_model_id, validate_receipt,
 };
 use anyhow::{Context, Result, bail};
-use std::path::Path;
+use std::{collections::BTreeMap, path::Path};
 use toml_edit::{DocumentMut, Item, Table, value};
 
 pub(super) fn render_codex(
     old: Option<&[u8]>,
     previous: Option<&Receipt>,
     base_url: &str,
-    model: &str,
+    model: Option<&str>,
     models: &[String],
     key_path: &Path,
     catalog_path: &Path,
@@ -36,10 +36,12 @@ pub(super) fn render_codex(
         .to_str()
         .context("Codex catalog path is not UTF-8")?
         .to_owned();
+    let selected = super::super::select_model(model, current_model.as_deref(), models)?.to_owned();
     let (original_model, original_provider, original_catalog) = match previous {
         Some(receipt) => {
             validate_receipt(receipt, "codex")?;
-            if current_model.as_deref() != Some(receipt.expected_model.as_str())
+            if (!receipt.automatic_model
+                && current_model.as_deref() != Some(receipt.expected_model.as_str()))
                 || current_provider.as_deref() != Some(PROVIDER_NAME)
                 || current_catalog.as_deref() != receipt.expected_catalog_path.as_deref()
                 || !codex_provider_matches(fleet_provider, receipt)
@@ -60,7 +62,7 @@ pub(super) fn render_codex(
         }
     };
     document["model_provider"] = value(PROVIDER_NAME);
-    document["model"] = value(model);
+    document["model"] = value(selected.as_str());
     document["model_catalog_json"] = value(catalog_path.as_str());
     let providers = table_or_create(&mut document, "model_providers")?;
     let mut provider = Table::new();
@@ -85,11 +87,13 @@ pub(super) fn render_codex(
             original_model,
             original_provider,
             original_catalog,
-            expected_model: model.to_owned(),
+            expected_model: selected,
+            automatic_model: model.is_none(),
             expected_base_url: base_url.to_owned(),
             expected_key_path: key_path,
             expected_catalog_path: Some(catalog_path),
             expected_models: models.to_vec(),
+            expected_reasoning_levels: BTreeMap::new(),
         },
     ))
 }
@@ -104,7 +108,9 @@ pub(super) fn restore_codex(old: Option<&[u8]>, receipt: &Receipt) -> Result<Vec
         .get("model_providers")
         .and_then(Item::as_table)
         .and_then(|table| table.get(PROVIDER_NAME));
-    if optional_toml_string(&document, "model")?.as_deref() != Some(receipt.expected_model.as_str())
+    if (!receipt.automatic_model
+        && optional_toml_string(&document, "model")?.as_deref()
+            != Some(receipt.expected_model.as_str()))
         || optional_toml_string(&document, "model_provider")?.as_deref() != Some(PROVIDER_NAME)
         || current_catalog.as_deref() != receipt.expected_catalog_path.as_deref()
         || !codex_provider_matches(provider, receipt)
@@ -134,7 +140,10 @@ pub(super) fn restore_codex(old: Option<&[u8]>, receipt: &Receipt) -> Result<Vec
     Ok(document.to_string().into_bytes())
 }
 
-pub(super) fn render_codex_catalog(models: &[String]) -> Result<Vec<u8>> {
+pub(super) fn render_codex_catalog(
+    models: &[String],
+    efforts: &BTreeMap<String, Vec<String>>,
+) -> Result<Vec<u8>> {
     const BASE_INSTRUCTIONS: &str = "You are Codex, a coding agent. Work in the user's repository, follow applicable AGENTS.md instructions, and use the provided tools to complete the request.";
 
     if models.is_empty() || models.iter().any(|model| !valid_model_id(model)) {
@@ -149,8 +158,11 @@ pub(super) fn render_codex_catalog(models: &[String]) -> Result<Vec<u8>> {
                 "slug": model,
                 "display_name": model,
                 "description": null,
-                "default_reasoning_level": null,
-                "supported_reasoning_levels": [],
+                "default_reasoning_level": efforts.get(model).and_then(|levels|
+                    levels.iter().find(|level| level.as_str() == "medium").or_else(|| levels.first())),
+                "supported_reasoning_levels": efforts.get(model).into_iter().flatten()
+                    .map(|effort| serde_json::json!({"effort": effort, "description": effort}))
+                    .collect::<Vec<_>>(),
                 "shell_type": "unified_exec",
                 "visibility": "list",
                 "supported_in_api": true,

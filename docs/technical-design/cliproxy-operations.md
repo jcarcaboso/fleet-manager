@@ -1,7 +1,8 @@
 # CLIProxyAPI operations
 
 Fleet can configure Codex and OpenCode to use one Workspace CLIProxyAPI
-endpoint. The source repository selects the endpoint and model. The API key
+endpoint. The source repository selects the endpoint and which Nodes receive
+its model catalog. A default model is optional. The API key
 stays outside Git and reaches assigned Nodes through their existing mTLS
 connection to the Server.
 
@@ -13,14 +14,14 @@ The Server reads the key from the standard .NET configuration setting
 `Fleet__CliProxyApiKey` in the container:
 
 ```sh
-sed -i 's|^FLEET_IMAGE=.*|FLEET_IMAGE=skorcius/fleet-manager:0.6.1|' .env
+# Set FLEET_IMAGE in .env to the immutable image built from this change.
 export FLEET_CLIPROXY_API_KEY='replace-with-a-dedicated-proxy-key'
 docker compose up -d --wait
 ```
 
-Use the released 0.6.1 image or an immutable tag built from this change. The
-older image in an existing `.env` does not implement the key endpoint or
-`fleet/v2`.
+Use a Server and Agent build containing server-side catalog discovery. Release
+0.6.1 requires an explicit model and discovers models on each Node. Upgrade the
+Server and all selected Agents before removing `model` from existing YAML.
 
 This is ordinary .NET configuration. A deployment outside the homelab Compose
 stack can supply `Fleet__CliProxyApiKey` directly through an environment
@@ -35,13 +36,30 @@ and use a dedicated proxy key.
 
 Use `fleet/v2` only after compatible Agents are running on every selected Node.
 Copy [the CLIProxyAPI manifest example](../../examples/source/fleet-cliproxy.yml)
-to `fleet.yml`, then replace its hostname, Node alias, and model. The endpoint
-must use HTTPS and end at `/v1`. Each selected model must appear in the
-endpoint's authenticated `/v1/models` response.
+to `fleet.yml`, then replace its hostname and Node alias. Set `mode: cliproxy`
+for each client that should receive the catalog. No model or effort list is
+needed. The endpoint must use HTTPS and end at `/v1`.
+
+The Server fetches `/v1/models?client_version=0.154.0`, which requests CLIProxy's
+Codex catalog with advertised reasoning efforts. It caches the result in memory
+and refreshes on demand at most once per minute. Assigned Nodes retrieve it from
+`GET /agent/v1/cliproxy/models` over mTLS during their normal reconciliation.
+Catalog changes do not require a YAML commit. The response includes the endpoint
+so an Agent cannot apply a catalog from a different Assignment.
+
+Codex receives effort choices in its catalog; OpenCode receives model variants.
+Older proxies that return only model identifiers still work, but Fleet does not
+invent effort choices when the proxy omits them. The upstream response behavior
+is defined by CLIProxy's [model handler](https://github.com/router-for-me/CLIProxyAPI/blob/main/sdk/api/handlers/openai/openai_handlers.go).
+
+An optional `model` pins the client's default to an advertised identifier. When
+omitted, Fleet keeps the locally selected proxy model if available, otherwise
+selects the first advertised model. Users can change the selection without a
+Fleet ownership conflict. Reasoning effort selection remains local to the client.
 
 The first proxy reconciliation fails if the Node cannot retrieve the key or a
-valid non-empty model list. A later model-fetch failure keeps the last valid
-catalog. Codex and OpenCode read the Node-local key file at request time. Fleet
+valid non-empty model list from the Server. A later model-fetch failure keeps
+the last valid catalog for that endpoint on both the Server and Node. Codex and OpenCode read the Node-local key file at request time. Fleet
 does not read or change either client's OAuth store.
 
 ## Rotate the key

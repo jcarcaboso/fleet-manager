@@ -285,8 +285,10 @@ public sealed class SourceGitSourceScannerTests : IDisposable
             snapshot.Value.Targets.Select(target => target.TargetName));
     }
 
-    [Fact]
-    public async Task Fleet_v2_builds_typed_AI_client_targets_and_normalizes_the_proxy_endpoint()
+    [Theory]
+    [InlineData(true)]
+    [InlineData(false)]
+    public async Task Fleet_v2_builds_typed_AI_client_targets_and_normalizes_the_proxy_endpoint(bool explicitModel)
     {
         var repository = CreateRepository();
         Write(repository, "fleet.yml", """
@@ -309,6 +311,11 @@ public sealed class SourceGitSourceScannerTests : IDisposable
                     opencode:
                       mode: native
             """);
+        if (!explicitModel)
+        {
+            var path = Path.Combine(repository, "fleet.yml");
+            Write(repository, "fleet.yml", File.ReadAllText(path).Replace("model: gpt-6-astra", ""));
+        }
         Commit(repository, "v2 AI clients");
 
         var snapshot = Assert.IsType<SourceScanResult.Snapshot>(
@@ -318,7 +325,7 @@ public sealed class SourceGitSourceScannerTests : IDisposable
         var codex = targets["ai-client/codex"];
         Assert.Equal(("home", ".codex"), (codex.Descriptor.Base, codex.Descriptor.Path));
         Assert.Equal(new AiClientAssignment("fleet.ai-client/v1", "codex", "cliproxy",
-            "https://proxy.hlab.alpetxino.com/v1", "gpt-6-astra"), codex.AiClient);
+            "https://proxy.hlab.alpetxino.com/v1", explicitModel ? "gpt-6-astra" : null), codex.AiClient);
         var opencode = targets["ai-client/opencode"];
         Assert.Equal(("home", ".config/opencode"), (opencode.Descriptor.Base, opencode.Descriptor.Path));
         Assert.Equal(new AiClientAssignment("fleet.ai-client/v1", "opencode", "native"), opencode.AiClient);
@@ -372,7 +379,7 @@ public sealed class SourceGitSourceScannerTests : IDisposable
             await Scanner(repository).ScanAsync(null, CancellationToken.None));
 
         Assert.Contains(invalid.Diagnostics, diagnostic => diagnostic.Code == "invalid_cliproxy_base_url");
-        Assert.Contains(invalid.Diagnostics, diagnostic => diagnostic.Code == "missing_ai_client_model");
+        Assert.DoesNotContain(invalid.Diagnostics, diagnostic => diagnostic.Code == "missing_ai_client_model");
         Assert.Contains(invalid.Diagnostics, diagnostic => diagnostic.Code == "invalid_ai_client_model");
         Assert.Contains(invalid.Diagnostics, diagnostic => diagnostic.Code == "unknown_ai_client");
     }

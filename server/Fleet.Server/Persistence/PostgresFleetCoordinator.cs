@@ -522,16 +522,17 @@ public sealed class PostgresFleetCoordinator(
             assignment.TargetName, new(assignment.TargetBase, assignment.TargetPath), skills, file, aiClient));
     }
 
-    public async Task AuthorizeCliProxyCredentialAsync(NodeAuthentication authentication, CancellationToken cancellationToken = default)
+    public async Task<string> AuthorizeCliProxyCredentialAsync(NodeAuthentication authentication, CancellationToken cancellationToken = default)
     {
         await Authenticate(authentication, clock.GetUtcNow(), false, cancellationToken);
-        var authorized = await (from assignment in db.Assignments.AsNoTracking()
-                                join aiClient in db.AssignmentAiClients.AsNoTracking() on assignment.Id equals aiClient.AssignmentId
-                                where assignment.NodeId == authentication.NodeId.Value && assignment.IsCurrent &&
-                                      aiClient.Mode == "cliproxy"
-                                select assignment.Id).AnyAsync(cancellationToken);
-        if (!authorized)
+        var baseUrl = await (from assignment in db.Assignments.AsNoTracking()
+                             join aiClient in db.AssignmentAiClients.AsNoTracking() on assignment.Id equals aiClient.AssignmentId
+                             where assignment.NodeId == authentication.NodeId.Value && assignment.IsCurrent &&
+                                   aiClient.Mode == "cliproxy"
+                             select aiClient.BaseUrl).FirstOrDefaultAsync(cancellationToken);
+        if (baseUrl is null)
             throw Error("cliproxy_credential_not_authorized", "CLIProxy credential is not assigned to this Node.");
+        return baseUrl;
     }
 
     public async Task<BundleContent> GetBundleAsync(NodeAuthentication authentication, string digest, CancellationToken cancellationToken = default)
@@ -780,7 +781,7 @@ public sealed class PostgresFleetCoordinator(
                     target.AiClient.Mode is not ("native" or "cliproxy") ||
                     target.AiClient.Mode == "native" && (target.AiClient.BaseUrl is not null || target.AiClient.Model is not null) ||
                     target.AiClient.Mode == "cliproxy" && (!IsValidCliProxyBaseUrl(target.AiClient.BaseUrl) ||
-                        target.AiClient.Model is null || !IsValidModelId(target.AiClient.Model)))
+                        target.AiClient.Model is not null && !IsValidModelId(target.AiClient.Model)))
                     throw Error("invalid_ai_client", "AI client assignment is invalid.");
                 if (target.AiClient.BaseUrl?.Length > 2_048 || target.AiClient.Model?.Length > 200)
                     throw Error("invalid_ai_client", "AI client assignment exceeds a text limit.");

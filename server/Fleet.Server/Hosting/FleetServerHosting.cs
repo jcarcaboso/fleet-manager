@@ -36,6 +36,9 @@ public static class FleetServerHosting
             .Validate(x => x.HasValidCliProxyApiKey(), "Fleet:CliProxyApiKey must be empty or contain at most 4096 printable ASCII characters.")
             .ValidateOnStart();
         builder.Services.AddSingleton<NodeCertificateIssuer>();
+        builder.Services.AddHttpClient("cliproxy", client => client.Timeout = TimeSpan.FromSeconds(15))
+            .ConfigurePrimaryHttpMessageHandler(() => new HttpClientHandler { AllowAutoRedirect = false });
+        builder.Services.AddSingleton<CliProxyCatalog>();
         builder.Services.AddDbContext<FleetDbContext>((services, options) => options.UseNpgsql(
             builder.Configuration.GetConnectionString("Fleet") ?? throw new InvalidOperationException("ConnectionStrings:Fleet is required."),
             npgsql => npgsql.CommandTimeout(15)).AddInterceptors(services.GetRequiredService<DatabaseMetricsInterceptor>()));

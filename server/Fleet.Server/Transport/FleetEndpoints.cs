@@ -99,6 +99,16 @@ public static class FleetEndpoints
                 ? Results.Json(new { code = "cliproxy_credential_unavailable" }, statusCode: StatusCodes.Status503ServiceUnavailable)
                 : Results.Bytes(Encoding.UTF8.GetBytes(credential), "application/octet-stream");
         });
+        agents.MapGet("/cliproxy/models", async (HttpContext context, IFleetCoordinator coordinator,
+            CliProxyCatalog catalog, CancellationToken ct) =>
+        {
+            var baseUrl = await coordinator.AuthorizeCliProxyCredentialAsync(Node(context), ct);
+            context.Response.Headers.CacheControl = "no-store";
+            var models = await catalog.GetAsync(baseUrl, ct);
+            return models is null
+                ? Results.Json(new { code = "cliproxy_models_unavailable" }, statusCode: StatusCodes.Status503ServiceUnavailable)
+                : Results.Ok(new { baseUrl, models });
+        });
         agents.MapPost("/reports", async (ReportRequest request, HttpContext context, IFleetCoordinator coordinator,
             TimeProvider time, CancellationToken ct) =>
             await coordinator.ReportAttemptAsync(Node(context), new(new(request.AttemptId), request.State,

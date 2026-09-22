@@ -21,7 +21,5 @@ nodes:
       ai-clients:
         codex:
           mode: cliproxy
-          model: replace-with-advertised-model-id
         opencode:
           mode: cliproxy
-          model: replace-with-advertised-model-id
