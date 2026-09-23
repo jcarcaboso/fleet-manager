@@ -1,26 +1,26 @@
 class FleetAgent < Formula
   desc "Node agent for Fleet Manager"
   homepage "https://github.com/jcarcaboso/fleet-manager"
-  version "0.6.2"
+  version "0.6.3"
   license "MIT"
 
   on_macos do
     depends_on macos: :ventura
 
     if Hardware::CPU.arm?
-      url "https://github.com/jcarcaboso/fleet-manager/releases/download/v0.6.2/fleet-agent-macos-arm64.tar.gz"
-      sha256 "eb0c9342b19502e845fabab11aa9f6cd2a00acab0c5476347354af4b2913a824"
+      url "https://github.com/jcarcaboso/fleet-manager/releases/download/v0.6.3/fleet-agent-macos-arm64.tar.gz"
+      sha256 "796100db2887da1410fcbdfe79328a9d869a8e1f722f3737840c15b60bf21a2b"
     else
-      url "https://github.com/jcarcaboso/fleet-manager/releases/download/v0.6.2/fleet-agent-macos-amd64.tar.gz"
-      sha256 "63e5b48498e8c68ac2efdd85ad6fd2edcf774a71f04e4e9f275f950316fffa9e"
+      url "https://github.com/jcarcaboso/fleet-manager/releases/download/v0.6.3/fleet-agent-macos-amd64.tar.gz"
+      sha256 "5d81c8a031ecc484c394940e22dccf39fd9d99788bf9d99f30a71b8b429d2899"
     end
   end
 
   on_linux do
     depends_on arch: :x86_64
 
-    url "https://github.com/jcarcaboso/fleet-manager/releases/download/v0.6.2/fleet-agent-linux-amd64.tar.gz"
-    sha256 "a9b1dc8fe7c3c9071f58294861be52d41d14db95f0527081622f9701b4b72867"
+    url "https://github.com/jcarcaboso/fleet-manager/releases/download/v0.6.3/fleet-agent-linux-amd64.tar.gz"
+    sha256 "d4c6aa7a39ba3a7d1b3ecb79e53274b02f60d202106deb1b153be2f27a0a4216"
   end
 
   def install
@@ -44,7 +44,7 @@ class FleetAgent < Formula
   end
 
   test do
-    assert_match "fleet-agent 0.6.2", shell_output("#{bin}/fleet-agent --version")
+    assert_match "fleet-agent 0.6.3", shell_output("#{bin}/fleet-agent --version")
     system "#{bin}/fleet-agent", "--help"
   end
 end
