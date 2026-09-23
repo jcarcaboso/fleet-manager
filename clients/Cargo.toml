@@ -5,7 +5,7 @@ members = ["bins/fleet", "bins/fleet-agent", "crates/fleet-reconcile"]
 [workspace.package]
 edition = "2024"
 license = "MIT"
-version = "0.6.2"
+version = "0.6.3"
 
 [workspace.dependencies]
 anyhow = "1.0.100"
