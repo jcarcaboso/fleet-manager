@@ -115,6 +115,44 @@ public sealed class CoordinationPersistenceTests : IAsyncLifetime
     }
 
     [Fact]
+    public async Task Failed_ai_configuration_retries_after_backoff_without_a_new_source_revision()
+    {
+        await using var db = Database();
+        var coordinator = Coordinator(db);
+        var node = await Enroll(coordinator, "retry-ai");
+        var target = new SnapshotTarget(node.NodeId, "ai-client/codex", new("home", ".codex"), [],
+            AiClient: new("fleet.ai-client/v1", "codex", "cliproxy", "https://proxy.example/v1"));
+        await coordinator.AcceptSourceSnapshotAsync(Snapshot("same-source", [], target));
+        var first = (await coordinator.PollAsync(node.Authentication, clock.GetUtcNow())).Assignment!;
+        var failure = new AttemptReport(first.AttemptId, ConvergenceState.Failed, "ai_client_reconcile_failed", null, clock.GetUtcNow());
+        await coordinator.ReportAttemptAsync(node.Authentication, failure);
+        clock.Advance(TimeSpan.FromSeconds(59));
+        Assert.Null((await coordinator.PollAsync(node.Authentication, clock.GetUtcNow())).Assignment);
+        clock.Advance(TimeSpan.FromSeconds(1));
+        // Concurrent polls must share one new attempt.
+        var retries = await Task.WhenAll(Enumerable.Range(0, 2).Select(async _ =>
+        {
+            await using var other = Database();
+            return (await Coordinator(other).PollAsync(node.Authentication, clock.GetUtcNow())).Assignment!;
+        }));
+        var retry = retries[0];
+        Assert.Equal(retry.AttemptId, retries[1].AttemptId);
+        Assert.NotEqual(first.AttemptId, retry.AttemptId);
+        Assert.Equal(first.AssignmentId, retry.AssignmentId);
+        Assert.Equal(first.DesiredRevisionId, retry.DesiredRevisionId);
+        db.ChangeTracker.Clear();
+        Assert.Equal(ReportOutcome.Duplicate, (await coordinator.ReportAttemptAsync(node.Authentication, failure)).Outcome);
+        var terminal = await Assert.ThrowsAsync<CoordinationException>(() => coordinator.ReportAttemptAsync(node.Authentication,
+            failure with { State = ConvergenceState.Applying }));
+        Assert.Equal("terminal_attempt", terminal.Code);
+        await coordinator.ReportAttemptAsync(node.Authentication,
+            new(retry.AttemptId, ConvergenceState.Succeeded, null, null, clock.GetUtcNow()));
+        Assert.Null((await coordinator.PollAsync(node.Authentication, clock.GetUtcNow())).Assignment);
+        Assert.Equal(2, await db.Attempts.CountAsync());
+        Assert.Equal((int)ConvergenceState.Succeeded, (await db.Assignments.SingleAsync()).State);
+    }
+
+    [Fact]
     public async Task AI_client_assignments_persist_poll_and_narrow_credential_authorization()
     {
         await using var db = Database();

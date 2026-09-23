@@ -719,6 +719,81 @@ mod tests {
     }
 
     #[test]
+    fn opencode_new_jsonc_does_not_transfer_existing_json_ownership() {
+        let root = temp_root();
+        let reconciler = disk_reconciler(&root);
+        let models = ["one".to_owned()];
+        reconciler
+            .apply_proxy("opencode", "https://proxy.example/v1", None, &models)
+            .unwrap();
+        let json = reconciler.config_path("opencode").unwrap();
+        let managed = fs::read(&json).unwrap();
+        let jsonc = json.with_extension("jsonc");
+        let local = b"{\"model\":\"native/model\"}";
+        fs::write(&jsonc, local).unwrap();
+        assert!(
+            reconciler
+                .apply_proxy("opencode", "https://proxy.example/v1", None, &models)
+                .is_err()
+        );
+        assert!(reconciler.restore_native("opencode").is_err());
+        assert_eq!(fs::read(&json).unwrap(), managed);
+        assert_eq!(fs::read(&jsonc).unwrap(), local);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn opencode_updates_existing_jsonc_instead_of_shadowed_json() {
+        let root = temp_root();
+        let reconciler = disk_reconciler(&root);
+        let directory = reconciler.home.join(".config/opencode");
+        fs::create_dir_all(&directory).unwrap();
+        let json = directory.join("opencode.json");
+        let jsonc = directory.join("opencode.jsonc");
+        let lower_priority = br#"{"model":"other/model"}"#;
+        fs::write(&json, lower_priority).unwrap();
+        fs::write(
+            &jsonc,
+            "{\n // keep my preferences\n \"model\": \"native/model\",\n \"theme\": \"dark\"\n}\n",
+        )
+        .unwrap();
+
+        reconciler
+            .apply_proxy(
+                "opencode",
+                "https://proxy.example/v1",
+                None,
+                &["one".to_owned()],
+            )
+            .unwrap();
+        let applied = fs::read_to_string(&jsonc).unwrap();
+        assert!(applied.contains("fleet-cliproxy/one"));
+        assert!(applied.contains("// keep my preferences"));
+        assert_eq!(fs::read(&json).unwrap(), lower_priority);
+
+        reconciler
+            .apply_proxy(
+                "opencode",
+                "https://proxy.example/v1",
+                None,
+                &["two".to_owned()],
+            )
+            .unwrap();
+        assert!(
+            fs::read_to_string(&jsonc)
+                .unwrap()
+                .contains("fleet-cliproxy/two")
+        );
+        reconciler.restore_native("opencode").unwrap();
+        let restored = fs::read_to_string(&jsonc).unwrap();
+        assert!(restored.contains("native/model"));
+        assert!(restored.contains("// keep my preferences"));
+        assert!(!restored.contains(PROVIDER_NAME));
+        assert_eq!(fs::read(&json).unwrap(), lower_priority);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
     fn opencode_apply_and_native_restore_preserve_comments_and_credentials() {
         let root = temp_root();
         let key = root.join("state/api-key");

@@ -39,6 +39,8 @@ public static class FleetServerHosting
         builder.Services.AddHttpClient("cliproxy", client => client.Timeout = TimeSpan.FromSeconds(15))
             .ConfigurePrimaryHttpMessageHandler(() => new HttpClientHandler { AllowAutoRedirect = false });
         builder.Services.AddSingleton<CliProxyCatalog>();
+        builder.Services.AddSingleton<CliProxySyncService>();
+        builder.Services.AddHostedService(services => services.GetRequiredService<CliProxySyncService>());
         builder.Services.AddDbContext<FleetDbContext>((services, options) => options.UseNpgsql(
             builder.Configuration.GetConnectionString("Fleet") ?? throw new InvalidOperationException("ConnectionStrings:Fleet is required."),
             npgsql => npgsql.CommandTimeout(15)).AddInterceptors(services.GetRequiredService<DatabaseMetricsInterceptor>()));
@@ -161,6 +163,11 @@ public static class FleetServerHosting
             .RequireAuthorization("Operator").WithGroupName("operator");
         app.MapGet("/operator/v1/source/status", async (IFleetCoordinator coordinator, CancellationToken ct) =>
             Results.Ok(await coordinator.GetLatestSourceScanAsync(ct))).RequireAuthorization("Operator").WithGroupName("operator");
+        app.MapGet("/operator/v1/cliproxy/status", (CliProxyCatalog catalog) => Results.Ok(catalog.Status()))
+            .RequireAuthorization("Operator").WithGroupName("operator");
+        app.MapPost("/operator/v1/cliproxy/refresh", async (CliProxySyncService sync, CancellationToken ct) =>
+            Results.Ok(await sync.SyncNowAsync(true, ct)))
+            .RequireAuthorization("Operator").WithGroupName("operator");
         app.MapOpenApi().RequireAuthorization("Operator");
     }
 }

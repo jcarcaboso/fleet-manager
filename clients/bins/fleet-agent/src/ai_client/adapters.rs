@@ -31,7 +31,16 @@ impl Adapter {
     pub(super) fn config_path(self, reconciler: &Reconciler) -> PathBuf {
         match self {
             Self::Codex => reconciler.home.join(".codex/config.toml"),
-            Self::OpenCode => reconciler.home.join(".config/opencode/opencode.json"),
+            Self::OpenCode => {
+                let directory = reconciler.home.join(".config/opencode");
+                let jsonc = directory.join("opencode.jsonc");
+                // OpenCode loads JSONC after JSON, so update the overriding file.
+                if jsonc.symlink_metadata().is_ok() {
+                    jsonc
+                } else {
+                    directory.join("opencode.json")
+                }
+            }
         }
     }
 

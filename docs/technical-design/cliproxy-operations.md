@@ -41,13 +41,44 @@ for each client that should receive the catalog. No model or effort list is
 needed. The endpoint must use HTTPS and end at `/v1`.
 
 The Server fetches `/v1/models?client_version=0.154.0`, which requests CLIProxy's
-Codex catalog with advertised reasoning efforts. It caches the result in memory
-and refreshes on demand at most once per minute. Assigned Nodes retrieve it from
+Codex catalog with advertised reasoning efforts. A background service discovers
+endpoints assigned to active Nodes within 30 seconds and refreshes each catalog
+weekly, independently of repository polling and Agent requests. It only calls
+CLIProxy when a key and at least one current proxy Assignment are configured.
+The catalog is cached in memory; a Server restart triggers fresh discovery.
+Assigned Nodes retrieve the cached catalog from
 `GET /agent/v1/cliproxy/models` over mTLS during their normal reconciliation.
 Catalog changes do not require a YAML commit. The response includes the endpoint
 so an Agent cannot apply a catalog from a different Assignment.
 
+Set `Fleet__CliProxySyncIntervalSeconds` to change the refresh interval, in
+seconds. The default is `604800`, or seven days; the accepted range is 10 seconds
+to 30 days. In the homelab Compose deployment, set
+`FLEET_CLIPROXY_SYNC_INTERVAL_SECONDS` in `.env` and recreate the Server.
+This setting belongs to Server configuration, not `fleet.yml`.
+
+The dashboard has a separate **Refresh models** action and displays model counts,
+last successful refresh, next refresh, and failures. Operators can also call
+`GET /operator/v1/cliproxy/status` and `POST /operator/v1/cliproxy/refresh` with
+Operator authentication. Dashboard refresh requires the normal session and CSRF
+token. A manual refresh bypasses the scheduled deadline.
+
+Failed upstream refreshes retain the previous catalog and retry after one
+minute. Until initial discovery succeeds, the Agent model endpoint returns 503.
+Agent polling never triggers an upstream fetch. With no repository changes,
+Agents still reconcile active AI-client Assignments and update the CLI catalogs.
+If initial client setup fails with `ai_client_reconcile_failed`, the Server
+creates a new Attempt on a later poll after a one-minute backoff. The existing
+Assignment and desired revision remain unchanged, and failed Attempts stay in
+history. Pending work takes priority over retries. Fix persistent configuration
+or ownership failures to stop repeated failed Attempts.
+
 Codex receives effort choices in its catalog; OpenCode receives model variants.
+Fleet updates an existing `~/.config/opencode/opencode.jsonc`, because OpenCode
+loads it after `.json`. If no JSONC file exists, Fleet uses `opencode.json`.
+Comments and unrelated settings are preserved. Adding a JSONC override after
+Fleet has already taken ownership of a JSON config can cause an ownership
+conflict; resolve the configuration change before retrying.
 Older proxies that return only model identifiers still work, but Fleet does not
 invent effort choices when the proxy omits them. The upstream response behavior
 is defined by CLIProxy's [model handler](https://github.com/router-for-me/CLIProxyAPI/blob/main/sdk/api/handlers/openai/openai_handlers.go).
@@ -94,6 +125,35 @@ secret manager. Then recreate the Server:
 docker compose up -d --no-deps --force-recreate server
 ```
 
+## Dashboard diagnostics
+
+The dashboard's **Issues to resolve** section checks current assignments and
+Server records. It identifies missing CLIProxy credentials only when active
+Nodes require them, initial discovery still waiting, failed upstream refreshes,
+missing or failed repository sync, stale Node check-ins, and failed current
+Assignments. Each issue includes a recovery step and a link to the relevant
+section. Revoked Nodes and historical assignment failures are excluded.
+
+Use **Check again** after correcting configuration. Repository and model refresh
+actions also recheck diagnostics. A failed diagnostics request leaves an explicit
+warning rather than showing an all-clear result. The endpoint requires a signed-in
+dashboard session and never returns secret values or raw error bodies. It cannot
+inspect a remote secret manager or determine a running Agent's version; those
+checks still require service logs on the affected machine.
+
+## Diagnose a missing client configuration
+
+- Check the actual running Agent version and service executable, not only
+  `fleet-agent --version`. An upgraded Homebrew binary does not replace an
+  already running process; restart its service. Older binaries earlier on
+  `PATH` can also hide the installed version.
+- Confirm the Node has a current `ai-client/opencode` or `ai-client/codex`
+  Assignment, and inspect its latest attempt result and Agent logs.
+- Check model-sync status. `credential_unavailable` means the Server has no
+  `Fleet:CliProxyApiKey`; a repository assignment alone cannot supply it.
+- Check `~/.config/opencode/opencode.jsonc` as well as `.json`. The JSONC file
+  takes precedence. Fleet ownership conflicts leave both files intact.
+
 ## Failure and recovery checks
 
 - A revoked Node cannot poll or retrieve the shared proxy key. Revoke the proxy
@@ -127,3 +187,14 @@ release. It makes real model requests and may incur provider cost.
 - Back up the deployment's private configuration according to local policy and
   test PostgreSQL restore separately. A database dump does not contain the
   proxy key.
+
+## End-to-end verification
+
+Run `python3 scripts/smoke-cliproxy-sync.py --image LOCAL_IMAGE --agent PATH_TO_FLEET_AGENT`
+with a Server image and Agent built from the same checkout. The test uses a
+disposable Docker stack, a TLS CLIProxy fixture, and a real enrolled Agent. It
+checks initial failure and recovery without a source commit, scheduled refresh
+while the Agent is stopped, manual
+refresh, model and effort changes in Codex and OpenCode JSONC without a source
+revision change, outage retention, and native restoration. It makes no inference
+requests and removes its containers and volumes afterward.
