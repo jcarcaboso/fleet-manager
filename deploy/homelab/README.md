@@ -74,6 +74,11 @@ environment variable, depending on whether it launches Compose or the Server
 container directly. You can also set `FLEET_CLIPROXY_API_KEY` in `.env`; protect
 that file and keep it out of source control. Never put the key in `fleet.yml`.
 
+Model catalogs refresh weekly independently of Git. Set
+`FLEET_CLIPROXY_SYNC_INTERVAL_SECONDS` in `.env` to change the interval in seconds,
+then recreate the Server. The dashboard's **Refresh models** action runs a refresh
+immediately and shows the last result.
+
 Read the [CLIProxyAPI operations guide](../../docs/technical-design/cliproxy-operations.md)
 before publishing `fleet/v2` assignments. It covers the manifest, Agent-first
 rollout, key rotation, rollback, and release checks.

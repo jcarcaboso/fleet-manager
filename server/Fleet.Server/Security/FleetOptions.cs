@@ -20,6 +20,7 @@ public sealed class FleetOptions
     public string EnrollmentCaCertificatePath { get; set; } = "";
     // Optional deployment setting. The manifest never contains this credential.
     public string CliProxyApiKey { get; set; } = "";
+    [Range(10, 2592000)] public int CliProxySyncIntervalSeconds { get; set; } = 604800;
 
     public bool HasValidPublicUrl() => PublicUrl.Length == 0 ||
         (Uri.TryCreate(PublicUrl, UriKind.Absolute, out var uri) && uri.Scheme == "https" &&

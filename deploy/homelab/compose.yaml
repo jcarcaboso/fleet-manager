@@ -87,6 +87,7 @@ services:
     environment:
       <<: *server-environment
       Fleet__CliProxyApiKey: ${FLEET_CLIPROXY_API_KEY:-}
+      Fleet__CliProxySyncIntervalSeconds: ${FLEET_CLIPROXY_SYNC_INTERVAL_SECONDS:-604800}
     ports:
       - "${FLEET_BIND_IP:-127.0.0.1}:${FLEET_PORT:-7443}:7443"
     depends_on:

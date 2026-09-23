@@ -1,3 +1,4 @@
+using System.Collections.Concurrent;
 using System.Net.Http.Headers;
 using System.Text.Json;
 using Fleet.Server.Security;
@@ -12,53 +13,89 @@ public sealed class CliProxyCatalog(IHttpClientFactory clients, IOptions<FleetOp
 {
     private const int MaximumBytes = 4 * 1024 * 1024;
     private readonly SemaphoreSlim gate = new(1);
-    private string? cachedBaseUrl;
-    private IReadOnlyList<CliProxyModel>? cached;
-    private DateTimeOffset refreshAfter;
+    private sealed record Entry(IReadOnlyList<CliProxyModel>? Models, DateTimeOffset? LastSuccess,
+        DateTimeOffset NextRefresh, string Outcome, string? ErrorCode);
+    private readonly ConcurrentDictionary<string, Entry> entries = new(StringComparer.Ordinal);
 
-    public async Task<IReadOnlyList<CliProxyModel>?> GetAsync(string baseUrl, CancellationToken ct)
+    // Agent reads never contact the upstream API or wait for an in-progress refresh.
+    public Task<IReadOnlyList<CliProxyModel>?> GetAsync(string baseUrl, CancellationToken ct)
     {
-        if (!SourceTargetPublishers.TryNormalizeCliProxyBaseUrl(baseUrl, out var normalized) || normalized != baseUrl)
-            return null;
+        ct.ThrowIfCancellationRequested();
+        return Task.FromResult(options.Value.CliProxyApiKey.Length > 0 && entries.TryGetValue(baseUrl, out var entry)
+            ? entry.Models : null);
+    }
+
+    public object Status() => new
+    {
+        enabled = options.Value.CliProxyApiKey.Length > 0,
+        intervalSeconds = options.Value.CliProxySyncIntervalSeconds,
+        errorCode = options.Value.CliProxyApiKey.Length == 0 ? "credential_unavailable" : null,
+        catalogs = entries.OrderBy(pair => pair.Key, StringComparer.Ordinal).Select(pair => new
+        {
+            baseUrl = pair.Key,
+            modelCount = pair.Value.Models?.Count ?? 0,
+            lastSuccess = pair.Value.LastSuccess,
+            nextRefresh = pair.Value.NextRefresh,
+            outcome = pair.Value.Outcome,
+            errorCode = pair.Value.ErrorCode
+        }).ToArray()
+    };
+
+    public async Task SyncAsync(IEnumerable<string> baseUrls, bool force, CancellationToken ct)
+    {
         await gate.WaitAsync(ct);
         try
         {
-            if (cachedBaseUrl != baseUrl)
+            var active = options.Value.CliProxyApiKey.Length == 0 ? [] : baseUrls
+                .Where(url => SourceTargetPublishers.TryNormalizeCliProxyBaseUrl(url, out var normalized) && normalized == url)
+                .ToHashSet(StringComparer.Ordinal);
+            foreach (var url in entries.Keys.Where(url => !active.Contains(url)))
+                entries.TryRemove(url, out _);
+            foreach (var baseUrl in active)
             {
-                cachedBaseUrl = baseUrl;
-                cached = null;
-                refreshAfter = DateTimeOffset.MinValue;
-            }
-            if (options.Value.CliProxyApiKey.Length == 0) return null;
-            if (clock.GetUtcNow() < refreshAfter) return cached;
-            refreshAfter = clock.GetUtcNow().AddMinutes(1);
-            try
-            {
-                // CLIProxy's Codex response includes effort metadata omitted from the ordinary list.
-                using var request = new HttpRequestMessage(HttpMethod.Get, baseUrl + "/models?client_version=0.154.0");
-                request.Headers.Authorization = new AuthenticationHeaderValue("Bearer", options.Value.CliProxyApiKey);
-                using var timeout = CancellationTokenSource.CreateLinkedTokenSource(ct);
-                timeout.CancelAfter(TimeSpan.FromSeconds(15));
-                using var response = await clients.CreateClient("cliproxy").SendAsync(request, HttpCompletionOption.ResponseHeadersRead, timeout.Token);
-                response.EnsureSuccessStatusCode();
-                if (response.Content.Headers.ContentLength > MaximumBytes) return cached;
-                await using var stream = await response.Content.ReadAsStreamAsync(timeout.Token);
-                using var bytes = new MemoryStream();
-                var buffer = new byte[8192];
-                int count;
-                while ((count = await stream.ReadAsync(buffer, timeout.Token)) != 0)
+                entries.TryGetValue(baseUrl, out var previous);
+                if (!force && previous is not null && clock.GetUtcNow() < previous.NextRefresh) continue;
+                var next = new Entry(previous?.Models, previous?.LastSuccess, clock.GetUtcNow().AddMinutes(1), "failed", null);
+                try
                 {
-                    if (bytes.Length + count > MaximumBytes) return cached;
-                    bytes.Write(buffer, 0, count);
+                    // CLIProxy's Codex response includes effort metadata omitted from the ordinary list.
+                    using var request = new HttpRequestMessage(HttpMethod.Get, baseUrl + "/models?client_version=0.154.0");
+                    request.Headers.Authorization = new AuthenticationHeaderValue("Bearer", options.Value.CliProxyApiKey);
+                    using var timeout = CancellationTokenSource.CreateLinkedTokenSource(ct);
+                    timeout.CancelAfter(TimeSpan.FromSeconds(15));
+                    using var response = await clients.CreateClient("cliproxy").SendAsync(request, HttpCompletionOption.ResponseHeadersRead, timeout.Token);
+                    response.EnsureSuccessStatusCode();
+                    if (response.Content.Headers.ContentLength > MaximumBytes) throw new InvalidDataException("Oversized CLIProxy catalog.");
+                    await using var stream = await response.Content.ReadAsStreamAsync(timeout.Token);
+                    using var bytes = new MemoryStream();
+                    var buffer = new byte[8192];
+                    int count;
+                    while ((count = await stream.ReadAsync(buffer, timeout.Token)) != 0)
+                    {
+                        if (bytes.Length + count > MaximumBytes) throw new InvalidDataException("Oversized CLIProxy catalog.");
+                        bytes.Write(buffer, 0, count);
+                    }
+                    next = new Entry(Parse(bytes.ToArray()), clock.GetUtcNow(),
+                        clock.GetUtcNow().AddSeconds(options.Value.CliProxySyncIntervalSeconds), "succeeded", null);
                 }
-                cached = Parse(bytes.ToArray());
+                catch (Exception error) when (error is HttpRequestException or JsonException or IOException or InvalidDataException ||
+                                             error is OperationCanceledException && !ct.IsCancellationRequested)
+                {
+                    // Keep the last valid catalog during an upstream outage; never expose credentials or bodies.
+                    next = next with
+                    {
+                        ErrorCode = error switch
+                        {
+                            HttpRequestException { StatusCode: { } status } => $"upstream_http_{(int)status}",
+                            HttpRequestException => "upstream_unreachable",
+                            OperationCanceledException => "upstream_timeout",
+                            JsonException or InvalidDataException => "invalid_catalog",
+                            _ => "upstream_read_failed"
+                        }
+                    };
+                }
+                entries[baseUrl] = next;
             }
-            catch (Exception error) when (error is HttpRequestException or JsonException or IOException or InvalidDataException ||
-                                         error is OperationCanceledException && !ct.IsCancellationRequested)
-            {
-                // Keep the last valid catalog during an upstream outage; never log credentials or bodies.
-            }
-            return cached;
         }
         finally { gate.Release(); }
     }

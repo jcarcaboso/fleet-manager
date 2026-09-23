@@ -495,12 +495,14 @@ public sealed class PostgresFleetCoordinator(
         if (contactedAt > clock.GetUtcNow() + TimeSpan.FromMinutes(5))
             throw Error("invalid_contact_time", "Node contact time is too far in the future.");
         await Authenticate(authentication, contactedAt, true, cancellationToken);
+        await RetryFailedAiAssignment(authentication.NodeId.Value, targetName, cancellationToken);
         var assignment = await db.Assignments.AsNoTracking().Where(x => x.NodeId == authentication.NodeId.Value && x.IsCurrent &&
                 (x.State == (int)ConvergenceState.Pending || x.State == (int)ConvergenceState.Applying) &&
                 (targetName == null || x.TargetName == targetName))
             .OrderBy(x => x.TargetName).FirstOrDefaultAsync(cancellationToken);
         if (assignment is null) return new(null);
-        var attempt = await db.Attempts.AsNoTracking().SingleAsync(x => x.AssignmentId == assignment.Id, cancellationToken);
+        var attempt = await db.Attempts.AsNoTracking().SingleAsync(x => x.AssignmentId == assignment.Id &&
+            (x.State == (int)ConvergenceState.Pending || x.State == (int)ConvergenceState.Applying), cancellationToken);
         var skills = await (from item in db.AssignmentSkills
                             join bundle in db.Bundles on item.BundleDigest equals bundle.Digest
                             where item.AssignmentId == assignment.Id
@@ -520,6 +522,45 @@ public sealed class PostgresFleetCoordinator(
             .SingleOrDefaultAsync(cancellationToken);
         return new(new(new(assignment.Id), new(attempt.Id), new(assignment.RolloutId), new(assignment.DesiredRevisionId),
             assignment.TargetName, new(assignment.TargetBase, assignment.TargetPath), skills, file, aiClient));
+    }
+
+    private async Task RetryFailedAiAssignment(Guid nodeId, string? targetName, CancellationToken ct)
+    {
+        if (await db.Assignments.AnyAsync(x => x.NodeId == nodeId && x.IsCurrent &&
+            (targetName == null || x.TargetName == targetName) &&
+            (x.State == (int)ConvergenceState.Pending || x.State == (int)ConvergenceState.Applying), ct)) return;
+        var cutoff = clock.GetUtcNow().AddMinutes(-1);
+        var candidate = await db.Assignments.AsNoTracking()
+            .Where(x => x.NodeId == nodeId && x.IsCurrent && x.State == (int)ConvergenceState.Failed &&
+                (targetName == null || x.TargetName == targetName) &&
+                db.AssignmentAiClients.Any(client => client.AssignmentId == x.Id) &&
+                db.Attempts.Where(attempt => attempt.AssignmentId == x.Id).OrderByDescending(attempt => attempt.UpdatedAt)
+                    .Select(attempt => attempt.ErrorCode).First() == "ai_client_reconcile_failed" &&
+                !db.Attempts.Any(attempt => attempt.AssignmentId == x.Id && attempt.UpdatedAt > cutoff))
+            .OrderBy(x => x.TargetName).Select(x => (Guid?)x.Id).FirstOrDefaultAsync(ct);
+        if (candidate is not { } assignmentId) return;
+        await using var transaction = await db.Database.BeginTransactionAsync(IsolationLevel.ReadCommitted, ct);
+        var assignment = await db.Assignments.FromSqlInterpolated($"SELECT * FROM assignments WHERE \"Id\" = {assignmentId} FOR UPDATE")
+            .SingleAsync(ct);
+        // A concurrent poll or publication may already have changed the assignment.
+        await db.Entry(assignment).ReloadAsync(ct);
+        if (!assignment.IsCurrent || assignment.State != (int)ConvergenceState.Failed) return;
+        var last = await db.Attempts.AsNoTracking().Where(x => x.AssignmentId == assignmentId)
+            .OrderByDescending(x => x.UpdatedAt).FirstAsync(ct);
+        if (last.State != (int)ConvergenceState.Failed || last.ErrorCode != "ai_client_reconcile_failed" ||
+            last.UpdatedAt > cutoff) return;
+        assignment.State = (int)ConvergenceState.Pending;
+        db.Attempts.Add(new AttemptRow
+        {
+            Id = Guid.NewGuid(),
+            AssignmentId = assignment.Id,
+            RolloutId = assignment.RolloutId,
+            NodeId = nodeId,
+            State = (int)ConvergenceState.Pending,
+            UpdatedAt = clock.GetUtcNow()
+        });
+        await db.SaveChangesAsync(ct);
+        await transaction.CommitAsync(ct);
     }
 
     public async Task<string> AuthorizeCliProxyCredentialAsync(NodeAuthentication authentication, CancellationToken cancellationToken = default)

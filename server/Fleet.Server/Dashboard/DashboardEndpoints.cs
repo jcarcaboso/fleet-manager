@@ -6,6 +6,7 @@ using System.Text.Json;
 using Fleet.Core.Coordination;
 using Fleet.Server.Hosting;
 using Fleet.Server.Security;
+using Fleet.Server.Transport;
 using Microsoft.AspNetCore.Antiforgery;
 using Microsoft.AspNetCore.Authentication;
 using Microsoft.AspNetCore.DataProtection;
@@ -127,6 +128,10 @@ public static class DashboardEndpoints
         authenticated.MapPost("/source/rescan", async (SourcePollingService source, HttpContext http, CancellationToken ct) =>
             Results.Ok(await source.ScanNowAsync(Actor(http), ct)))
             .WithRequestTimeout(TimeSpan.FromSeconds(app.Configuration.GetValue("Source:ScanTimeoutSeconds", 180) + 30));
+        authenticated.MapGet("/diagnostics", DashboardDiagnostics.ReadAsync);
+        authenticated.MapGet("/cliproxy/status", (CliProxyCatalog catalog) => Results.Ok(catalog.Status()));
+        authenticated.MapPost("/cliproxy/refresh", async (CliProxySyncService sync, CancellationToken ct) =>
+            Results.Ok(await sync.SyncNowAsync(true, ct)));
         authenticated.MapGet("/session", (HttpContext http) => Results.Ok(new { actor = Actor(http) }));
         authenticated.MapPost("/logout", async (HttpContext http) =>
         {

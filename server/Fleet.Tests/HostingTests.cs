@@ -5,6 +5,7 @@ using System.Security.Cryptography.X509Certificates;
 using System.Text;
 using System.Text.Json;
 using Fleet.Core.Coordination;
+using Fleet.Server.Hosting;
 using Fleet.Server.Persistence;
 using Fleet.Server.Security;
 using Microsoft.AspNetCore.Hosting;
@@ -63,6 +64,42 @@ public sealed class HostingTests : IAsyncLifetime
     }
 
     [Fact]
+    public async Task Dashboard_diagnostics_require_login_and_identify_current_configuration_failures()
+    {
+        using var browser = _factory.CreateClient(new() { BaseAddress = new Uri("https://localhost") });
+        Assert.Equal(HttpStatusCode.Unauthorized, (await browser.GetAsync("/dashboard/api/diagnostics")).StatusCode);
+        browser.DefaultRequestHeaders.Add("Origin", "https://localhost");
+        await DashboardCsrf(browser);
+        (await browser.PostAsJsonAsync("/dashboard/api/login", new { token = Token })).EnsureSuccessStatusCode();
+        using var scope = _factory.Services.CreateScope();
+        var options = scope.ServiceProvider.GetRequiredService<Microsoft.Extensions.Options.IOptions<FleetOptions>>().Value;
+        options.CliProxyApiKey = "";
+        var initial = await browser.GetFromJsonAsync<JsonElement>("/dashboard/api/diagnostics");
+        Assert.DoesNotContain(initial.GetProperty("issues").EnumerateArray(), issue => issue.GetProperty("code").GetString() == "cliproxy_key_missing");
+        var enrolled = await EnrollNode("diagnostic-node");
+        var coordinator = scope.ServiceProvider.GetRequiredService<IFleetCoordinator>();
+        await coordinator.AcceptSourceSnapshotAsync(new("diagnostics", [], [new SnapshotTarget(enrolled.NodeId,
+            "ai-client/opencode", new("home", ".config/opencode"), [],
+            AiClient: new("fleet.ai-client/v1", "opencode", "cliproxy", "https://proxy.example/v1"))], [], DateTimeOffset.UtcNow));
+        var db = scope.ServiceProvider.GetRequiredService<FleetDbContext>();
+        await db.Assignments.Where(row => row.NodeId == enrolled.NodeId.Value).ExecuteUpdateAsync(set => set.SetProperty(row => row.State, (int)ConvergenceState.Failed));
+        await db.Nodes.Where(row => row.Id == enrolled.NodeId.Value).ExecuteUpdateAsync(set => set.SetProperty(row => row.LastContactAt, DateTimeOffset.UtcNow.AddDays(-1)));
+        var result = await browser.GetFromJsonAsync<JsonElement>("/dashboard/api/diagnostics");
+        var codes = result.GetProperty("issues").EnumerateArray().Select(issue => issue.GetProperty("code").GetString()).ToArray();
+        Assert.Contains("cliproxy_key_missing", codes);
+        Assert.Contains("assignment_failed", codes);
+        Assert.Contains("nodes_not_contacting", codes);
+        Assert.Contains("source_not_configured", codes);
+        Assert.DoesNotContain(CliProxyKey, result.ToString());
+        await db.Nodes.Where(row => row.Id == enrolled.NodeId.Value).ExecuteUpdateAsync(set => set.SetProperty(row => row.RevokedAt, DateTimeOffset.UtcNow));
+        result = await browser.GetFromJsonAsync<JsonElement>("/dashboard/api/diagnostics");
+        codes = result.GetProperty("issues").EnumerateArray().Select(issue => issue.GetProperty("code").GetString()).ToArray();
+        Assert.DoesNotContain("cliproxy_key_missing", codes);
+        Assert.DoesNotContain("assignment_failed", codes);
+        Assert.DoesNotContain("nodes_not_contacting", codes);
+    }
+
+    [Fact]
     public async Task Dashboard_source_sync_requires_session_origin_and_csrf_and_matches_operator_rescan()
     {
         using var browser = _factory.CreateClient(new() { BaseAddress = new Uri("https://localhost") });
@@ -85,6 +122,24 @@ public sealed class HostingTests : IAsyncLifetime
         var operatorResponse = await _operator.PostAsync("/operator/v1/source/rescan", null);
         operatorResponse.EnsureSuccessStatusCode();
         Assert.Equal(result.ToString(), (await operatorResponse.Content.ReadFromJsonAsync<JsonElement>()).ToString());
+    }
+
+    [Fact]
+    public async Task Dashboard_proxy_refresh_requires_session_and_csrf()
+    {
+        using var browser = _factory.CreateClient(new() { BaseAddress = new Uri("https://localhost") });
+        browser.DefaultRequestHeaders.Add("Origin", "https://localhost");
+        await DashboardCsrf(browser);
+        Assert.Equal(HttpStatusCode.Unauthorized, (await browser.PostAsync("/dashboard/api/cliproxy/refresh", null)).StatusCode);
+        Assert.Equal(HttpStatusCode.Unauthorized, (await browser.GetAsync("/dashboard/api/cliproxy/status")).StatusCode);
+        (await browser.PostAsJsonAsync("/dashboard/api/login", new { token = Token })).EnsureSuccessStatusCode();
+        browser.DefaultRequestHeaders.Remove("X-Fleet-CSRF");
+        Assert.Equal(HttpStatusCode.BadRequest, (await browser.PostAsync("/dashboard/api/cliproxy/refresh", null)).StatusCode);
+        await DashboardCsrf(browser);
+        (await browser.PostAsync("/dashboard/api/cliproxy/refresh", null)).EnsureSuccessStatusCode();
+        var status = await browser.GetFromJsonAsync<JsonElement>("/dashboard/api/cliproxy/status");
+        Assert.True(status.GetProperty("enabled").GetBoolean());
+        Assert.Empty(status.GetProperty("catalogs").EnumerateArray());
     }
 
     [Fact]
@@ -343,6 +398,10 @@ public sealed class HostingTests : IAsyncLifetime
             await scope.ServiceProvider.GetRequiredService<IFleetCoordinator>().AcceptSourceSnapshotAsync(new(
                 "cliproxy-assignment", [], [proxyTarget], [], DateTimeOffset.UtcNow));
 
+        (await _operator.PostAsync("/operator/v1/cliproxy/refresh", null)).EnsureSuccessStatusCode();
+        var status = await _operator.GetFromJsonAsync<JsonElement>("/operator/v1/cliproxy/status");
+        Assert.Equal(604800, status.GetProperty("intervalSeconds").GetInt32());
+        Assert.Equal(1, Assert.Single(status.GetProperty("catalogs").EnumerateArray()).GetProperty("modelCount").GetInt32());
         var route = $"/agent/v1/cliproxy/{resource}";
         var allowed = await SendNodeAsync(route, assigned.Certificate, method: "GET");
 
@@ -379,6 +438,9 @@ public sealed class HostingTests : IAsyncLifetime
         Assert.Equal(403, (await SendNodeAsync(route, assigned.Certificate, method: "GET")).Response.StatusCode);
         (await _operator.PostAsync($"/operator/v1/nodes/{assigned.NodeId.Value:D}/revoke", null)).EnsureSuccessStatusCode();
         Assert.Equal(401, (await SendNodeAsync(route, assigned.Certificate, method: "GET")).Response.StatusCode);
+        (await _operator.PostAsync("/operator/v1/cliproxy/refresh", null)).EnsureSuccessStatusCode();
+        status = await _operator.GetFromJsonAsync<JsonElement>("/operator/v1/cliproxy/status");
+        Assert.Empty(status.GetProperty("catalogs").EnumerateArray());
     }
 
     [Fact]

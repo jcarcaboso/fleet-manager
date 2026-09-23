@@ -55,7 +55,7 @@ and user service. It works with the deployed Server 0.2.0 API.
 
 The 0.6.0 integration adds strict `fleet/v2` parsing and typed
 AI-client Assignments for Codex and OpenCode. Assigned Nodes retrieve a
-deployment-configured CLIProxyAPI key over mTLS, discover and cache models, and
+deployment-configured CLIProxyAPI key and model catalog over mTLS, and
 edit only Fleet-owned client settings with receipt and journal recovery.
 `fleet/v1` remains available for repositories that manage only Skills and Agent
 instruction files. See the [operations guide](technical-design/cliproxy-operations.md)
@@ -66,6 +66,12 @@ OpenCode adapters from shared reconciliation, and Server composition and
 target publication from startup and Git scanning. Wire formats, receipt and
 journal formats, and database transactions are unchanged. See
 [Extending Fleet](technical-design/extending-fleet.md) for the module boundaries.
+
+CLIProxy model discovery now runs on an independent Server schedule, weekly by
+default with a configurable interval. Operator and dashboard actions refresh
+models separately from repository ingestion and show catalog status. Agents
+update active client catalogs even when the source revision does not change;
+OpenCode reconciliation respects an existing JSONC configuration.
 
 Still required for the full POC:
 

@@ -30,11 +30,15 @@ function clearLink() { $('#enrollment-link').value = ''; $('#link-result').hidde
 function showLogin() {
   $('#login-panel').hidden = false; $('#workspace').hidden = true; $('#logout').hidden = true;
   $('#actor').textContent = ''; $('#nodes').replaceChildren(); clearLink();
+  $('#diagnostics-issues').replaceChildren(); $('#diagnostics-checked').textContent = '';
   $('#source-result').textContent = '';
+  $('#models-result').textContent = ''; $('#model-catalogs').replaceChildren();
 }
 async function showWorkspace(actor) {
   $('#login-panel').hidden = true; $('#workspace').hidden = false; $('#logout').hidden = false;
   $('#actor').textContent = actor; await renewCsrf(); await nodes(false);
+  await diagnostics();
+  await modelStatus().catch(error => { $('#models-result').textContent = error.message; });
 }
 async function nodes(append) {
   const page = await api('/nodes' + (append && nextCursor ? '?after=' + encodeURIComponent(nextCursor) : ''));
@@ -120,11 +124,69 @@ $('#sync-source').addEventListener('click', async () => {
       failed: 'Repository sync failed. Check the server source status and Git access. Current assignments remain active.'
     };
     $('#source-result').textContent = outcomes[result.outcome] || 'The server returned an unknown sync result. Check source status before retrying.';
+    await diagnostics();
   } catch (error) {
     $('#source-result').textContent = error.message + ' Sync completion could not be confirmed.';
   } finally { button.disabled = false; }
 });
-$('#refresh').addEventListener('click', () => nodes(false).catch(error => message(error.message)));
+async function diagnostics() {
+  const button = $('#refresh-diagnostics');
+  button.disabled = true;
+  try {
+    const result = await api('/diagnostics');
+    const list = $('#diagnostics-issues'); list.replaceChildren();
+    const count = result.issues.length;
+    $('#diagnostics-count').textContent = String(count); $('#diagnostics-count').hidden = !count;
+    $('#diagnostics-summary').textContent = count ? 'Configuration and sync problems that need your attention.' : 'No issues detected in configuration, model sync, repository sync or Agent check-ins.';
+    for (const issue of result.issues) {
+      const card = document.createElement('article'); card.className = 'diagnostic-issue ' + (issue.severity === 'error' ? 'issue-error' : 'issue-warning');
+      const heading = document.createElement('div'); heading.className = 'issue-heading';
+      const badge = document.createElement('span'); badge.className = 'issue-severity'; badge.textContent = issue.severity === 'error' ? 'Needs attention' : 'Check';
+      const title = document.createElement('h3'); title.textContent = issue.title; heading.append(badge, title);
+      const detail = document.createElement('p'); detail.textContent = issue.detail;
+      const action = document.createElement('p'); action.className = 'issue-action'; action.textContent = issue.action;
+      card.append(heading, detail, action);
+      if (['models', 'repository', 'nodes-section'].includes(issue.section)) {
+        const link = document.createElement('a'); link.href = '#' + issue.section;
+        link.textContent = {models: 'View model sync', repository: 'View repository sync', 'nodes-section': 'View nodes'}[issue.section]; card.append(link);
+      }
+      list.append(card);
+    }
+    $('#diagnostics-checked').textContent = 'Checked ' + new Date(result.checkedAt).toLocaleString() + '. Status reflects the Server’s latest records.';
+  } catch (error) {
+    $('#diagnostics-summary').textContent = 'Could not check diagnostics. ' + error.message;
+    $('#diagnostics-checked').textContent = 'Previous results may be out of date.';
+  } finally { button.disabled = false; }
+}
+$('#refresh-diagnostics').addEventListener('click', diagnostics);
+function showModels(status) {
+  const seconds = status.intervalSeconds;
+  const interval = seconds % 86400 === 0 ? `${seconds / 86400} day(s)` :
+    seconds % 3600 === 0 ? `${seconds / 3600} hour(s)` : `${seconds} seconds`;
+  $('#sync-models').disabled = !status.enabled;
+  $('#models-result').textContent = !status.enabled ? 'Model sync is disabled. Configure the CLIProxy API key on the Server.' :
+    !status.catalogs.length ? 'No active Nodes are assigned to CLIProxy. Enable a client in the repository and sync it first.' :
+    `Automatic refresh every ${interval}. Agents fetch updated catalogs on their next poll.`;
+  const list = $('#model-catalogs'); list.replaceChildren();
+  for (const catalog of status.catalogs) {
+    const item = document.createElement('li');
+    const last = catalog.lastSuccess ? new Date(catalog.lastSuccess).toLocaleString() : 'never';
+    const next = new Date(catalog.nextRefresh).toLocaleString();
+    const error = catalog.errorCode ? ` Refresh failed (${catalog.errorCode}); ${catalog.modelCount ? 'keeping the previous catalog' : 'no catalog is available yet'}.` : '';
+    item.textContent = `${catalog.baseUrl}: ${catalog.modelCount} models. Last successful refresh: ${last}. Next refresh: ${next}.${error}`;
+    list.append(item);
+  }
+}
+async function modelStatus() { showModels(await api('/cliproxy/status')); }
+$('#sync-models').addEventListener('click', async () => {
+  const button = $('#sync-models');
+  if (button.disabled) return;
+  button.disabled = true;
+  $('#models-result').textContent = 'Fetching models from CLIProxy…';
+  try { showModels(await api('/cliproxy/refresh', {})); await diagnostics(); }
+  catch (error) { $('#models-result').textContent = error.message + ' Model refresh could not be confirmed.'; button.disabled = false; }
+});
+$('#refresh').addEventListener('click', () => Promise.all([nodes(false), modelStatus()]).catch(error => message(error.message)));
 $('#more').addEventListener('click', () => nodes(true).catch(error => message(error.message)));
 addEventListener('pagehide', () => { $('#operator-token').value = ''; clearLink(); });
 (async () => {
