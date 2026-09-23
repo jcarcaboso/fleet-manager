@@ -100,11 +100,11 @@ public static class FleetEndpoints
                 : Results.Bytes(Encoding.UTF8.GetBytes(credential), "application/octet-stream");
         });
         agents.MapGet("/cliproxy/models", async (HttpContext context, IFleetCoordinator coordinator,
-            CliProxyCatalog catalog, CancellationToken ct) =>
+            CliProxySelectionStore selection, CancellationToken ct) =>
         {
             var baseUrl = await coordinator.AuthorizeCliProxyCredentialAsync(Node(context), ct);
             context.Response.Headers.CacheControl = "no-store";
-            var models = await catalog.GetAsync(baseUrl, ct);
+            var models = await selection.GetSelectedAsync(baseUrl, ct);
             return models is null
                 ? Results.Json(new { code = "cliproxy_models_unavailable" }, statusCode: StatusCodes.Status503ServiceUnavailable)
                 : Results.Ok(new { baseUrl, models });

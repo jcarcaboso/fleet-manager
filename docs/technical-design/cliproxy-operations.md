@@ -58,7 +58,25 @@ to 30 days. In the homelab Compose deployment, set
 This setting belongs to Server configuration, not `fleet.yml`.
 
 The dashboard has a separate **Refresh models** action and displays model counts,
-last successful refresh, next refresh, and failures. Operators can also call
+last successful refresh, next refresh, and failures. The **Model selection** panel
+groups the current catalog by model family for each proxy endpoint. Operators can
+turn off a family or individual models, then save the selection. Fleet persists the
+selection on the Server and sends only selected models to assigned Agents on their
+next poll. At least one model must remain selected; a model pinned as a client's
+default in `fleet.yml` cannot be excluded while that Assignment is current.
+
+Selections follow the live catalog rather than a fixed model list. A new model in
+an existing family inherits that family's setting unless it has an individual
+override. A newly discovered family follows the **Enable newly discovered families
+by default** setting. Removed models no longer appear in the dashboard or Agent
+catalog, but their saved override takes effect again if the same ID returns.
+The selection is preserved across Server restarts and can be changed without a
+repository commit. The dashboard reloads and asks for review if another operator
+saved a selection first. If catalog churn leaves no selected model, the Agent
+endpoint returns 503 so Nodes retain their last valid catalog until the
+selection or upstream catalog is corrected.
+
+Operators can also call
 `GET /operator/v1/cliproxy/status` and `POST /operator/v1/cliproxy/refresh` with
 Operator authentication. Dashboard refresh requires the normal session and CSRF
 token. A manual refresh bypasses the scheduled deadline.
