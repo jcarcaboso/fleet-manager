@@ -133,7 +133,9 @@ No `fleet.yml` change is needed. Do not remove the old proxy key before all
 Nodes have refreshed. An offline Node keeps its previous owner-only key and
 model cache until it reconnects.
 
-To disable proxy use on a Node, publish `mode: native` for each managed client.
+To disable proxy use on a Node, publish `mode: native` for each managed client,
+or remove its `ai-clients` entry. A removed proxy-managed entry receives a
+native restoration Assignment before Fleet stops managing its connection.
 The Agent restores the original Fleet-owned configuration fields and leaves
 OAuth credentials untouched. After all proxy Assignments are gone, remove the
 key from its actual source. That might be the launching shell, `.env`, or a

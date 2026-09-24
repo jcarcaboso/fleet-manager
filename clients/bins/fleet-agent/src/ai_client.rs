@@ -605,6 +605,50 @@ mod tests {
     }
 
     #[test]
+    fn removing_proxy_restores_existing_native_auth_for_both_clients() {
+        for client in ["codex", "opencode"] {
+            let root = temp_root();
+            let reconciler = disk_reconciler(&root);
+            let (config_path, auth_path, native_config) = if client == "codex" {
+                let directory = reconciler.home.join(".codex");
+                fs::create_dir_all(&directory).unwrap();
+                (
+                    directory.join("config.toml"),
+                    directory.join("auth.json"),
+                    "# native Codex login\nmodel = \"gpt-6-sol\"\n",
+                )
+            } else {
+                let directory = reconciler.home.join(".config/opencode");
+                let auth_directory = reconciler.home.join(".local/share/opencode");
+                fs::create_dir_all(&directory).unwrap();
+                fs::create_dir_all(&auth_directory).unwrap();
+                (
+                    directory.join("opencode.json"),
+                    auth_directory.join("auth.json"),
+                    "{\"model\":\"openai/gpt-6-sol\"}\n",
+                )
+            };
+            let native_auth = b"{\"openai\":{\"token\":\"native-auth\"}}";
+            fs::write(&config_path, native_config).unwrap();
+            fs::write(&auth_path, native_auth).unwrap();
+            reconciler
+                .apply_proxy(
+                    client,
+                    "https://proxy.example/v1",
+                    None,
+                    &["proxy-model".to_owned()],
+                )
+                .unwrap();
+            reconciler.restore_native(client).unwrap();
+            let restored = fs::read_to_string(&config_path).unwrap();
+            assert!(restored.contains("gpt-6-sol"));
+            assert!(!restored.contains(PROVIDER_NAME));
+            assert_eq!(fs::read(&auth_path).unwrap(), native_auth);
+            fs::remove_dir_all(root).unwrap();
+        }
+    }
+
+    #[test]
     fn url_and_cache_validation_fail_closed() {
         for url in [
             "http://proxy.example/v1",

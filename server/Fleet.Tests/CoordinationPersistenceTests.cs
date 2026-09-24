@@ -198,6 +198,32 @@ public sealed class CoordinationPersistenceTests : IAsyncLifetime
     }
 
     [Fact]
+    public async Task Removing_proxy_clients_publishes_native_restoration_without_renewing_it()
+    {
+        await using var db = Database();
+        var coordinator = Coordinator(db);
+        var node = await Enroll(coordinator, "remove-ai");
+        var codex = new SnapshotTarget(node.NodeId, "ai-client/codex", new("home", ".codex"), [],
+            AiClient: new("fleet.ai-client/v1", "codex", "cliproxy", "https://proxy.example/v1"));
+        var opencode = new SnapshotTarget(node.NodeId, "ai-client/opencode", new("home", ".config/opencode"), [],
+            AiClient: new("fleet.ai-client/v1", "opencode", "cliproxy", "https://proxy.example/v1"));
+        await coordinator.AcceptSourceSnapshotAsync(Snapshot("proxy", [], codex, opencode));
+
+        var removed = await coordinator.AcceptSourceSnapshotAsync(Snapshot("removed", []));
+        Assert.Equal(2, removed.ChangedAssignmentCount);
+        foreach (var client in new[] { "codex", "opencode" })
+        {
+            var assignment = (await coordinator.PollTargetAsync(node.Authentication, $"ai-client/{client}", clock.GetUtcNow())).Assignment!;
+            Assert.Equal("native", assignment.AiClient!.Mode);
+            await coordinator.ReportAttemptAsync(node.Authentication,
+                new(assignment.AttemptId, ConvergenceState.Succeeded, null, null, clock.GetUtcNow()));
+        }
+        var denied = await Assert.ThrowsAsync<CoordinationException>(() => coordinator.AuthorizeCliProxyCredentialAsync(node.Authentication));
+        Assert.Equal("cliproxy_credential_not_authorized", denied.Code);
+        Assert.Equal(0, (await coordinator.AcceptSourceSnapshotAsync(Snapshot("still-removed", []))).ChangedAssignmentCount);
+    }
+
+    [Fact]
     public async Task Concurrent_exact_enrollment_consumption_creates_one_node_and_returns_one_retry()
     {
         EnrollmentAuthorization authorization;

@@ -188,9 +188,12 @@ nodes:
           mode: native
 ```
 
-An omitted AI client is unmanaged. `cliproxy` publishes the normalized
-Workspace endpoint and optional default model but never the API key. `native` instructs
-the Agent to remove Fleet-owned proxy settings without handling OAuth. The
+An AI client omitted before Fleet has managed it is unmanaged. Removing a
+previously proxy-managed client publishes a native restoration Assignment;
+after it succeeds, later publications do not reapply it. `cliproxy` publishes
+the normalized Workspace endpoint and optional default model but never the
+API key. `native` instructs the Agent to remove Fleet-owned proxy settings
+without handling OAuth. The
 operator signs in locally through the AI client's normal flow. The Server reads
 the proxy API key from the optional `Fleet:CliProxyApiKey` setting and
 serves it only to Nodes with a current `cliproxy` Assignment.
@@ -200,8 +203,8 @@ aliases, resolved by the Server to stable internal Node IDs. The alias is the
 exact, case-sensitive name supplied at enrollment. The YAML supplies desired
 configuration without an `id` field:
 
-- an enrolled Node missing from the YAML remains registered but receives no new
-  Assignment;
+- an enrolled Node missing from the YAML remains registered; previously
+  proxy-managed AI clients receive native restoration Assignments;
 - an unknown Node alias makes source validation fail;
 - aliases remain reserved after revocation and cannot identify a replacement
   Node; and
