@@ -16,8 +16,8 @@ configured Workspace ID.
 
 Enrollment consumption locks the authorization row. An exact retry for the same
 certificate request can retrieve the original response until `RetryUntil`.
-Credential renewal locks the Node and active credential before it writes the
-replacement. Node revocation takes the same Node lock before revoking every
+Credential renewal locks the Node and non-revoked credential before it writes the
+replacement. Expiration does not block renewal, but does block normal operations. Node revocation takes the same Node lock before revoking every
 credential. This gives renewal and revocation one database order.
 
 Publication takes a PostgreSQL transaction advisory lock for the Workspace,

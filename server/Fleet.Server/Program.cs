@@ -20,8 +20,8 @@ builder.WebHost.ConfigureKestrel((context, options) =>
         https.ClientCertificateMode = ClientCertificateMode.AllowCertificate;
         https.ClientCertificateValidation = (certificate, _, _) =>
         {
-            // Chain trust and active credential authorization are checked again for every Node request.
-            return options.ApplicationServices.GetRequiredService<NodeCertificateIssuer>().ValidateChain(certificate);
+            // Admit expired certificates for renewal; HTTP authentication enforces endpoint-specific validity.
+            return options.ApplicationServices.GetRequiredService<NodeCertificateIssuer>().ValidateChain(certificate, allowExpired: true);
         };
     });
 });

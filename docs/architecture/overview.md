@@ -237,10 +237,14 @@ not a second independently mutable truth.
 - Before enrollment, the Agent generates a P-256 key pair and proves possession
   through a signed certificate request.
 - The Server issues a short-lived X.509 client certificate bound to one Node.
-- Every ongoing Agent operation uses mTLS and an active Node and credential
-  check.
-- Node credentials renew, support immediate revocation, and can be replaced only
-  through an Operator-authorized recovery flow.
+- Every ongoing Agent operation uses mTLS and a non-revoked Node and credential
+  check. Normal operations also require a currently valid certificate.
+- An Agent that reconnects after its certificate expires automatically renews
+  through `/agent/v1/credentials/renew`, proving possession of its existing
+  private key over mTLS before installing a new key and certificate. Only this
+  endpoint accepts expired Node certificates. The issuing CA must still be valid.
+- Revoked Nodes and credentials cannot renew. Lost keys and explicit revocation
+  require Operator-authorized recovery.
 - Operator and Agent credentials are separate.
 - Agent private keys never leave the Node and use user-only file permissions.
 - The Server authorizes every Assignment and Bundle request for the exact Node

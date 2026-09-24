@@ -504,9 +504,6 @@ async fn cycle(
     }
     let expires = OffsetDateTime::parse(&identity.expires_at, &Rfc3339)
         .context("invalid credential expiration")?;
-    if expires <= OffsetDateTime::now_utc() {
-        bail!("Node certificate expired; Operator-assisted enrollment is required");
-    }
     if expires - OffsetDateTime::now_utc() < time::Duration::days(1) {
         let pending = store.load_or_generate_pending()?;
         let renewed = api(config, identity)?.renew(&pending.csr_pem).await?;

@@ -26,6 +26,32 @@ public sealed class CoordinationPersistenceTests : IAsyncLifetime
 
     public async Task DisposeAsync() => await postgres.DisposeAsync();
 
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task Expired_credentials_can_renew_but_revocation_still_blocks_recovery(bool revokeNode)
+    {
+        await using var db = Database();
+        var coordinator = Coordinator(db);
+        var enrolled = await Enroll(coordinator, "offline-node");
+        clock.Advance(TimeSpan.FromDays(60));
+        Assert.Null(await coordinator.FindActiveNodeByCertificateAsync(enrolled.CertificateSha256));
+        Assert.NotNull(await coordinator.FindActiveNodeByCertificateAsync(enrolled.CertificateSha256, allowExpired: true));
+        var pollError = await Assert.ThrowsAsync<CoordinationException>(() =>
+            coordinator.PollAsync(enrolled.Authentication, clock.GetUtcNow()));
+        Assert.Equal("node_unauthorized", pollError.Code);
+        var replacement = Credential() with { NodeId = enrolled.NodeId };
+        await coordinator.RenewCredentialAsync(new(enrolled.Authentication, replacement));
+        Assert.NotNull(await coordinator.FindActiveNodeByCertificateAsync(replacement.CertificateSha256));
+
+        if (revokeNode) await coordinator.RevokeNodeAsync(enrolled.NodeId, "operator");
+        else await coordinator.RevokeCredentialAsync(enrolled.CredentialId, "operator");
+        Assert.Null(await coordinator.FindActiveNodeByCertificateAsync(enrolled.CertificateSha256, allowExpired: true));
+        var renewalError = await Assert.ThrowsAsync<CoordinationException>(() =>
+            coordinator.RenewCredentialAsync(new(enrolled.Authentication, Credential() with { NodeId = enrolled.NodeId })));
+        Assert.Equal("node_unauthorized", renewalError.Code);
+    }
+
     [Fact]
     public async Task Enrollment_is_single_use_but_exact_retry_returns_original_delivery()
     {

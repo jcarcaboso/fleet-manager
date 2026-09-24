@@ -144,7 +144,7 @@ public sealed class PostgresFleetCoordinator(
         var credential = await db.Credentials.FromSqlInterpolated($"SELECT * FROM node_credentials WHERE \"Id\" = {credentialId} FOR UPDATE")
             .SingleOrDefaultAsync(cancellationToken);
         if (node is null || credential is null || node.WorkspaceId != options.WorkspaceId.Value || node.RevokedAt is not null ||
-            credential.NodeId != node.Id || credential.RevokedAt is not null || credential.NotBefore > now || credential.NotAfter <= now ||
+            credential.NodeId != node.Id || credential.RevokedAt is not null || credential.NotBefore > now ||
             credential.CertificateSha256 != command.Authentication.CertificateSha256)
             throw Error("node_unauthorized", "Node credential is not active.");
         if (command.IssuedCredential.NodeId != command.Authentication.NodeId)
@@ -288,7 +288,7 @@ public sealed class PostgresFleetCoordinator(
         await transaction.CommitAsync(cancellationToken);
     }
 
-    public async Task<NodeAuthentication?> FindActiveNodeByCertificateAsync(string certificateSha256, CancellationToken cancellationToken = default)
+    public async Task<NodeAuthentication?> FindActiveNodeByCertificateAsync(string certificateSha256, CancellationToken cancellationToken = default, bool allowExpired = false)
     {
         await EnsureWorkspace(cancellationToken);
         ValidateSha256(certificateSha256, "certificate_sha256");
@@ -296,7 +296,7 @@ public sealed class PostgresFleetCoordinator(
         var found = await (from credential in db.Credentials
                            join node in db.Nodes on credential.NodeId equals node.Id
                            where credential.CertificateSha256 == certificateSha256 && credential.RevokedAt == null &&
-                                 credential.NotBefore <= now && credential.NotAfter > now && node.RevokedAt == null &&
+                                 credential.NotBefore <= now && (allowExpired || credential.NotAfter > now) && node.RevokedAt == null &&
                                  node.WorkspaceId == options.WorkspaceId.Value
                            select new { credential.Id, NodeId = node.Id }).SingleOrDefaultAsync(cancellationToken);
         return found is null ? null : new(new(found.NodeId), new(found.Id), certificateSha256);
