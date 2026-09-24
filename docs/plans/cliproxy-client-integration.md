@@ -148,9 +148,9 @@ database or desired-state model.
 The Agent fetches the key at the same bounded interval as the model catalog and
 stores it under its existing private state directory with mode `0600`. Reading
 the small secret each time keeps rotation simple and avoids inventing a secret
-version protocol. Codex can use its current command-backed provider
-authentication with a compiled, fixed `/bin/cat` command and the Agent-resolved
-absolute key path. OpenCode can use its documented
+version protocol. Codex uses command-backed provider authentication with
+`cat` resolved from `PATH` and the Agent-resolved absolute key path.
+OpenCode can use its documented
 `{file:/absolute/path}` substitution. This keeps the key out of
 `~/.codex/config.toml`, `~/.codex/auth.json`, and
 `~/.config/opencode/opencode.json`.

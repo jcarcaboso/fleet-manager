@@ -369,8 +369,20 @@ public sealed class PostgresFleetCoordinator(
                 SourceLocations = JsonSerializer.Serialize(warning.SourceLocations)
             });
 
+        var targets = snapshot.Targets.ToList();
+        var desired = targets.Select(target => (target.NodeId.Value, target.TargetName)).ToHashSet();
+        var previouslyManaged = await (from assignment in db.Assignments.AsNoTracking()
+                                       join client in db.AssignmentAiClients.AsNoTracking() on assignment.Id equals client.AssignmentId
+                                       where assignment.IsCurrent && client.Mode == "cliproxy"
+                                       select new { assignment.NodeId, assignment.TargetName, assignment.TargetBase, assignment.TargetPath, client.Client })
+            .ToListAsync(cancellationToken);
+        foreach (var previous in previouslyManaged.Where(previous => !desired.Contains((previous.NodeId, previous.TargetName))))
+            targets.Add(new SnapshotTarget(new(previous.NodeId), previous.TargetName,
+                new(previous.TargetBase, previous.TargetPath), [],
+                AiClient: new("fleet.ai-client/v1", previous.Client, "native")));
+
         var changed = new List<(SnapshotTarget Target, AssignmentRow? Current)>();
-        foreach (var target in snapshot.Targets)
+        foreach (var target in targets)
         {
             var targetNodeId = target.NodeId.Value;
             var targetName = target.TargetName;

@@ -605,6 +605,50 @@ mod tests {
     }
 
     #[test]
+    fn removing_proxy_restores_existing_native_auth_for_both_clients() {
+        for client in ["codex", "opencode"] {
+            let root = temp_root();
+            let reconciler = disk_reconciler(&root);
+            let (config_path, auth_path, native_config) = if client == "codex" {
+                let directory = reconciler.home.join(".codex");
+                fs::create_dir_all(&directory).unwrap();
+                (
+                    directory.join("config.toml"),
+                    directory.join("auth.json"),
+                    "# native Codex login\nmodel = \"gpt-6-sol\"\n",
+                )
+            } else {
+                let directory = reconciler.home.join(".config/opencode");
+                let auth_directory = reconciler.home.join(".local/share/opencode");
+                fs::create_dir_all(&directory).unwrap();
+                fs::create_dir_all(&auth_directory).unwrap();
+                (
+                    directory.join("opencode.json"),
+                    auth_directory.join("auth.json"),
+                    "{\"model\":\"openai/gpt-6-sol\"}\n",
+                )
+            };
+            let native_auth = b"{\"openai\":{\"token\":\"native-auth\"}}";
+            fs::write(&config_path, native_config).unwrap();
+            fs::write(&auth_path, native_auth).unwrap();
+            reconciler
+                .apply_proxy(
+                    client,
+                    "https://proxy.example/v1",
+                    None,
+                    &["proxy-model".to_owned()],
+                )
+                .unwrap();
+            reconciler.restore_native(client).unwrap();
+            let restored = fs::read_to_string(&config_path).unwrap();
+            assert!(restored.contains("gpt-6-sol"));
+            assert!(!restored.contains(PROVIDER_NAME));
+            assert_eq!(fs::read(&auth_path).unwrap(), native_auth);
+            fs::remove_dir_all(root).unwrap();
+        }
+    }
+
+    #[test]
     fn url_and_cache_validation_fail_closed() {
         for url in [
             "http://proxy.example/v1",
@@ -681,6 +725,15 @@ mod tests {
         assert_eq!(catalog["models"][0]["visibility"], "list");
         assert_eq!(catalog["models"][0]["supported_in_api"], true);
         assert_eq!(fs::read(&auth_path).unwrap(), b"oauth-secret");
+
+        // Upgrade the old Fleet command without losing the original native settings.
+        fs::write(
+            &config_path,
+            config
+                .replace("command = \"cat\"", "command = \"/bin/cat\"")
+                .replace("requires_openai_auth = false\n", ""),
+        )
+        .unwrap();
 
         reconciler
             .apply_proxy(
@@ -855,7 +908,8 @@ mod tests {
             .unwrap();
         let config_path = reconciler.config_path("codex").unwrap();
         let config = String::from_utf8(fs::read(&config_path).unwrap()).unwrap();
-        assert!(config.contains("command = \"/bin/cat\""));
+        assert!(config.contains("command = \"cat\""));
+        assert!(config.contains("requires_openai_auth = false"));
         assert!(!config.contains("oauth-secret"));
         assert_eq!(fs::read(&auth).unwrap(), b"oauth-secret");
         assert_eq!(

@@ -69,8 +69,9 @@ pub(super) fn render_codex(
     provider["name"] = value("Fleet CLIProxy");
     provider["base_url"] = value(base_url);
     provider["wire_api"] = value("responses");
+    provider["requires_openai_auth"] = value(false);
     let mut auth = Table::new();
-    auth["command"] = value("/bin/cat");
+    auth["command"] = value("cat");
     let mut args = toml_edit::Array::new();
     args.push(key_path.as_str());
     auth["args"] = value(args);
@@ -196,10 +197,13 @@ fn codex_provider_matches(item: Option<&Item>, receipt: &Receipt) -> bool {
     table.get("name").and_then(Item::as_str) == Some("Fleet CLIProxy")
         && table.get("base_url").and_then(Item::as_str) == Some(receipt.expected_base_url.as_str())
         && table.get("wire_api").and_then(Item::as_str) == Some("responses")
+        && table
+            .get("requires_openai_auth")
+            .is_none_or(|item| item.as_bool() == Some(false))
         && auth
             .and_then(|table| table.get("command"))
             .and_then(Item::as_str)
-            == Some("/bin/cat")
+            .is_some_and(|command| command == "cat" || command == "/bin/cat")
         && auth
             .and_then(|table| table.get("args"))
             .and_then(Item::as_array)

@@ -67,9 +67,10 @@ quote = json.dumps
     "[model_providers.fleet-cliproxy]\n"
     "name = \"Fleet CLIProxy\"\n"
     f"base_url = {quote(base)}\n"
-    "wire_api = \"responses\"\n\n"
+    "wire_api = \"responses\"\n"
+    "requires_openai_auth = false\n\n"
     "[model_providers.fleet-cliproxy.auth]\n"
-    "command = \"/bin/cat\"\n"
+    "command = \"cat\"\n"
     "args = [\"/run/fleet/api-key\"]\n"
     "timeout_ms = 5000\n"
     "refresh_interval_ms = 300000\n",

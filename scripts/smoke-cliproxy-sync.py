@@ -128,12 +128,23 @@ server.serve_forever()
               '--alias', 'model-smoke', '--home', str(home), '--token-file', str(token))
         config = home / '.config/opencode/opencode.jsonc'
         config.parent.mkdir(parents=True)
-        original = '// Keep this comment\n{"theme":"system"}\n'
+        original = '// Keep this comment\n{"theme":"system","model":"openai/gpt-6-sol"}\n'
         config.write_text(original)
         (home / '.codex').mkdir()
-        (home / '.codex/auth.json').write_text('{"fixture":"untouched"}')
+        (home / '.codex/config.toml').write_text('model = "gpt-6-sol"\n')
+        codex_auth = home / '.codex/auth.json'
+        codex_auth.write_text('{"fixture":"untouched"}')
+        opencode_auth = home / '.local/share/opencode/auth.json'
+        opencode_auth.parent.mkdir(parents=True)
+        opencode_auth.write_text('{"fixture":"untouched"}')
 
         def publish(mode):
+            clients = '' if mode == 'removed' else f'''      ai-clients:
+        codex:
+          mode: {mode}
+        opencode:
+          mode: {mode}
+'''
             (source / 'fleet.yml').write_text(f'''schema: fleet/v2
 cliproxy:
   base-url: https://proxy:8443/v1
@@ -146,11 +157,7 @@ nodes:
     targets:
       skills:
         groups: []
-      ai-clients:
-        codex:
-          mode: {mode}
-        opencode:
-          mode: {mode}
+{clients}
 ''')
             run('git', '-C', str(source), 'add', '.')
             run('git', '-C', str(source), 'commit', '-m', mode)
@@ -174,7 +181,16 @@ nodes:
             assert list(entries[model]['variants']) == efforts
             assert opencode['model'] == 'fleet-cliproxy/' + model
             assert not (config.parent / 'opencode.json').exists(), 'Wrote lower-priority OpenCode configuration'
-            assert json.loads((home / '.codex/auth.json').read_text()) == {'fixture': 'untouched'}
+            assert codex_auth.read_bytes() == b'{"fixture":"untouched"}'
+            assert opencode_auth.read_bytes() == b'{"fixture":"untouched"}'
+
+        def check_native():
+            assert tomllib.loads((home / '.codex/config.toml').read_text()) == {'model': 'gpt-6-sol'}
+            assert codex_auth.read_bytes() == b'{"fixture":"untouched"}'
+            assert opencode_auth.read_bytes() == b'{"fixture":"untouched"}'
+            restored = config.read_text()
+            assert '// Keep this comment' in restored
+            assert json.loads('\n'.join(line for line in restored.splitlines() if not line.strip().startswith('//'))) == {'theme': 'system', 'model': 'openai/gpt-6-sol'}
 
         (root / 'catalog.json').write_text('{"models":[]}')
         publish('cliproxy')
@@ -187,7 +203,7 @@ nodes:
             result = subprocess.run([str(agent_binary), '--state-dir', str(state), 'run', '--once'], capture_output=True, text=True, timeout=90)
             if result.returncode != 0:
                 return False
-            return (home / '.codex/config.toml').exists() and 'fleet-cliproxy' in config.read_text()
+            return 'fleet-cliproxy' in (home / '.codex/config.toml').read_text() and 'fleet-cliproxy' in config.read_text()
         wait_for(recovered, 'failed initial assignment retries without a source commit', timeout=100)
         check_clients('model-one', ['low', 'high'])
         revision = run('git', '-C', str(source), 'rev-parse', 'HEAD')
@@ -209,9 +225,12 @@ nodes:
         check_clients('model-three', ['high'])
         publish('native')
         agent('run', '--once')
-        restored = config.read_text()
-        assert '// Keep this comment' in restored
-        assert json.loads('\n'.join(line for line in restored.splitlines() if not line.strip().startswith('//'))) == {'theme': 'system'}, 'Native mode did not restore the original OpenCode settings'
-        print('CLIProxy smoke passed: initial failure recovery, scheduled and manual discovery; unchanged repository; real Agent Codex/OpenCode JSONC updates; outage retention; native restoration.')
+        check_native()
+        publish('cliproxy')
+        agent('run', '--once')
+        publish('removed')
+        agent('run', '--once')
+        check_native()
+        print('CLIProxy smoke passed: model discovery and updates, outage retention, native and removed-client restoration with preserved auth.')
     finally:
         run(*compose, 'down', '--volumes', '--remove-orphans')
