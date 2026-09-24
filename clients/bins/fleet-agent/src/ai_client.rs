@@ -682,6 +682,15 @@ mod tests {
         assert_eq!(catalog["models"][0]["supported_in_api"], true);
         assert_eq!(fs::read(&auth_path).unwrap(), b"oauth-secret");
 
+        // Upgrade the old Fleet command without losing the original native settings.
+        fs::write(
+            &config_path,
+            config
+                .replace("command = \"cat\"", "command = \"/bin/cat\"")
+                .replace("requires_openai_auth = false\n", ""),
+        )
+        .unwrap();
+
         reconciler
             .apply_proxy(
                 "codex",
@@ -855,7 +864,8 @@ mod tests {
             .unwrap();
         let config_path = reconciler.config_path("codex").unwrap();
         let config = String::from_utf8(fs::read(&config_path).unwrap()).unwrap();
-        assert!(config.contains("command = \"/bin/cat\""));
+        assert!(config.contains("command = \"cat\""));
+        assert!(config.contains("requires_openai_auth = false"));
         assert!(!config.contains("oauth-secret"));
         assert_eq!(fs::read(&auth).unwrap(), b"oauth-secret");
         assert_eq!(
