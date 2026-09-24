@@ -122,9 +122,9 @@ jobs:
         run: |
           notes="docs/releases/${RELEASE_TAG#v}.md"
           if [ -f "$notes" ]; then
-            gh release create "$RELEASE_TAG" artifacts/* --verify-tag --notes-file "$notes" --title "$RELEASE_TAG"
+            gh release create "$RELEASE_TAG" artifacts/*.tar.gz artifacts/*.sha256 --verify-tag --notes-file "$notes" --title "$RELEASE_TAG"
           else
-            gh release create "$RELEASE_TAG" artifacts/* --verify-tag --generate-notes --title "$RELEASE_TAG"
+            gh release create "$RELEASE_TAG" artifacts/*.tar.gz artifacts/*.sha256 --verify-tag --generate-notes --title "$RELEASE_TAG"
           fi
 
   homebrew-test:
