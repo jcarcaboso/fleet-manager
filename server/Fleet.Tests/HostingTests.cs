@@ -24,6 +24,7 @@ public sealed class HostingTests : IAsyncLifetime
     private readonly PostgreSqlContainer _postgres = new PostgreSqlBuilder("postgres:17.5-alpine").Build();
     private readonly string _directory = Path.Combine(Path.GetTempPath(), "fleet-host-" + Guid.NewGuid().ToString("N"));
     private const string CliProxyKey = "test-cliproxy-key";
+    private readonly CliProxyCatalogTests.Handler _proxyHandler = new();
     private WebApplicationFactory<Program> _factory = null!;
     private HttpClient _operator = null!;
 
@@ -56,7 +57,7 @@ public sealed class HostingTests : IAsyncLifetime
                 ["urls"] = "https://localhost:7443",
                 ["Fleet:Operators:second-admin"] = Convert.ToHexStringLower(SHA256.HashData(Encoding.UTF8.GetBytes(Token + "-second")))
             })).ConfigureServices(services => services.AddHttpClient("cliproxy")
-                .ConfigurePrimaryHttpMessageHandler(() => new CliProxyCatalogTests.Handler())));
+                .ConfigurePrimaryHttpMessageHandler(() => _proxyHandler)));
         _operator = _factory.CreateClient(new() { BaseAddress = new Uri("https://localhost") });
         _operator.DefaultRequestHeaders.Authorization = new("Bearer", Token);
         using var scope = _factory.Services.CreateScope();
@@ -398,11 +399,32 @@ public sealed class HostingTests : IAsyncLifetime
             await scope.ServiceProvider.GetRequiredService<IFleetCoordinator>().AcceptSourceSnapshotAsync(new(
                 "cliproxy-assignment", [], [proxyTarget], [], DateTimeOffset.UtcNow));
 
+        _proxyHandler.Body = """{"data":[{"id":"one"},{"id":"two"}]}""";
         (await _operator.PostAsync("/operator/v1/cliproxy/refresh", null)).EnsureSuccessStatusCode();
         var status = await _operator.GetFromJsonAsync<JsonElement>("/operator/v1/cliproxy/status");
         Assert.Equal(604800, status.GetProperty("intervalSeconds").GetInt32());
-        Assert.Equal(1, Assert.Single(status.GetProperty("catalogs").EnumerateArray()).GetProperty("modelCount").GetInt32());
+        Assert.Equal(2, Assert.Single(status.GetProperty("catalogs").EnumerateArray()).GetProperty("modelCount").GetInt32());
         var route = $"/agent/v1/cliproxy/{resource}";
+        if (resource == "models")
+        {
+            using var browser = _factory.CreateClient(new() { BaseAddress = new Uri("https://localhost") });
+            browser.DefaultRequestHeaders.Add("Origin", "https://localhost");
+            Assert.Equal(HttpStatusCode.Unauthorized,
+                (await browser.GetAsync("/dashboard/api/cliproxy/selection")).StatusCode);
+            await DashboardCsrf(browser);
+            (await browser.PostAsJsonAsync("/dashboard/api/login", new { token = Token })).EnsureSuccessStatusCode();
+            var selection = await browser.GetFromJsonAsync<JsonElement>("/dashboard/api/cliproxy/selection");
+            var entry = Assert.Single(selection.GetProperty("catalogs").EnumerateArray());
+            Assert.Equal(2, entry.GetProperty("models").GetArrayLength());
+            var version = entry.GetProperty("version").GetInt64();
+            browser.DefaultRequestHeaders.Remove("X-Fleet-CSRF");
+            Assert.Equal(HttpStatusCode.BadRequest, (await browser.PostAsJsonAsync("/dashboard/api/cliproxy/selection",
+                new { baseUrl = "https://proxy.example/v1", version, policy = new { includeNew = true, enabledFamilies = Array.Empty<string>(), disabledFamilies = Array.Empty<string>(), modelOverrides = new { one = false } } })).StatusCode);
+            await DashboardCsrf(browser);
+            var save = await browser.PostAsJsonAsync("/dashboard/api/cliproxy/selection",
+                new { baseUrl = "https://proxy.example/v1", version, policy = new { includeNew = true, enabledFamilies = Array.Empty<string>(), disabledFamilies = Array.Empty<string>(), modelOverrides = new { one = false } } });
+            save.EnsureSuccessStatusCode();
+        }
         var allowed = await SendNodeAsync(route, assigned.Certificate, method: "GET");
 
         Assert.Equal(200, allowed.Response.StatusCode);
@@ -412,7 +434,7 @@ public sealed class HostingTests : IAsyncLifetime
         {
             var catalog = await JsonSerializer.DeserializeAsync<JsonElement>(allowed.Response.Body);
             Assert.Equal("https://proxy.example/v1", catalog.GetProperty("baseUrl").GetString());
-            Assert.Equal("one", catalog.GetProperty("models")[0].GetProperty("id").GetString());
+            Assert.Equal("two", catalog.GetProperty("models")[0].GetProperty("id").GetString());
         }
         Assert.Equal("no-store", allowed.Response.Headers.CacheControl.ToString());
         Assert.Equal(403, (await SendNodeAsync(route, unassigned.Certificate, method: "GET")).Response.StatusCode);

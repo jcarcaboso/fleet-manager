@@ -44,6 +44,7 @@ public static class FleetServerHosting
         builder.Services.AddDbContext<FleetDbContext>((services, options) => options.UseNpgsql(
             builder.Configuration.GetConnectionString("Fleet") ?? throw new InvalidOperationException("ConnectionStrings:Fleet is required."),
             npgsql => npgsql.CommandTimeout(15)).AddInterceptors(services.GetRequiredService<DatabaseMetricsInterceptor>()));
+        builder.Services.AddScoped<CliProxySelectionStore>();
         builder.Services.AddScoped<IFleetCoordinator>(services => new PostgresFleetCoordinator(
             services.GetRequiredService<FleetDbContext>(), services.GetRequiredService<TimeProvider>(),
             new FleetCoordinationOptions { WorkspaceId = new WorkspaceId(services.GetRequiredService<IOptions<FleetOptions>>().Value.WorkspaceId) }));

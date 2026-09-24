@@ -25,6 +25,8 @@ public sealed class CliProxyCatalog(IHttpClientFactory clients, IOptions<FleetOp
             ? entry.Models : null);
     }
 
+    public IReadOnlyList<string> BaseUrls() => entries.Keys.Order(StringComparer.Ordinal).ToArray();
+
     public object Status() => new
     {
         enabled = options.Value.CliProxyApiKey.Length > 0,

@@ -130,6 +130,12 @@ public static class DashboardEndpoints
             .WithRequestTimeout(TimeSpan.FromSeconds(app.Configuration.GetValue("Source:ScanTimeoutSeconds", 180) + 30));
         authenticated.MapGet("/diagnostics", DashboardDiagnostics.ReadAsync);
         authenticated.MapGet("/cliproxy/status", (CliProxyCatalog catalog) => Results.Ok(catalog.Status()));
+        authenticated.MapGet("/cliproxy/selection", (CliProxySelectionStore selection, CancellationToken ct) => selection.ListAsync(ct));
+        authenticated.MapPost("/cliproxy/selection", async (SelectionRequest request, CliProxySelectionStore selection, CancellationToken ct) =>
+        {
+            var (status, body) = await selection.SaveAsync(request.BaseUrl, request.Version, request.Policy, ct);
+            return Results.Json(body, statusCode: status);
+        });
         authenticated.MapPost("/cliproxy/refresh", async (CliProxySyncService sync, CancellationToken ct) =>
             Results.Ok(await sync.SyncNowAsync(true, ct)));
         authenticated.MapGet("/session", (HttpContext http) => Results.Ok(new { actor = Actor(http) }));
@@ -188,4 +194,5 @@ public static class DashboardEndpoints
     public sealed record RenameRequest(string CurrentAlias, string Alias);
     public sealed record RemoveNodeRequest(string Alias);
     public sealed record LinkRequest(string Alias, int ExpiresInSeconds = 900);
+    public sealed record SelectionRequest(string BaseUrl, long Version, CliProxySelectionPolicy? Policy);
 }

@@ -19,6 +19,7 @@ public sealed class FleetDbContext(DbContextOptions<FleetDbContext> options) : D
     public DbSet<AttemptRow> Attempts => Set<AttemptRow>();
     public DbSet<SourceScanRow> SourceScans => Set<SourceScanRow>();
     public DbSet<AuditEventRow> AuditEvents => Set<AuditEventRow>();
+    public DbSet<CliProxySelectionRow> CliProxySelections => Set<CliProxySelectionRow>();
 
     protected override void OnModelCreating(ModelBuilder model)
     {
@@ -77,6 +78,7 @@ public sealed class FleetDbContext(DbContextOptions<FleetDbContext> options) : D
         model.Entity<AuditEventRow>().HasIndex(x => new { x.WorkspaceId, x.Id });
         model.Entity<AuditEventRow>().HasIndex(x => new { x.WorkspaceId, x.RecordedAt });
         model.Entity<AuditEventRow>().HasOne<WorkspaceRow>().WithMany().HasForeignKey(x => x.WorkspaceId).OnDelete(DeleteBehavior.Cascade);
+        model.Entity<CliProxySelectionRow>().ToTable("cliproxy_selections").HasKey(x => x.BaseUrl);
     }
 }
 
@@ -209,4 +211,10 @@ public sealed class AuditEventRow
     public required string Actor { get; set; }
     public Guid? NodeId { get; set; }
     public Guid? CredentialId { get; set; }
+}
+public sealed class CliProxySelectionRow
+{
+    public required string BaseUrl { get; set; }
+    public required string PolicyJson { get; set; }
+    public long Version { get; set; }
 }

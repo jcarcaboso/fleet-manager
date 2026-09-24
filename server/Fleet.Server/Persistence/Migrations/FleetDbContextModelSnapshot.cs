@@ -22,6 +22,23 @@ namespace Fleet.Server.Persistence.Migrations
 
             NpgsqlModelBuilderExtensions.UseIdentityByDefaultColumns(modelBuilder);
 
+            modelBuilder.Entity("Fleet.Server.Persistence.CliProxySelectionRow", b =>
+                {
+                    b.Property<string>("BaseUrl")
+                        .HasColumnType("text");
+
+                    b.Property<string>("PolicyJson")
+                        .IsRequired()
+                        .HasColumnType("text");
+
+                    b.Property<long>("Version")
+                        .HasColumnType("bigint");
+
+                    b.HasKey("BaseUrl");
+
+                    b.ToTable("cliproxy_selections", (string)null);
+                });
+
             modelBuilder.Entity("Fleet.Server.Persistence.AssignmentAiClientRow", b =>
                 {
                     b.Property<Guid>("AssignmentId")
