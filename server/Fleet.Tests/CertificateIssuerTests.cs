@@ -7,6 +7,40 @@ namespace Fleet.Tests;
 
 public sealed class CertificateIssuerTests
 {
+    [Theory]
+    [InlineData(-2, -1, true)]
+    [InlineData(1, 2, false)]
+    public void Renewal_allows_expired_but_not_future_certificates(int startHours, int endHours, bool renewable)
+    {
+        using var fixture = IssuerFixture.Create();
+        using var key = ECDsa.Create(ECCurve.NamedCurves.nistP256);
+        var request = new CertificateRequest("CN=node", key, HashAlgorithmName.SHA256);
+        request.CertificateExtensions.Add(new X509EnhancedKeyUsageExtension(new OidCollection { new("1.3.6.1.5.5.7.3.2") }, true));
+        using var certificate = request.Create(fixture.Certificate, DateTimeOffset.UtcNow.AddHours(startHours),
+            DateTimeOffset.UtcNow.AddHours(endHours), RandomNumberGenerator.GetBytes(16));
+        Assert.False(fixture.Issuer.ValidateChain(certificate));
+        Assert.Equal(renewable, fixture.Issuer.ValidateChain(certificate, allowExpired: true));
+    }
+
+    [Fact]
+    public void Renewal_does_not_accept_an_expired_issuer()
+    {
+        using var fixture = IssuerFixture.Create();
+        var clock = new TestClock();
+        using var issuer = fixture.CreateIssuer(clock);
+        using var key = ECDsa.Create(ECCurve.NamedCurves.nistP256);
+        var request = NodeCertificateIssuer.ValidateRequest(new CertificateRequest("CN=node", key, HashAlgorithmName.SHA256).CreateSigningRequestPem());
+        using var certificate = X509Certificate2.CreateFromPem(issuer.Issue(request, Guid.NewGuid()).CertificatePem);
+        clock.Now = DateTimeOffset.UtcNow.AddDays(31);
+        Assert.False(issuer.ValidateChain(certificate, allowExpired: true));
+    }
+
+    private sealed class TestClock : TimeProvider
+    {
+        public DateTimeOffset Now { get; set; } = DateTimeOffset.UtcNow;
+        public override DateTimeOffset GetUtcNow() => Now;
+    }
+
     [Fact]
     public void Newly_valid_issuer_can_issue_without_backdating_before_its_own_validity()
     {
@@ -28,6 +62,7 @@ public sealed class CertificateIssuerTests
         using var certificate = request.Create(fixture.Certificate, DateTimeOffset.UtcNow.AddMinutes(-1),
             DateTimeOffset.UtcNow.AddHours(1), RandomNumberGenerator.GetBytes(16));
         Assert.False(fixture.Issuer.ValidateChain(certificate));
+        Assert.False(fixture.Issuer.ValidateChain(certificate, allowExpired: true));
     }
 
     [Fact]
@@ -96,6 +131,7 @@ public sealed class CertificateIssuerTests
             DateTimeOffset.UtcNow.AddMinutes(10), RandomNumberGenerator.GetBytes(16));
 
         Assert.False(fixture.Issuer.ValidateChain(forged));
+        Assert.False(fixture.Issuer.ValidateChain(forged, allowExpired: true));
     }
 
     [Fact]
@@ -148,12 +184,12 @@ public sealed class CertificateIssuerTests
             return new IssuerFixture(directory, certificatePath, keyPath, mode, certificate);
         }
 
-        public NodeCertificateIssuer CreateIssuer() => new(Options.Create(new FleetOptions
+        public NodeCertificateIssuer CreateIssuer(TimeProvider? time = null) => new(Options.Create(new FleetOptions
         {
             IssuerCertificatePath = certificatePath,
             IssuerKeyPath = keyPath,
             CertificateLifetimeDays = 1
-        }), TimeProvider.System);
+        }), time ?? TimeProvider.System);
 
         public void Dispose()
         {

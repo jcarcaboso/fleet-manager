@@ -47,13 +47,14 @@ public sealed class FleetAuthenticationHandler(
         {
             return AuthenticateResult.NoResult();
         }
+        var allowExpired = Context.GetEndpoint()?.Metadata.GetMetadata<AllowExpiredNodeCertificate>() is not null;
         var certificate = await Context.Connection.GetClientCertificateAsync(Context.RequestAborted);
-        if (certificate is null || !issuer.ValidateChain(certificate))
+        if (certificate is null || !issuer.ValidateChain(certificate, allowExpired))
         {
             return AuthenticateResult.NoResult();
         }
         var digest = certificate.GetCertHashString(HashAlgorithmName.SHA256).ToLowerInvariant();
-        var identity = await coordinator.FindActiveNodeByCertificateAsync(digest, Context.RequestAborted);
+        var identity = await coordinator.FindActiveNodeByCertificateAsync(digest, Context.RequestAborted, allowExpired);
         if (identity is null)
         {
             return AuthenticateResult.Fail("invalid_credential");
@@ -65,3 +66,6 @@ public sealed class FleetAuthenticationHandler(
     private AuthenticateResult Success(string name) => AuthenticateResult.Success(new AuthenticationTicket(
         new ClaimsPrincipal(new ClaimsIdentity([new Claim(ClaimTypes.NameIdentifier, name)], Scheme.Name)), Scheme.Name));
 }
+
+// Only the renewal endpoint may authenticate with an expired, non-revoked credential.
+public sealed class AllowExpiredNodeCertificate;

@@ -27,6 +27,7 @@ public sealed class HostingTests : IAsyncLifetime
     private readonly CliProxyCatalogTests.Handler _proxyHandler = new();
     private WebApplicationFactory<Program> _factory = null!;
     private HttpClient _operator = null!;
+    private readonly TestClock _clock = new();
 
     public async Task InitializeAsync()
     {
@@ -56,12 +57,46 @@ public sealed class HostingTests : IAsyncLifetime
                 ["Source:Remote"] = "",
                 ["urls"] = "https://localhost:7443",
                 ["Fleet:Operators:second-admin"] = Convert.ToHexStringLower(SHA256.HashData(Encoding.UTF8.GetBytes(Token + "-second")))
-            })).ConfigureServices(services => services.AddHttpClient("cliproxy")
-                .ConfigurePrimaryHttpMessageHandler(() => _proxyHandler)));
+            })).ConfigureServices(services =>
+            {
+                services.AddSingleton<TimeProvider>(_clock);
+                services.AddHttpClient("cliproxy").ConfigurePrimaryHttpMessageHandler(() => _proxyHandler);
+            }));
         _operator = _factory.CreateClient(new() { BaseAddress = new Uri("https://localhost") });
         _operator.DefaultRequestHeaders.Authorization = new("Bearer", Token);
         using var scope = _factory.Services.CreateScope();
         await scope.ServiceProvider.GetRequiredService<FleetDbContext>().Database.MigrateAsync();
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task Offline_node_can_only_use_expired_certificate_to_renew_and_revocation_blocks_it(bool revokeNode)
+    {
+        var enrolled = await EnrollNode("offline-node");
+        using var certificate = enrolled.Certificate;
+        _clock.Advance(TimeSpan.FromDays(60));
+        Assert.Equal(401, (await SendNodeAsync("/agent/v1/poll", certificate)).Response.StatusCode);
+        Assert.Equal(401, (await SendNodeAsync("/agent/v1/cliproxy/credential", certificate, method: "GET")).Response.StatusCode);
+        using var key = ECDsa.Create(ECCurve.NamedCurves.nistP256);
+        var csr = new CertificateRequest("CN=renewed", key, HashAlgorithmName.SHA256).CreateSigningRequestPem();
+        var renewal = await SendNodeAsync("/agent/v1/credentials/renew", certificate, new { certificateRequestPem = csr });
+        Assert.Equal(200, renewal.Response.StatusCode);
+        var payload = await JsonSerializer.DeserializeAsync<JsonElement>(renewal.Response.Body);
+        using var renewed = X509Certificate2.CreateFromPem(payload.GetProperty("certificatePem").GetString()!);
+        Assert.Equal(200, (await SendNodeAsync("/agent/v1/poll", renewed)).Response.StatusCode);
+        Assert.Equal(401, (await SendNodeAsync("/agent/v1/poll", certificate)).Response.StatusCode);
+        using var scope = _factory.Services.CreateScope();
+        var coordinator = scope.ServiceProvider.GetRequiredService<IFleetCoordinator>();
+        if (revokeNode) await coordinator.RevokeNodeAsync(enrolled.NodeId, "operator");
+        else
+        {
+            var identity = await coordinator.FindActiveNodeByCertificateAsync(
+                certificate.GetCertHashString(HashAlgorithmName.SHA256).ToLowerInvariant(), allowExpired: true);
+            await coordinator.RevokeCredentialAsync(identity!.CredentialId, "operator");
+        }
+        Assert.Equal(401, (await SendNodeAsync("/agent/v1/credentials/renew", certificate,
+            new { certificateRequestPem = csr })).Response.StatusCode);
     }
 
     [Fact]
@@ -561,6 +596,13 @@ public sealed class HostingTests : IAsyncLifetime
         var issued = await enrollment.Content.ReadFromJsonAsync<JsonElement>();
         return (new(issued.GetProperty("nodeId").GetGuid()),
             X509Certificate2.CreateFromPem(issued.GetProperty("certificatePem").GetString()!));
+    }
+
+    private sealed class TestClock : TimeProvider
+    {
+        private TimeSpan offset;
+        public override DateTimeOffset GetUtcNow() => DateTimeOffset.UtcNow + offset;
+        public void Advance(TimeSpan duration) => offset += duration;
     }
 
     public async Task DisposeAsync()

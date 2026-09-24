@@ -71,19 +71,25 @@ public sealed class NodeCertificateIssuer : IDisposable
         return new(certificate.ExportCertificatePem(), certificate.GetCertHashString(HashAlgorithmName.SHA256).ToLowerInvariant(), expires);
     }
 
-    public bool ValidateChain(X509Certificate2 certificate)
+    public bool ValidateChain(X509Certificate2 certificate, bool allowExpired = false)
     {
         using var chain = new X509Chain();
         chain.ChainPolicy.TrustMode = X509ChainTrustMode.CustomRootTrust;
         chain.ChainPolicy.CustomTrustStore.Add(_issuer);
         chain.ChainPolicy.RevocationMode = X509RevocationMode.NoCheck;
         chain.ChainPolicy.DisableCertificateDownloads = true;
-        chain.ChainPolicy.VerificationTime = _time.GetUtcNow().UtcDateTime;
+        var now = _time.GetUtcNow().UtcDateTime;
+        chain.ChainPolicy.VerificationTime = now;
+        if (allowExpired) chain.ChainPolicy.VerificationFlags = X509VerificationFlags.IgnoreNotTimeValid;
         chain.ChainPolicy.ApplicationPolicy.Add(new Oid("1.3.6.1.5.5.7.3.2"));
         return certificate.Extensions.OfType<X509EnhancedKeyUsageExtension>().Any(x =>
                 x.EnhancedKeyUsages.Cast<Oid>().Any(oid => oid.Value == "1.3.6.1.5.5.7.3.2"))
             && !certificate.Extensions.OfType<X509BasicConstraintsExtension>().Any(x => x.CertificateAuthority)
-            && chain.Build(certificate);
+            && chain.Build(certificate)
+            // Ignore expiry only for the leaf, never future validity or an expired issuer.
+            && chain.ChainElements.Cast<X509ChainElement>().Select((element, index) =>
+                element.Certificate.NotBefore.ToUniversalTime() <= now &&
+                (allowExpired && index == 0 || element.Certificate.NotAfter.ToUniversalTime() > now)).All(valid => valid);
     }
 
     public void Dispose() => _issuer.Dispose();

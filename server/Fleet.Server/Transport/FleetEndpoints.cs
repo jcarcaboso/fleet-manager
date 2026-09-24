@@ -125,7 +125,7 @@ public static class FleetEndpoints
                 time.GetUtcNow().AddMinutes(-1), issued.ExpiresAt, JsonSerializer.SerializeToUtf8Bytes(response, JsonSerializerOptions.Web))), ct);
             context.Response.Headers.CacheControl = "no-store";
             return Results.Ok(response);
-        }).RequireRateLimiting("enrollment");
+        }).RequireRateLimiting("enrollment").WithMetadata(new AllowExpiredNodeCertificate());
         agents.MapPut("/alias", async (AliasRequest request, HttpContext context, IFleetCoordinator coordinator,
             CancellationToken ct) => Results.Ok(await coordinator.RenameNodeAliasAsync(new(Node(context), request.Alias), ct)));
     }

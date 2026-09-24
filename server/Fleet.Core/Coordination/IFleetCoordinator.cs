@@ -45,7 +45,8 @@ public interface IFleetCoordinator
 
     Task<NodeAuthentication?> FindActiveNodeByCertificateAsync(
         string certificateSha256,
-        CancellationToken cancellationToken = default);
+        CancellationToken cancellationToken = default,
+        bool allowExpired = false);
 
     Task<PublicationResult> AcceptSourceSnapshotAsync(
         AcceptedSourceSnapshot snapshot,
