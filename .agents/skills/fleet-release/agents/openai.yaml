@@ -1,0 +1,4 @@
+interface:
+  display_name: "Fleet release"
+  short_description: "Release Fleet clients and versioned Docker images"
+  default_prompt: "Use $fleet-release to prepare or publish a Fleet Manager release."
