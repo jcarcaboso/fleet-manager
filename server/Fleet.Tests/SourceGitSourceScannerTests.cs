@@ -310,6 +310,8 @@ public sealed class SourceGitSourceScannerTests : IDisposable
                       model: gpt-6-astra
                     opencode:
                       mode: native
+                    claude:
+                      mode: cliproxy
             """);
         if (!explicitModel)
         {
@@ -329,6 +331,10 @@ public sealed class SourceGitSourceScannerTests : IDisposable
         var opencode = targets["ai-client/opencode"];
         Assert.Equal(("home", ".config/opencode"), (opencode.Descriptor.Base, opencode.Descriptor.Path));
         Assert.Equal(new AiClientAssignment("fleet.ai-client/v1", "opencode", "native"), opencode.AiClient);
+        var claude = targets["ai-client/claude"];
+        Assert.Equal(("home", ".claude"), (claude.Descriptor.Base, claude.Descriptor.Path));
+        Assert.Equal(new AiClientAssignment("fleet.ai-client/v1", "claude", "cliproxy",
+            "https://proxy.hlab.alpetxino.com/v1"), claude.AiClient);
     }
 
     [Fact]

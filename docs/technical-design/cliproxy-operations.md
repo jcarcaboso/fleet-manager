@@ -1,6 +1,6 @@
 # CLIProxyAPI operations
 
-Fleet can configure Codex and OpenCode to use one Workspace CLIProxyAPI
+Fleet can configure Codex, OpenCode, and Claude Code to use one Workspace CLIProxyAPI
 endpoint. The source repository selects the endpoint and which Nodes receive
 its model catalog. A default model is optional. The API key
 stays outside Git and reaches assigned Nodes through their existing mTLS
@@ -97,6 +97,18 @@ loads it after `.json`. If no JSONC file exists, Fleet uses `opencode.json`.
 Comments and unrelated settings are preserved. Adding a JSONC override after
 Fleet has already taken ownership of a JSON config can cause an ownership
 conflict; resolve the configuration change before retrying.
+
+Claude Code uses `~/.claude/settings.json`. Fleet manages `model`,
+`env.ANTHROPIC_BASE_URL`, and `apiKeyHelper`, which reads the private Agent
+credential file without placing the key in settings. Claude appends `/v1/messages`,
+so Fleet removes `/v1` from its base URL. Other settings and native login files
+remain unchanged. Remove conflicting `ANTHROPIC_AUTH_TOKEN`, `ANTHROPIC_API_KEY`,
+or `ANTHROPIC_MODEL` entries from the settings environment before enabling the
+proxy. Shell environment overrides must also be cleared locally. Switching to
+`native` restores the previous Fleet-owned settings.
+Upgrade both Server and Agent to a build with Claude connection support before
+adding `ai-clients.claude` to the manifest.
+
 Older proxies that return only model identifiers still work, but Fleet does not
 invent effort choices when the proxy omits them. The upstream response behavior
 is defined by CLIProxy's [model handler](https://github.com/router-for-me/CLIProxyAPI/blob/main/sdk/api/handlers/openai/openai_handlers.go).
@@ -108,8 +120,10 @@ Fleet ownership conflict. Reasoning effort selection remains local to the client
 
 The first proxy reconciliation fails if the Node cannot retrieve the key or a
 valid non-empty model list from the Server. A later model-fetch failure keeps
-the last valid catalog for that endpoint on both the Server and Node. Codex and OpenCode read the Node-local key file at request time. Fleet
-does not read or change either client's OAuth store.
+the last valid catalog for that endpoint on both the Server and Node. Codex and
+OpenCode read the Node-local key file at request time. Claude Code reads it
+through its credential helper and may cache the result. Fleet does not read or
+change any client's OAuth store.
 
 ## Rotate the key
 

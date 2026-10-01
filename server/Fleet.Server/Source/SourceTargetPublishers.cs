@@ -19,6 +19,7 @@ internal static class SourceTargetPublishers
         {
             ["codex"] = ".codex",
             ["opencode"] = ".config/opencode",
+            ["claude"] = ".claude",
         };
 
     internal static readonly SnapshotBundle EmptyAgentInstructions = AgentInstructionsBundle([]);

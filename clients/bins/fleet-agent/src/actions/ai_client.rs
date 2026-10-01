@@ -19,10 +19,10 @@ pub fn validate(assignment: &Assignment) -> Result<()> {
         || !assignment.skills.is_empty()
         || assignment.file.is_some()
         || ai.schema != "fleet.ai-client/v1"
-        || !matches!(ai.client.as_str(), "codex" | "opencode")
+        || !matches!(ai.client.as_str(), "codex" | "opencode" | "claude")
         || !matches!(
             (ai.client.as_str(), assignment.target.path.as_str()),
-            ("codex", ".codex") | ("opencode", ".config/opencode")
+            ("codex", ".codex") | ("opencode", ".config/opencode") | ("claude", ".claude")
         )
         || !valid_mode
     {

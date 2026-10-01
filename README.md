@@ -190,8 +190,8 @@ are.
 Upgrade `fleet-agent` on managed Nodes before committing instruction sources;
 older Agents do not understand Managed-file Assignments.
 
-`fleet/v2` can also select `native` or `cliproxy` connections for Codex and
-OpenCode. Configure the Server's `Fleet:CliProxyApiKey` setting and upgrade
+`fleet/v2` can also select `native` or `cliproxy` connections for Codex,
+OpenCode, and Claude Code. Configure the Server's `Fleet:CliProxyApiKey` setting and upgrade
 every selected Agent before publishing those entries. The key stays out of Git
 and client configuration. See the
 [CLIProxyAPI operations guide](docs/technical-design/cliproxy-operations.md)

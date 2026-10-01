@@ -23,3 +23,5 @@ nodes:
           mode: cliproxy
         opencode:
           mode: cliproxy
+        claude:
+          mode: cliproxy

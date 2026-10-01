@@ -95,6 +95,7 @@ pub(super) fn render_codex(
             expected_catalog_path: Some(catalog_path),
             expected_models: models.to_vec(),
             expected_reasoning_levels: BTreeMap::new(),
+            original_settings: BTreeMap::new(),
         },
     ))
 }

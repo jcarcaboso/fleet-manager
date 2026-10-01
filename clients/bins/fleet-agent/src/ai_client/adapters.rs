@@ -2,15 +2,17 @@ use super::{Receipt, Reconciler};
 use anyhow::Result;
 use std::path::PathBuf;
 
+mod claude;
 mod codex;
 pub(super) mod opencode;
 
-const REGISTERED: [Adapter; 2] = [Adapter::Codex, Adapter::OpenCode];
+const REGISTERED: [Adapter; 3] = [Adapter::Codex, Adapter::OpenCode, Adapter::Claude];
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(super) enum Adapter {
     Codex,
     OpenCode,
+    Claude,
 }
 
 impl Adapter {
@@ -25,12 +27,14 @@ impl Adapter {
         match self {
             Self::Codex => "codex",
             Self::OpenCode => "opencode",
+            Self::Claude => "claude",
         }
     }
 
     pub(super) fn config_path(self, reconciler: &Reconciler) -> PathBuf {
         match self {
             Self::Codex => reconciler.home.join(".codex/config.toml"),
+            Self::Claude => reconciler.home.join(".claude/settings.json"),
             Self::OpenCode => {
                 let directory = reconciler.home.join(".config/opencode");
                 let jsonc = directory.join("opencode.jsonc");
@@ -79,6 +83,9 @@ impl Adapter {
             Self::OpenCode => opencode::render_opencode(
                 old, previous, base_url, model, models, &key_path, &efforts,
             ),
+            Self::Claude => {
+                claude::render_claude(old, previous, base_url, model, models, &key_path)
+            }
         }
     }
 
@@ -86,11 +93,15 @@ impl Adapter {
         match self {
             Self::Codex => codex::restore_codex(old, receipt),
             Self::OpenCode => opencode::restore_opencode(old, receipt),
+            Self::Claude => claude::restore_claude(old, receipt),
         }
     }
 
     pub(super) fn config_is_empty(self, bytes: &[u8]) -> Result<bool> {
         match self {
+            Self::Claude => Ok(serde_json::from_slice::<serde_json::Value>(bytes)?
+                .as_object()
+                .is_some_and(|object| object.is_empty())),
             Self::Codex => Ok(std::str::from_utf8(bytes)?
                 .parse::<toml_edit::DocumentMut>()?
                 .is_empty()),
@@ -111,7 +122,7 @@ impl Adapter {
             Self::Codex => {
                 super::remove_state_file(&reconciler.state.join("codex-model-catalog.json"))
             }
-            Self::OpenCode => Ok(()),
+            Self::OpenCode | Self::Claude => Ok(()),
         }
     }
 }
@@ -124,7 +135,11 @@ mod tests {
     fn registered_adapters_resolve_by_name() {
         assert_eq!(Adapter::find("codex").unwrap(), Adapter::Codex);
         assert_eq!(Adapter::find("opencode").unwrap(), Adapter::OpenCode);
+        assert_eq!(Adapter::find("claude").unwrap(), Adapter::Claude);
         assert!(Adapter::find("unknown").is_err());
-        assert_eq!(REGISTERED.map(Adapter::name), ["codex", "opencode"]);
+        assert_eq!(
+            REGISTERED.map(Adapter::name),
+            ["codex", "opencode", "claude"]
+        );
     }
 }

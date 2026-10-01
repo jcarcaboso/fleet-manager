@@ -233,11 +233,13 @@ public sealed class CoordinationPersistenceTests : IAsyncLifetime
             AiClient: new("fleet.ai-client/v1", "codex", "cliproxy", "https://proxy.example/v1"));
         var opencode = new SnapshotTarget(node.NodeId, "ai-client/opencode", new("home", ".config/opencode"), [],
             AiClient: new("fleet.ai-client/v1", "opencode", "cliproxy", "https://proxy.example/v1"));
-        await coordinator.AcceptSourceSnapshotAsync(Snapshot("proxy", [], codex, opencode));
+        var claude = new SnapshotTarget(node.NodeId, "ai-client/claude", new("home", ".claude"), [],
+            AiClient: new("fleet.ai-client/v1", "claude", "cliproxy", "https://proxy.example/v1"));
+        await coordinator.AcceptSourceSnapshotAsync(Snapshot("proxy", [], codex, opencode, claude));
 
         var removed = await coordinator.AcceptSourceSnapshotAsync(Snapshot("removed", []));
-        Assert.Equal(2, removed.ChangedAssignmentCount);
-        foreach (var client in new[] { "codex", "opencode" })
+        Assert.Equal(3, removed.ChangedAssignmentCount);
+        foreach (var client in new[] { "codex", "opencode", "claude" })
         {
             var assignment = (await coordinator.PollTargetAsync(node.Authentication, $"ai-client/{client}", clock.GetUtcNow())).Assignment!;
             Assert.Equal("native", assignment.AiClient!.Mode);

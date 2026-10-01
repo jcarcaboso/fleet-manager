@@ -60,6 +60,8 @@ struct Receipt {
     expected_models: Vec<String>,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     expected_reasoning_levels: BTreeMap<String, Vec<String>>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    original_settings: BTreeMap<String, Option<serde_json::Value>>,
 }
 
 #[derive(Deserialize, Serialize)]
@@ -605,8 +607,8 @@ mod tests {
     }
 
     #[test]
-    fn removing_proxy_restores_existing_native_auth_for_both_clients() {
-        for client in ["codex", "opencode"] {
+    fn removing_proxy_restores_existing_native_auth_for_all_clients() {
+        for client in ["codex", "opencode", "claude"] {
             let root = temp_root();
             let reconciler = disk_reconciler(&root);
             let (config_path, auth_path, native_config) = if client == "codex" {
@@ -616,6 +618,14 @@ mod tests {
                     directory.join("config.toml"),
                     directory.join("auth.json"),
                     "# native Codex login\nmodel = \"gpt-6-sol\"\n",
+                )
+            } else if client == "claude" {
+                let directory = reconciler.home.join(".claude");
+                fs::create_dir_all(&directory).unwrap();
+                (
+                    directory.join("settings.json"),
+                    directory.join(".credentials.json"),
+                    "{\"model\":\"gpt-6-sol\",\"permissions\":{\"allow\":[]}}\n",
                 )
             } else {
                 let directory = reconciler.home.join(".config/opencode");
@@ -646,6 +656,32 @@ mod tests {
             assert_eq!(fs::read(&auth_path).unwrap(), native_auth);
             fs::remove_dir_all(root).unwrap();
         }
+    }
+
+    #[test]
+    fn claude_proxy_creates_settings_and_native_removes_them() {
+        let root = temp_root();
+        let reconciler = disk_reconciler(&root);
+        reconciler
+            .apply_proxy(
+                "claude",
+                "https://proxy.example/v1",
+                None,
+                &["claude-one".to_owned()],
+            )
+            .unwrap();
+        let path = reconciler.config_path("claude").unwrap();
+        assert_eq!(path, reconciler.home.join(".claude/settings.json"));
+        let settings: Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+        assert_eq!(
+            settings["env"]["ANTHROPIC_BASE_URL"],
+            "https://proxy.example"
+        );
+        reconciler.recover("claude").unwrap();
+        reconciler.restore_native("claude").unwrap();
+        assert!(!path.exists());
+        assert!(!reconciler.receipt_path("claude").unwrap().exists());
+        fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
