@@ -118,6 +118,17 @@ omitted, Fleet keeps the locally selected proxy model if available, otherwise
 selects the first advertised model. Users can change the selection without a
 Fleet ownership conflict. Reasoning effort selection remains local to the client.
 
+The **Skip Claude models for other clients** checkbox in Model selection is
+checked by default. When enabled, the Agent filters models with a
+case-insensitive `claude-` prefix out of Codex and OpenCode catalogs before
+choosing a default. Claude Code still receives the selected Workspace catalog.
+Uncheck it and save to allow Claude models in every client. The setting is saved
+per proxy endpoint and cached by Agents for offline use. Saving cannot exclude a
+pinned Claude default in another client; change the default or leave the
+checkbox unchecked. If filtering leaves no allowed models, reconciliation fails
+and preserves the previous configuration. Upgrade Server and Agents together
+for the new catalog policy field.
+
 The first proxy reconciliation fails if the Node cannot retrieve the key or a
 valid non-empty model list from the Server. A later model-fetch failure keeps
 the last valid catalog for that endpoint on both the Server and Node. Codex and

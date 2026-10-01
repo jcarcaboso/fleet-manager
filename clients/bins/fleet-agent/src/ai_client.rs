@@ -36,6 +36,12 @@ struct ModelCache {
     models: Vec<String>,
     #[serde(default)]
     reasoning_levels: BTreeMap<String, Vec<String>>,
+    #[serde(default = "default_skip_claude_models")]
+    skip_claude_models_for_other_clients: bool,
+}
+
+fn default_skip_claude_models() -> bool {
+    true
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -305,6 +311,8 @@ fn parse_server_catalog(bytes: &[u8], base_url: &str) -> Result<ModelCache> {
     struct Catalog {
         base_url: String,
         models: Vec<Model>,
+        #[serde(default = "default_skip_claude_models")]
+        skip_claude_models_for_other_clients: bool,
     }
     let catalog: Catalog = serde_json::from_slice(bytes).context("invalid Server model catalog")?;
     if catalog.base_url != base_url || catalog.models.is_empty() {
@@ -331,6 +339,7 @@ fn parse_server_catalog(bytes: &[u8], base_url: &str) -> Result<ModelCache> {
         base_url: base_url.to_owned(),
         models,
         reasoning_levels,
+        skip_claude_models_for_other_clients: catalog.skip_claude_models_for_other_clients,
     })
 }
 
@@ -541,6 +550,7 @@ mod tests {
         let cache = parse_server_catalog(bytes, "https://proxy.example/v1").unwrap();
         assert_eq!(cache.models, ["one", "two"]);
         assert_eq!(cache.reasoning_levels["one"], ["low", "high"]);
+        assert!(cache.skip_claude_models_for_other_clients);
         assert!(parse_server_catalog(bytes, "https://other.example/v1").is_err());
         assert!(
             parse_server_catalog(
@@ -685,6 +695,121 @@ mod tests {
     }
 
     #[test]
+    fn claude_models_are_filtered_from_other_client_catalogs() {
+        let models = vec![
+            "claude-one".to_owned(),
+            "gpt-one".to_owned(),
+            "ClAuDe-two".to_owned(),
+        ];
+        for client in ["codex", "opencode", "claude"] {
+            let root = temp_root();
+            let reconciler = disk_reconciler(&root);
+            reconciler
+                .apply_proxy(client, "https://proxy.example/v1", None, &models)
+                .unwrap();
+            let receipt = state::read_json::<Receipt>(&reconciler.receipt_path(client).unwrap())
+                .unwrap()
+                .unwrap();
+            if client == "claude" {
+                assert_eq!(receipt.expected_models, models);
+                assert_eq!(receipt.expected_model, "claude-one");
+            } else {
+                assert_eq!(receipt.expected_models, ["gpt-one"]);
+                assert_eq!(receipt.expected_model, "gpt-one");
+                let catalog_path = if client == "codex" {
+                    reconciler.state.join("codex-model-catalog.json")
+                } else {
+                    reconciler.config_path(client).unwrap()
+                };
+                let catalog = fs::read_to_string(catalog_path).unwrap();
+                assert!(!catalog.to_ascii_lowercase().contains("claude-"));
+            }
+            reconciler.restore_native(client).unwrap();
+            fs::remove_dir_all(root).unwrap();
+        }
+    }
+
+    #[test]
+    fn restricted_models_fail_without_changing_configuration_or_receipts() {
+        for client in ["codex", "opencode"] {
+            let root = temp_root();
+            let reconciler = disk_reconciler(&root);
+            reconciler
+                .apply_proxy(
+                    client,
+                    "https://proxy.example/v1",
+                    None,
+                    &["gpt-one".to_owned()],
+                )
+                .unwrap();
+            let path = reconciler.config_path(client).unwrap();
+            let receipt_path = reconciler.receipt_path(client).unwrap();
+            let config = fs::read(&path).unwrap();
+            let receipt = fs::read(&receipt_path).unwrap();
+            let catalog_path = reconciler.state.join("codex-model-catalog.json");
+            let catalog = read_optional_config(&catalog_path).unwrap();
+            for pinned in [None, Some("claude-one")] {
+                assert!(
+                    reconciler
+                        .apply_proxy(
+                            client,
+                            "https://proxy.example/v1",
+                            pinned,
+                            &["claude-one".to_owned()]
+                        )
+                        .is_err()
+                );
+            }
+            assert!(
+                reconciler
+                    .apply_proxy(
+                        client,
+                        "https://proxy.example/v1",
+                        Some("claude-one"),
+                        &["claude-one".to_owned(), "gpt-one".to_owned()]
+                    )
+                    .is_err()
+            );
+            assert_eq!(fs::read(&path).unwrap(), config);
+            assert_eq!(fs::read(&receipt_path).unwrap(), receipt);
+            assert_eq!(read_optional_config(&catalog_path).unwrap(), catalog);
+            fs::remove_dir_all(root).unwrap();
+        }
+    }
+
+    #[test]
+    fn unchecked_restriction_allows_claude_models_and_cached_policy_survives_restart() {
+        let base_url = "https://proxy.example/v1";
+        let bytes = br#"{"baseUrl":"https://proxy.example/v1","skipClaudeModelsForOtherClients":false,"models":[{"id":"claude-one","reasoningLevels":[]},{"id":"gpt-one","reasoningLevels":[]}]}"#;
+        for client in ["codex", "opencode"] {
+            let root = temp_root();
+            let reconciler = disk_reconciler(&root);
+            let mut cache = parse_server_catalog(bytes, base_url).unwrap();
+            assert!(!cache.skip_claude_models_for_other_clients);
+            state::write_json(&reconciler.state.join("models.json"), &cache).unwrap();
+            // Recreate the reconciler to use the persisted policy, as during offline fallback.
+            let reconciler = Reconciler::new(&reconciler.home, root.join("state")).unwrap();
+            reconciler
+                .apply_proxy(client, base_url, None, &cache.models)
+                .unwrap();
+            let receipt_path = reconciler.receipt_path(client).unwrap();
+            let receipt = state::read_json::<Receipt>(&receipt_path).unwrap().unwrap();
+            assert_eq!(receipt.expected_model, "claude-one");
+            assert_eq!(receipt.expected_models, cache.models);
+            cache.skip_claude_models_for_other_clients = true;
+            state::write_json(&reconciler.state.join("models.json"), &cache).unwrap();
+            reconciler
+                .apply_proxy(client, base_url, None, &cache.models)
+                .unwrap();
+            let receipt = state::read_json::<Receipt>(&receipt_path).unwrap().unwrap();
+            assert_eq!(receipt.expected_model, "gpt-one");
+            assert_eq!(receipt.expected_models, ["gpt-one"]);
+            reconciler.restore_native(client).unwrap();
+            fs::remove_dir_all(root).unwrap();
+        }
+    }
+
+    #[test]
     fn url_and_cache_validation_fail_closed() {
         for url in [
             "http://proxy.example/v1",
@@ -699,6 +824,7 @@ mod tests {
             base_url: "https://proxy.example/v1".to_owned(),
             models: vec!["gpt-6-astra".to_owned()],
             reasoning_levels: BTreeMap::new(),
+            skip_claude_models_for_other_clients: true,
         };
         assert!(
             usable_cache(
