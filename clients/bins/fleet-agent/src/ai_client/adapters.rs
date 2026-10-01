@@ -1,5 +1,5 @@
 use super::{Receipt, Reconciler};
-use anyhow::Result;
+use anyhow::{Result, bail};
 use std::path::PathBuf;
 
 mod claude;
@@ -59,6 +59,29 @@ impl Adapter {
     ) -> Result<(Vec<u8>, Receipt)> {
         let cache =
             crate::state::read_json::<super::ModelCache>(&reconciler.state.join("models.json"))?;
+        let skip_claude = cache
+            .as_ref()
+            .filter(|cache| cache.base_url == base_url)
+            .is_none_or(|cache| cache.skip_claude_models_for_other_clients);
+        let allowed_models: Vec<String> = models
+            .iter()
+            .filter(|model| {
+                !skip_claude
+                    || self == Self::Claude
+                    || !model.to_ascii_lowercase().starts_with("claude-")
+            })
+            .cloned()
+            .collect();
+        let models = allowed_models.as_slice();
+        if models.is_empty() {
+            bail!(
+                "no allowed CLIProxy models for {}; Claude models are restricted to Claude Code",
+                self.name()
+            );
+        }
+        if model.is_some_and(|selected| !models.iter().any(|model| model == selected)) {
+            bail!("selected CLIProxy model is not allowed for {}", self.name());
+        }
         let efforts = cache
             .filter(|cache| cache.base_url == base_url)
             .map(|cache| cache.reasoning_levels)

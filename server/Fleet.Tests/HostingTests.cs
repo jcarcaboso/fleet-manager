@@ -8,6 +8,7 @@ using Fleet.Core.Coordination;
 using Fleet.Server.Hosting;
 using Fleet.Server.Persistence;
 using Fleet.Server.Security;
+using Fleet.Server.Transport;
 using Microsoft.AspNetCore.Hosting;
 using Microsoft.AspNetCore.Http;
 using Microsoft.AspNetCore.Mvc.Testing;
@@ -451,13 +452,14 @@ public sealed class HostingTests : IAsyncLifetime
             var selection = await browser.GetFromJsonAsync<JsonElement>("/dashboard/api/cliproxy/selection");
             var entry = Assert.Single(selection.GetProperty("catalogs").EnumerateArray());
             Assert.Equal(2, entry.GetProperty("models").GetArrayLength());
+            Assert.True(entry.GetProperty("policy").GetProperty("skipClaudeModelsForOtherClients").GetBoolean());
             var version = entry.GetProperty("version").GetInt64();
             browser.DefaultRequestHeaders.Remove("X-Fleet-CSRF");
             Assert.Equal(HttpStatusCode.BadRequest, (await browser.PostAsJsonAsync("/dashboard/api/cliproxy/selection",
                 new { baseUrl = "https://proxy.example/v1", version, policy = new { includeNew = true, enabledFamilies = Array.Empty<string>(), disabledFamilies = Array.Empty<string>(), modelOverrides = new { one = false } } })).StatusCode);
             await DashboardCsrf(browser);
             var save = await browser.PostAsJsonAsync("/dashboard/api/cliproxy/selection",
-                new { baseUrl = "https://proxy.example/v1", version, policy = new { includeNew = true, enabledFamilies = Array.Empty<string>(), disabledFamilies = Array.Empty<string>(), modelOverrides = new { one = false } } });
+                new { baseUrl = "https://proxy.example/v1", version, policy = new { includeNew = true, skipClaudeModelsForOtherClients = false, enabledFamilies = Array.Empty<string>(), disabledFamilies = Array.Empty<string>(), modelOverrides = new { one = false } } });
             save.EnsureSuccessStatusCode();
         }
         var allowed = await SendNodeAsync(route, assigned.Certificate, method: "GET");
@@ -470,6 +472,7 @@ public sealed class HostingTests : IAsyncLifetime
             var catalog = await JsonSerializer.DeserializeAsync<JsonElement>(allowed.Response.Body);
             Assert.Equal("https://proxy.example/v1", catalog.GetProperty("baseUrl").GetString());
             Assert.Equal("two", catalog.GetProperty("models")[0].GetProperty("id").GetString());
+            Assert.False(catalog.GetProperty("skipClaudeModelsForOtherClients").GetBoolean());
         }
         Assert.Equal("no-store", allowed.Response.Headers.CacheControl.ToString());
         Assert.Equal(403, (await SendNodeAsync(route, unassigned.Certificate, method: "GET")).Response.StatusCode);
@@ -498,6 +501,30 @@ public sealed class HostingTests : IAsyncLifetime
         (await _operator.PostAsync("/operator/v1/cliproxy/refresh", null)).EnsureSuccessStatusCode();
         status = await _operator.GetFromJsonAsync<JsonElement>("/operator/v1/cliproxy/status");
         Assert.Empty(status.GetProperty("catalogs").EnumerateArray());
+    }
+
+    [Theory]
+    [InlineData("codex", ".codex", 409)]
+    [InlineData("opencode", ".config/opencode", 409)]
+    [InlineData("claude", ".claude", 200)]
+    public async Task Claude_restriction_checks_pinned_models_for_the_assigned_client(string client, string path, int expectedStatus)
+    {
+        var node = await EnrollNode("claude-policy");
+        using var scope = _factory.Services.CreateScope();
+        await scope.ServiceProvider.GetRequiredService<IFleetCoordinator>().AcceptSourceSnapshotAsync(new(
+            "claude-pin", [], [new(node.NodeId, $"ai-client/{client}", new("home", path), [],
+                AiClient: new("fleet.ai-client/v1", client, "cliproxy", "https://proxy.example/v1", "ClAuDe-one"))],
+            [], DateTimeOffset.UtcNow));
+        _proxyHandler.Body = """{"data":[{"id":"gpt-one"},{"id":"ClAuDe-one"}]}""";
+        (await _operator.PostAsync("/operator/v1/cliproxy/refresh", null)).EnsureSuccessStatusCode();
+        var store = scope.ServiceProvider.GetRequiredService<CliProxySelectionStore>();
+        var policy = new CliProxySelectionPolicy(true, [], new(StringComparer.Ordinal), []);
+        var result = await store.SaveAsync("https://proxy.example/v1", 0, policy, default);
+        Assert.Equal(expectedStatus, result.Status);
+        if (expectedStatus == 409)
+            Assert.Equal("pinned_model_excluded", JsonSerializer.SerializeToElement(result.Body).GetProperty("code").GetString());
+        Assert.Equal(200, (await store.SaveAsync("https://proxy.example/v1", expectedStatus == 200 ? 1 : 0,
+            policy with { SkipClaudeModelsForOtherClients = false }, default)).Status);
     }
 
     [Fact]

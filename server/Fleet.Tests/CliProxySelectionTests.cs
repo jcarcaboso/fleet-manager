@@ -66,6 +66,37 @@ public sealed class CliProxySelectionTests : IAsyncLifetime
     }
 
     [Fact]
+    public async Task Claude_restriction_defaults_on_and_persists_when_disabled()
+    {
+        upstream.Body = """{"data":[{"id":"gpt-6-codex"},{"id":"claude-opus-4-1"}]}""";
+        var catalog = NewCatalog();
+        await catalog.SyncAsync([BaseUrl], true, default);
+        await using (var db = Database())
+        {
+            var store = new CliProxySelectionStore(db, catalog);
+            Assert.True((await store.GetSelectedCatalogAsync(BaseUrl, default))!.SkipClaudeModelsForOtherClients);
+            // Existing policies without the new field also default to skipping Claude for other clients.
+            db.CliProxySelections.Add(new()
+            {
+                BaseUrl = BaseUrl,
+                Version = 1,
+                PolicyJson = """{"includeNew":true,"disabledFamilies":[],"enabledFamilies":[],"modelOverrides":{}}"""
+            });
+            await db.SaveChangesAsync();
+            Assert.True((await store.GetSelectedCatalogAsync(BaseUrl, default))!.SkipClaudeModelsForOtherClients);
+            var policy = new CliProxySelectionPolicy(true, [], new(StringComparer.Ordinal), [],
+                SkipClaudeModelsForOtherClients: false);
+            Assert.Equal(200, (await store.SaveAsync(BaseUrl, 1, policy, default)).Status);
+        }
+        await using (var db = Database())
+        {
+            var selected = await new CliProxySelectionStore(db, catalog).GetSelectedCatalogAsync(BaseUrl, default);
+            Assert.False(selected!.SkipClaudeModelsForOtherClients);
+            Assert.Equal(2, selected.Models.Count);
+        }
+    }
+
+    [Fact]
     public async Task Stale_writes_and_zero_selection_are_rejected()
     {
         upstream.Body = """{"data":[{"id":"gpt-6-codex"},{"id":"claude-opus-4-1"}]}""";

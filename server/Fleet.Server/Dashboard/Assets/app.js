@@ -24,7 +24,7 @@ async function api(path, body) {
       stale_selection: 'Another operator saved this selection. It was reloaded; review it and save again.',
       invalid_selection: 'This selection is invalid or would leave no models enabled.',
       catalog_unavailable: 'This model catalog is no longer available. Reload the selection.',
-      pinned_model_excluded: 'A pinned default model cannot be excluded. Keep those models selected and save again.'
+      pinned_model_excluded: 'A pinned default model cannot be excluded. Keep it selected, change the pinned default, or turn off the Claude restriction for other clients.'
     };
     const failure = new Error(known[error.code] || `Request failed (${response.status}). Refresh and try again.`);
     failure.code = error.code; failure.status = response.status; failure.details = error;
@@ -208,6 +208,7 @@ function effectiveSelection(entry, model) {
 function policySnapshot(policy) {
   return JSON.stringify({
     includeNew: policy.includeNew,
+    skipClaudeModelsForOtherClients: policy.skipClaudeModelsForOtherClients,
     enabledFamilies: [...policy.enabledFamilies].sort(),
     disabledFamilies: [...policy.disabledFamilies].sort(),
     modelOverrides: Object.fromEntries(Object.entries(policy.modelOverrides).sort(([a], [b]) => a.localeCompare(b)))
@@ -225,6 +226,11 @@ function renderModelSelections() {
     const title = document.createElement('h4'); title.textContent = entry.baseUrl; heading.append(title);
     const count = document.createElement('span'); count.className = 'muted'; count.textContent = `${entry.models.filter(model => effectiveSelection(entry, model)).length} of ${entry.models.length} models selected`; heading.append(count);
     card.append(heading);
+    const restrictionLabel = document.createElement('label'); restrictionLabel.className = 'future-models';
+    const restriction = document.createElement('input'); restriction.type = 'checkbox'; restriction.checked = entry.policy.skipClaudeModelsForOtherClients; restriction.dataset.selectionAction = 'skip-claude';
+    restrictionLabel.append(restriction, document.createTextNode(' Skip Claude models for other clients'));
+    const restrictionNote = document.createElement('p'); restrictionNote.className = 'muted'; restrictionNote.textContent = 'Codex and OpenCode skip Claude models when enabled. Claude Code can still use selected Claude models. Uncheck to allow them in every client.';
+    card.append(restrictionLabel, restrictionNote);
     const futureLabel = document.createElement('label'); futureLabel.className = 'future-models';
     const future = document.createElement('input'); future.type = 'checkbox'; future.checked = entry.policy.includeNew; future.dataset.selectionAction = 'include-new';
     futureLabel.append(future, document.createTextNode(' Enable newly discovered families by default'));
@@ -282,7 +288,7 @@ async function loadModelSelections() {
   $('#selection-result').textContent = 'Loading model selection…';
   const result = await api('/cliproxy/selection');
   modelSelections = result.catalogs.map(entry => {
-    const policy = { includeNew: entry.policy.includeNew, enabledFamilies: [...(entry.policy.enabledFamilies || [])], disabledFamilies: [...entry.policy.disabledFamilies], modelOverrides: { ...entry.policy.modelOverrides } };
+    const policy = { includeNew: entry.policy.includeNew, skipClaudeModelsForOtherClients: entry.policy.skipClaudeModelsForOtherClients ?? true, enabledFamilies: [...(entry.policy.enabledFamilies || [])], disabledFamilies: [...entry.policy.disabledFamilies], modelOverrides: { ...entry.policy.modelOverrides } };
     return { ...entry, policy, savedPolicy: policySnapshot(policy) };
   });
   $('#selection-result').textContent = modelSelections.length ? '' : 'No model selections are available. Refresh models after assigning CLIProxy to an active Node.';
@@ -302,6 +308,7 @@ $('#model-selections').addEventListener('change', event => {
     preserveVisibleFamilies(entry);
     entry.policy.includeNew = control.checked;
   }
+  else if (action === 'skip-claude') entry.policy.skipClaudeModelsForOtherClients = control.checked;
   else if (action === 'family') editFamily(entry, control.dataset.family, control.checked);
   else if (action === 'model') {
     const model = entry.models.find(item => item.id === control.dataset.model);
@@ -320,7 +327,7 @@ $('#model-selections').addEventListener('click', async event => {
   try {
     const result = await api('/cliproxy/selection', { baseUrl: entry.baseUrl, version: entry.version, policy: entry.policy });
     const saved = result.catalog;
-    const policy = { includeNew: saved.policy.includeNew, enabledFamilies: [...(saved.policy.enabledFamilies || [])], disabledFamilies: [...saved.policy.disabledFamilies], modelOverrides: { ...saved.policy.modelOverrides } };
+    const policy = { includeNew: saved.policy.includeNew, skipClaudeModelsForOtherClients: saved.policy.skipClaudeModelsForOtherClients ?? true, enabledFamilies: [...(saved.policy.enabledFamilies || [])], disabledFamilies: [...saved.policy.disabledFamilies], modelOverrides: { ...saved.policy.modelOverrides } };
     modelSelections[index] = { ...saved, policy, savedPolicy: policySnapshot(policy) };
     $('#selection-result').textContent = `Selection saved for ${entry.baseUrl}. Agents receive it on their next poll.`;
   } catch (error) {

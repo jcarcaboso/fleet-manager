@@ -6,7 +6,9 @@ using Microsoft.EntityFrameworkCore;
 namespace Fleet.Server.Transport;
 
 public sealed record CliProxySelectionPolicy(bool IncludeNew, string[] DisabledFamilies, Dictionary<string, bool> ModelOverrides,
-    string[] EnabledFamilies);
+    string[] EnabledFamilies, bool SkipClaudeModelsForOtherClients = true);
+public sealed record CliProxySelectedCatalog(string BaseUrl, IReadOnlyList<CliProxyModel> Models,
+    bool SkipClaudeModelsForOtherClients);
 public sealed record CliProxySelectionModel(string Id, IReadOnlyList<string> ReasoningLevels, string FamilyKey,
     string FamilyLabel, bool Selected);
 
@@ -55,7 +57,7 @@ public sealed class CliProxySelectionStore(FleetDbContext database, CliProxyCata
             .Join(database.Assignments.AsNoTracking().Where(x => x.IsCurrent), client => client.AssignmentId,
                 assignment => assignment.Id, (client, assignment) => client)
             .Where(client => client.Mode == "cliproxy" && client.BaseUrl == baseUrl && client.Model != null)
-            .Select(client => client.Model!).Distinct().ToArrayAsync(ct);
+            .Select(client => new { client.Client, Model = client.Model! }).Distinct().ToArrayAsync(ct);
         var familyKeys = models.Select(model => Family(model.Id)).Distinct(StringComparer.Ordinal).ToArray();
         var disabled = policy.DisabledFamilies.ToHashSet(StringComparer.Ordinal);
         var enabled = policy.EnabledFamilies.ToHashSet(StringComparer.Ordinal);
@@ -72,8 +74,12 @@ public sealed class CliProxySelectionStore(FleetDbContext database, CliProxyCata
             DisabledFamilies = disabled.Order(StringComparer.Ordinal).ToArray(),
             EnabledFamilies = enabled.Order(StringComparer.Ordinal).ToArray()
         };
-        var pinnedExcluded = pinned.Where(id => models.Any(model => model.Id == id) && !Describe(
-            models.First(model => model.Id == id), savedPolicy).Selected).ToArray();
+        var pinnedExcluded = pinned.Where(client =>
+            savedPolicy.SkipClaudeModelsForOtherClients && client.Client != "claude" &&
+                client.Model.StartsWith("claude-", StringComparison.OrdinalIgnoreCase) ||
+            models.Any(model => model.Id == client.Model) && !Describe(
+                models.First(model => model.Id == client.Model), savedPolicy).Selected)
+            .Select(client => client.Model).Distinct().ToArray();
         if (pinnedExcluded.Length > 0) return (409, new { code = "pinned_model_excluded", models = pinnedExcluded });
 
         var described = models.Select(model => Describe(model, savedPolicy)).ToArray();
@@ -101,14 +107,17 @@ public sealed class CliProxySelectionStore(FleetDbContext database, CliProxyCata
         return (200, new { catalog = entry });
     }
 
-    public async Task<IReadOnlyList<CliProxyModel>?> GetSelectedAsync(string baseUrl, CancellationToken ct)
+    public async Task<IReadOnlyList<CliProxyModel>?> GetSelectedAsync(string baseUrl, CancellationToken ct) =>
+        (await GetSelectedCatalogAsync(baseUrl, ct))?.Models;
+
+    public async Task<CliProxySelectedCatalog?> GetSelectedCatalogAsync(string baseUrl, CancellationToken ct)
     {
         var models = await catalog.GetAsync(baseUrl, ct);
         if (models is null) return null;
         var policy = ReadPolicy(await database.CliProxySelections.AsNoTracking()
             .Where(x => x.BaseUrl == baseUrl).Select(x => x.PolicyJson).SingleOrDefaultAsync(ct));
         var selected = models.Where(model => Describe(model, policy).Selected).ToArray();
-        return selected.Length == 0 ? null : selected;
+        return selected.Length == 0 ? null : new(baseUrl, selected, policy.SkipClaudeModelsForOtherClients);
     }
 
     private static CliProxySelectionPolicy ReadPolicy(string? json)
