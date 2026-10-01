@@ -830,7 +830,7 @@ public sealed class PostgresFleetCoordinator(
                 Required(target.AiClient.Mode, 20, "ai_client_mode");
                 if (target.AiClient.Schema != "fleet.ai-client/v1" ||
                     target.TargetName != $"ai-client/{target.AiClient.Client}" ||
-                    target.AiClient.Client is not ("codex" or "opencode") ||
+                    target.AiClient.Client is not ("codex" or "opencode" or "claude") ||
                     target.AiClient.Mode is not ("native" or "cliproxy") ||
                     target.AiClient.Mode == "native" && (target.AiClient.BaseUrl is not null || target.AiClient.Model is not null) ||
                     target.AiClient.Mode == "cliproxy" && (!IsValidCliProxyBaseUrl(target.AiClient.BaseUrl) ||

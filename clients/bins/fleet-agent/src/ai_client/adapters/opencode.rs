@@ -136,6 +136,7 @@ pub(in crate::ai_client) fn render_opencode(
             expected_catalog_path: None,
             expected_models: models.to_vec(),
             expected_reasoning_levels: efforts.clone(),
+            original_settings: BTreeMap::new(),
         },
     ))
 }
