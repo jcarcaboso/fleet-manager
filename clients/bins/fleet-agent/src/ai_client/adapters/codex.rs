@@ -1,5 +1,6 @@
 use crate::ai_client::{
-    MAX_MODEL_RESPONSE_BYTES, PROVIDER_NAME, Receipt, valid_model_id, validate_receipt,
+    ContextLimits, MAX_MODEL_RESPONSE_BYTES, PROVIDER_NAME, Receipt, valid_model_id,
+    validate_receipt,
 };
 use anyhow::{Context, Result, bail};
 use std::{collections::BTreeMap, path::Path};
@@ -145,6 +146,7 @@ pub(super) fn restore_codex(old: Option<&[u8]>, receipt: &Receipt) -> Result<Vec
 pub(super) fn render_codex_catalog(
     models: &[String],
     efforts: &BTreeMap<String, Vec<String>>,
+    context_limits: &BTreeMap<String, ContextLimits>,
 ) -> Result<Vec<u8>> {
     const BASE_INSTRUCTIONS: &str = "You are Codex, a coding agent. Work in the user's repository, follow applicable AGENTS.md instructions, and use the provided tools to complete the request.";
 
@@ -155,6 +157,10 @@ pub(super) fn render_codex_catalog(
         .iter()
         .enumerate()
         .map(|(index, model)| {
+            let limits = context_limits.get(model).copied().unwrap_or_default();
+            if !limits.is_valid() {
+                bail!("cannot build Codex catalog from invalid context limits");
+            }
             let priority = i32::try_from(index + 1).context("too many Codex models")?;
             Ok(serde_json::json!({
                 "slug": model,
@@ -165,6 +171,9 @@ pub(super) fn render_codex_catalog(
                 "supported_reasoning_levels": efforts.get(model).into_iter().flatten()
                     .map(|effort| serde_json::json!({"effort": effort, "description": effort}))
                     .collect::<Vec<_>>(),
+                "context_window": limits.context_window,
+                "max_context_window": limits.max_context_window,
+                "auto_compact_token_limit": limits.auto_compact_token_limit,
                 "shell_type": "unified_exec",
                 "visibility": "list",
                 "supported_in_api": true,

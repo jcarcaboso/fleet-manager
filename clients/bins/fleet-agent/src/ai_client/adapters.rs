@@ -82,15 +82,15 @@ impl Adapter {
         if model.is_some_and(|selected| !models.iter().any(|model| model == selected)) {
             bail!("selected CLIProxy model is not allowed for {}", self.name());
         }
-        let efforts = cache
+        let (efforts, context_limits) = cache
             .filter(|cache| cache.base_url == base_url)
-            .map(|cache| cache.reasoning_levels)
+            .map(|cache| (cache.reasoning_levels, cache.context_limits))
             .unwrap_or_default();
         let key_path = reconciler.state.join("api-key");
         match self {
             Self::Codex => {
                 let catalog_path = reconciler.state.join("codex-model-catalog.json");
-                let catalog = codex::render_codex_catalog(models, &efforts)?;
+                let catalog = codex::render_codex_catalog(models, &efforts, &context_limits)?;
                 let rendered = codex::render_codex(
                     old,
                     previous,

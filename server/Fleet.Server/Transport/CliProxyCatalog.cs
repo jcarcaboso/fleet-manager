@@ -7,7 +7,8 @@ using Microsoft.Extensions.Options;
 
 namespace Fleet.Server.Transport;
 
-public sealed record CliProxyModel(string Id, IReadOnlyList<string> ReasoningLevels);
+public sealed record CliProxyModel(string Id, IReadOnlyList<string> ReasoningLevels,
+    long? ContextWindow = null, long? MaxContextWindow = null, long? AutoCompactTokenLimit = null);
 
 public sealed class CliProxyCatalog(IHttpClientFactory clients, IOptions<FleetOptions> options, TimeProvider clock)
 {
@@ -60,7 +61,7 @@ public sealed class CliProxyCatalog(IHttpClientFactory clients, IOptions<FleetOp
                 var next = new Entry(previous?.Models, previous?.LastSuccess, clock.GetUtcNow().AddMinutes(1), "failed", null);
                 try
                 {
-                    // CLIProxy's Codex response includes effort metadata omitted from the ordinary list.
+                    // CLIProxy's Codex response includes reasoning and context metadata omitted from the ordinary list.
                     using var request = new HttpRequestMessage(HttpMethod.Get, baseUrl + "/models?client_version=0.154.0");
                     request.Headers.Authorization = new AuthenticationHeaderValue("Bearer", options.Value.CliProxyApiKey);
                     using var timeout = CancellationTokenSource.CreateLinkedTokenSource(ct);
@@ -134,7 +135,12 @@ public sealed class CliProxyCatalog(IHttpClientFactory clients, IOptions<FleetOp
                             efforts.Add(effort);
                     }
             }
-            models.Add(new(id, efforts));
+            var contextWindow = PositiveInteger(item, "context_window");
+            var maxContextWindow = PositiveInteger(item, "max_context_window");
+            var autoCompactTokenLimit = PositiveInteger(item, "auto_compact_token_limit");
+            if (contextWindow > maxContextWindow)
+                throw new InvalidDataException("CLIProxy context window exceeds its maximum.");
+            models.Add(new(id, efforts, contextWindow, maxContextWindow, autoCompactTokenLimit));
         }
         if (root.ValueKind == JsonValueKind.Object)
             foreach (var property in root.EnumerateObject().OrderBy(property => property.Name, StringComparer.Ordinal))
@@ -152,5 +158,14 @@ public sealed class CliProxyCatalog(IHttpClientFactory clients, IOptions<FleetOp
         else throw new InvalidDataException("Unsupported CLIProxy catalog.");
         if (models.Count == 0) throw new InvalidDataException("Empty CLIProxy catalog.");
         return models;
+    }
+
+    private static long? PositiveInteger(JsonElement item, string field)
+    {
+        if (item.ValueKind != JsonValueKind.Object || !item.TryGetProperty(field, out var value) ||
+            value.ValueKind == JsonValueKind.Null) return null;
+        if (value.ValueKind == JsonValueKind.Number && value.TryGetInt64(out var limit) && limit > 0)
+            return limit;
+        throw new InvalidDataException("Invalid CLIProxy context limit.");
     }
 }

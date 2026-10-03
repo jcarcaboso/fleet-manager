@@ -41,15 +41,47 @@ for each client that should receive the catalog. No model or effort list is
 needed. The endpoint must use HTTPS and end at `/v1`.
 
 The Server fetches `/v1/models?client_version=0.154.0`, which requests CLIProxy's
-Codex catalog with advertised reasoning efforts. A background service discovers
-endpoints assigned to active Nodes within 30 seconds and refreshes each catalog
-weekly, independently of repository polling and Agent requests. It only calls
+Codex catalog with advertised reasoning efforts and context limits. A background
+service discovers endpoints assigned to active Nodes within 30 seconds and
+refreshes each catalog weekly, independently of repository polling and Agent
+requests. It only calls
 CLIProxy when a key and at least one current proxy Assignment are configured.
 The catalog is cached in memory; a Server restart triggers fresh discovery.
 Assigned Nodes retrieve the cached catalog from
 `GET /agent/v1/cliproxy/models` over mTLS during their normal reconciliation.
 Catalog changes do not require a YAML commit. The response includes the endpoint
 so an Agent cannot apply a catalog from a different Assignment.
+
+### Codex context limits
+
+The Server preserves `context_window`, `max_context_window`, and
+`auto_compact_token_limit` from the proxy catalog. The Agent caches these values
+per model and writes them into Codex's generated catalog. The default context
+window and maximum override window stay separate; Fleet does not replace the
+default with the larger maximum. Invalid limits fail the refresh and retain the
+last valid catalog.
+
+When the proxy leaves the compaction threshold null, Codex derives it from the
+context window. For example, a 272,000-token default window gives a
+244,800-token automatic-compaction threshold in
+[Codex 0.160.0](https://github.com/openai/codex/blob/rust-v0.160.0/codex-rs/protocol/src/openai_models.rs).
+Fleet does not invent limits for legacy catalogs that advertise only model IDs.
+It leaves
+local `model_context_window` and `model_auto_compact_token_limit` overrides
+untouched.
+
+Upgrade proxy-assigned Agents before the Server, or upgrade both together.
+Older Agents reject the added catalog fields and retain their previous catalog.
+Existing Agent caches remain readable but gain no context limits until a
+successful refresh from the updated Server. Refresh models in the dashboard,
+wait for successful Node reconciliation, and restart existing Codex sessions to
+load the corrected catalog. This prevents missing compaction safeguards; it
+does not by itself recover an already oversized conversation or fix every
+stream disconnect. Try native `/compact` after reloading the limits, or preserve
+the original conversation and start a fresh thread with a short handoff if
+compaction fails.
+
+### Refresh and model selection
 
 Set `Fleet__CliProxySyncIntervalSeconds` to change the refresh interval, in
 seconds. The default is `604800`, or seven days; the accepted range is 10 seconds
