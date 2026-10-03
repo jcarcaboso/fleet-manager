@@ -36,8 +36,35 @@ struct ModelCache {
     models: Vec<String>,
     #[serde(default)]
     reasoning_levels: BTreeMap<String, Vec<String>>,
+    #[serde(default)]
+    context_limits: BTreeMap<String, ContextLimits>,
     #[serde(default = "default_skip_claude_models")]
     skip_claude_models_for_other_clients: bool,
+}
+
+#[derive(Clone, Copy, Debug, Default, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct ContextLimits {
+    context_window: Option<i64>,
+    max_context_window: Option<i64>,
+    auto_compact_token_limit: Option<i64>,
+}
+
+impl ContextLimits {
+    fn is_valid(self) -> bool {
+        [
+            self.context_window,
+            self.max_context_window,
+            self.auto_compact_token_limit,
+        ]
+        .into_iter()
+        .flatten()
+        .all(|limit| limit > 0)
+            && self
+                .context_window
+                .zip(self.max_context_window)
+                .is_none_or(|(window, maximum)| window <= maximum)
+    }
 }
 
 fn default_skip_claude_models() -> bool {
@@ -305,6 +332,9 @@ fn parse_server_catalog(bytes: &[u8], base_url: &str) -> Result<ModelCache> {
     struct Model {
         id: String,
         reasoning_levels: Vec<String>,
+        context_window: Option<i64>,
+        max_context_window: Option<i64>,
+        auto_compact_token_limit: Option<i64>,
     }
     #[derive(Deserialize)]
     #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -320,10 +350,17 @@ fn parse_server_catalog(bytes: &[u8], base_url: &str) -> Result<ModelCache> {
     }
     let mut models = Vec::new();
     let mut reasoning_levels = BTreeMap::new();
+    let mut context_limits = BTreeMap::new();
     let mut seen = HashSet::new();
     for model in catalog.models {
+        let limits = ContextLimits {
+            context_window: model.context_window,
+            max_context_window: model.max_context_window,
+            auto_compact_token_limit: model.auto_compact_token_limit,
+        };
         if !valid_model_id(&model.id)
             || !seen.insert(model.id.to_ascii_lowercase())
+            || !limits.is_valid()
             || model
                 .reasoning_levels
                 .iter()
@@ -331,6 +368,7 @@ fn parse_server_catalog(bytes: &[u8], base_url: &str) -> Result<ModelCache> {
         {
             bail!("invalid Server model metadata");
         }
+        context_limits.insert(model.id.clone(), limits);
         reasoning_levels.insert(model.id.clone(), model.reasoning_levels);
         models.push(model.id);
     }
@@ -339,6 +377,7 @@ fn parse_server_catalog(bytes: &[u8], base_url: &str) -> Result<ModelCache> {
         base_url: base_url.to_owned(),
         models,
         reasoning_levels,
+        context_limits,
         skip_claude_models_for_other_clients: catalog.skip_claude_models_for_other_clients,
     })
 }
@@ -405,6 +444,10 @@ fn usable_cache(
                 .values()
                 .flatten()
                 .all(|level| valid_effort(level))
+            && cache
+                .context_limits
+                .values()
+                .all(|limits| limits.is_valid())
     })
 }
 
@@ -568,6 +611,118 @@ mod tests {
             "one"
         );
         assert!(select_model(Some("removed"), None, &cache.models).is_err());
+    }
+
+    #[test]
+    fn codex_catalog_preserves_context_limits_through_cache_and_refresh() {
+        let root = temp_root();
+        let reconciler = disk_reconciler(&root);
+        let base_url = "https://proxy.example/v1";
+        let bytes = br#"{"baseUrl":"https://proxy.example/v1","models":[
+            {"id":"gpt-6.1-sol","reasoningLevels":["medium","xhigh"],"contextWindow":272000,"maxContextWindow":872000,"autoCompactTokenLimit":null},
+            {"id":"explicit-limit","reasoningLevels":[],"contextWindow":128000,"autoCompactTokenLimit":100000},
+            {"id":"max-only","reasoningLevels":[],"maxContextWindow":64000},
+            {"id":"legacy","reasoningLevels":[]}
+        ]}"#;
+        let cache = parse_server_catalog(bytes, base_url).unwrap();
+        let cache_path = reconciler.state.join("models.json");
+        state::write_json(&cache_path, &cache).unwrap();
+        let cached = usable_cache(state::read_json(&cache_path).unwrap(), base_url, None).unwrap();
+        reconciler
+            .apply_proxy("codex", base_url, None, &cached.models)
+            .unwrap();
+        let catalog_path = reconciler.state.join("codex-model-catalog.json");
+        let catalog: Value = serde_json::from_slice(&fs::read(&catalog_path).unwrap()).unwrap();
+        assert_eq!(catalog["models"][0]["context_window"], 272000);
+        assert_eq!(catalog["models"][0]["max_context_window"], 872000);
+        assert!(catalog["models"][0]["auto_compact_token_limit"].is_null());
+        assert_eq!(catalog["models"][1]["context_window"], 128000);
+        assert_eq!(catalog["models"][1]["auto_compact_token_limit"], 100000);
+        assert!(catalog["models"][2]["context_window"].is_null());
+        assert_eq!(catalog["models"][2]["max_context_window"], 64000);
+        assert!(catalog["models"][3]["context_window"].is_null());
+        assert!(catalog["models"][3]["max_context_window"].is_null());
+        assert!(catalog["models"][3]["auto_compact_token_limit"].is_null());
+
+        let refreshed = parse_server_catalog(
+            &String::from_utf8(bytes.to_vec())
+                .unwrap()
+                .replace("272000", "256000")
+                .into_bytes(),
+            base_url,
+        )
+        .unwrap();
+        state::write_json(&cache_path, &refreshed).unwrap();
+        reconciler
+            .apply_proxy("codex", base_url, None, &refreshed.models)
+            .unwrap();
+        let updated: Value = serde_json::from_slice(&fs::read(&catalog_path).unwrap()).unwrap();
+        assert_eq!(updated["models"][0]["context_window"], 256000);
+
+        let mut invalid = refreshed.clone();
+        invalid
+            .context_limits
+            .get_mut("gpt-6.1-sol")
+            .unwrap()
+            .context_window = Some(0);
+        state::write_json(&cache_path, &invalid).unwrap();
+        let previous_catalog = fs::read(&catalog_path).unwrap();
+        assert!(
+            reconciler
+                .apply_proxy("codex", base_url, None, &invalid.models)
+                .is_err()
+        );
+        assert_eq!(fs::read(&catalog_path).unwrap(), previous_catalog);
+
+        let mut other_endpoint = refreshed.clone();
+        other_endpoint.base_url = "https://other.example/v1".to_owned();
+        state::write_json(&cache_path, &other_endpoint).unwrap();
+        reconciler
+            .apply_proxy("codex", base_url, None, &refreshed.models)
+            .unwrap();
+        let isolated: Value = serde_json::from_slice(&fs::read(&catalog_path).unwrap()).unwrap();
+        assert!(isolated["models"][0]["context_window"].is_null());
+        reconciler.restore_native("codex").unwrap();
+        assert!(!catalog_path.exists());
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn server_catalog_rejects_invalid_context_limits() {
+        for field in ["contextWindow", "maxContextWindow", "autoCompactTokenLimit"] {
+            for value in [
+                serde_json::json!(0),
+                serde_json::json!(-1),
+                serde_json::json!(1.5),
+                serde_json::json!("272000"),
+                serde_json::json!(true),
+                serde_json::json!(i64::MAX as u64 + 1),
+            ] {
+                let bytes = serde_json::to_vec(&serde_json::json!({
+                    "baseUrl": "https://proxy.example/v1",
+                    "models": [{"id": "one", "reasoningLevels": [], field: value}]
+                }))
+                .unwrap();
+                assert!(parse_server_catalog(&bytes, "https://proxy.example/v1").is_err());
+            }
+        }
+        assert!(
+            parse_server_catalog(
+                br#"{"baseUrl":"https://proxy.example/v1","models":[{"id":"one","reasoningLevels":[],"contextWindow":872000,"maxContextWindow":272000}]}"#,
+                "https://proxy.example/v1",
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn legacy_model_cache_remains_usable() {
+        let cache: ModelCache = serde_json::from_slice(
+            br#"{"version":1,"baseUrl":"https://proxy.example/v1","models":["one"],"reasoningLevels":{"one":["medium"]}}"#,
+        )
+        .unwrap();
+        assert!(cache.context_limits.is_empty());
+        assert!(usable_cache(Some(cache), "https://proxy.example/v1", None).is_some());
     }
 
     #[test]
@@ -824,6 +979,7 @@ mod tests {
             base_url: "https://proxy.example/v1".to_owned(),
             models: vec!["gpt-6-astra".to_owned()],
             reasoning_levels: BTreeMap::new(),
+            context_limits: BTreeMap::new(),
             skip_claude_models_for_other_clients: true,
         };
         assert!(
@@ -842,6 +998,15 @@ mod tests {
             )
             .is_none()
         );
+        let mut invalid = cache.clone();
+        invalid.context_limits.insert(
+            "gpt-6-astra".to_owned(),
+            ContextLimits {
+                context_window: Some(0),
+                ..Default::default()
+            },
+        );
+        assert!(usable_cache(Some(invalid), "https://proxy.example/v1", None).is_none());
         assert!(
             usable_cache(
                 Some(cache),
@@ -860,7 +1025,7 @@ mod tests {
         fs::create_dir(&codex_home).unwrap();
         let config_path = codex_home.join("config.toml");
         let auth_path = codex_home.join("auth.json");
-        let original = "# keep me\napproval_policy = \"never\"\nmodel = \"native-model\"\nmodel_provider = \"native-provider\"\nmodel_catalog_json = \"/native/catalog.json\"\n";
+        let original = "# keep me\napproval_policy = \"never\"\nmodel_context_window = 272000\nmodel_auto_compact_token_limit = 200000\nmodel = \"native-model\"\nmodel_provider = \"native-provider\"\nmodel_catalog_json = \"/native/catalog.json\"\n";
         fs::write(&config_path, original).unwrap();
         fs::write(&auth_path, b"oauth-secret").unwrap();
         let initial_models = ["gpt-6-astra".to_owned(), "gpt-5.6-sol".to_owned()];
@@ -875,6 +1040,8 @@ mod tests {
             .unwrap();
         let applied = fs::read(&config_path).unwrap();
         let config = String::from_utf8(applied.clone()).unwrap();
+        assert!(config.contains("model_context_window = 272000"));
+        assert!(config.contains("model_auto_compact_token_limit = 200000"));
         let catalog_path = reconciler.state.join("codex-model-catalog.json");
         assert!(config.contains(&format!(
             "model_catalog_json = {:?}",

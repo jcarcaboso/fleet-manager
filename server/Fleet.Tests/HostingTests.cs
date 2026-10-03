@@ -435,7 +435,7 @@ public sealed class HostingTests : IAsyncLifetime
             await scope.ServiceProvider.GetRequiredService<IFleetCoordinator>().AcceptSourceSnapshotAsync(new(
                 "cliproxy-assignment", [], [proxyTarget], [], DateTimeOffset.UtcNow));
 
-        _proxyHandler.Body = """{"data":[{"id":"one"},{"id":"two"}]}""";
+        _proxyHandler.Body = """{"data":[{"id":"one"},{"id":"two","context_window":272000,"max_context_window":872000,"auto_compact_token_limit":200000}]}""";
         (await _operator.PostAsync("/operator/v1/cliproxy/refresh", null)).EnsureSuccessStatusCode();
         var status = await _operator.GetFromJsonAsync<JsonElement>("/operator/v1/cliproxy/status");
         Assert.Equal(604800, status.GetProperty("intervalSeconds").GetInt32());
@@ -472,6 +472,9 @@ public sealed class HostingTests : IAsyncLifetime
             var catalog = await JsonSerializer.DeserializeAsync<JsonElement>(allowed.Response.Body);
             Assert.Equal("https://proxy.example/v1", catalog.GetProperty("baseUrl").GetString());
             Assert.Equal("two", catalog.GetProperty("models")[0].GetProperty("id").GetString());
+            Assert.Equal(272000, catalog.GetProperty("models")[0].GetProperty("contextWindow").GetInt64());
+            Assert.Equal(872000, catalog.GetProperty("models")[0].GetProperty("maxContextWindow").GetInt64());
+            Assert.Equal(200000, catalog.GetProperty("models")[0].GetProperty("autoCompactTokenLimit").GetInt64());
             Assert.False(catalog.GetProperty("skipClaudeModelsForOtherClients").GetBoolean());
         }
         Assert.Equal("no-store", allowed.Response.Headers.CacheControl.ToString());
