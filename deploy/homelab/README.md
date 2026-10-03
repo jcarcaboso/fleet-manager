@@ -63,7 +63,7 @@ it in Git or PostgreSQL. Set `FLEET_CLIPROXY_API_KEY` in the environment used to
 start Compose:
 
 ```sh
-sed -i 's|^FLEET_IMAGE=.*|FLEET_IMAGE=skorcius/fleet-manager:0.8.0|' .env
+sed -i 's|^FLEET_IMAGE=.*|FLEET_IMAGE=skorcius/fleet-manager:0.8.1|' .env
 export FLEET_CLIPROXY_API_KEY='replace-with-a-dedicated-proxy-key'
 docker compose up -d --wait
 ```
@@ -145,7 +145,7 @@ The Server terminates HTTPS itself to validate Node client certificates. A proxy
 in front must preserve TLS with TCP passthrough; ordinary HTTP termination does
 not preserve this authentication.
 
-The pinned POC image tag is `skorcius/fleet-manager:0.8.0`. To upgrade,
+The pinned POC image tag is `skorcius/fleet-manager:0.8.1`. To upgrade,
 back up PostgreSQL and the private configuration, change `FLEET_IMAGE` in `.env`,
 then run `docker compose pull` and `docker compose up -d --force-recreate --wait`.
 Migrations run before the Server starts. Do not run `docker compose down -v` on
@@ -154,7 +154,7 @@ an installation whose database or configuration you want to retain.
 When upgrading from `0.2.0`, first replace `compose.yaml` with this release's
 copy so it supplies the dashboard's public URL. Preserve `.env`, `secrets/`,
 `operator.env`, `ssh/`, and Docker volumes. Set `FLEET_IMAGE` to
-`skorcius/fleet-manager:0.8.0` in `.env`. Do not rerun `setup.py` on an existing
+`skorcius/fleet-manager:0.8.1` in `.env`. Do not rerun `setup.py` on an existing
 installation. The dashboard uses the existing Operator token and CA.
 
 Server image publication is manual; the GitHub tag workflow only publishes
@@ -162,7 +162,7 @@ client archives and Homebrew formulas. From a clean checkout of the tested
 release commit, build the versioned image:
 
 ```sh
-VERSION=0.8.0
+VERSION=0.8.1
 SHA=$(git rev-parse HEAD)
 docker build --platform linux/amd64 \
   --label "org.opencontainers.image.revision=$SHA" \
