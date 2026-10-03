@@ -256,6 +256,7 @@ The main design references are:
 - [Fleet Manager 0.6.6 release notes](docs/releases/0.6.6.md)
 - [Fleet Manager 0.7.0 release notes](docs/releases/0.7.0.md)
 - [Fleet Manager 0.8.0 release notes](docs/releases/0.8.0.md)
+- [Fleet Manager 0.8.1 release notes](docs/releases/0.8.1.md)
 - [Project release skill](.agents/skills/fleet-release/SKILL.md)
 - [Fleet Manager 0.6.5 release notes](docs/releases/0.6.5.md)
 - [Fleet Manager 0.5.0 release notes](docs/releases/0.5.0.md)
