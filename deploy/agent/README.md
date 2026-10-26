@@ -191,6 +191,42 @@ than one day remaining. If the Node stays offline past certificate expiration,
 an Operator must arrange fresh enrollment with a free alias; automatic recovery
 of an expired identity is not supported by Server 0.2.0.
 
+## Inspect the Agent while it runs
+
+These commands are read-only and safe to run while the background service is
+running. They do not take the Agent's exclusive state lock, never create or
+change files, directories or permissions, and send nothing to the Server. If the
+state directory does not exist, `status`, `targets` and `disk` report `Agent is
+not configured` on stderr. `check` prints a failed `stateDirectory` check as
+JSON. All exit with status 1 and leave the directory missing.
+
+| Command | Output |
+| --- | --- |
+| `fleet-agent status` | Identity, certificate expiry, pending report and detail, active Assignments and `"service": {"running": true\|false}` |
+| `fleet-agent targets` | Each Target: kind, `state` (`active`, `pending` or `idle`), active and pending Assignment IDs and revision, whether a report is pending |
+| `fleet-agent check` | `{"ok": ..., "checks": [...]}` with the state directory, config, identity, certificate expiry, home directory, service and pending report or detail |
+| `fleet-agent disk` | `{"diskUsage": {...}, "timedOut": false}`, measured now |
+
+Successful inspections print JSON on stdout. `status` keeps its earlier fields; `service.running`
+is new. It is `true` while any process holds the state lock: the service, but
+also a foreground `run`, `enroll` or `alias`.
+
+`check` repairs nothing. Each check is `ok`, `warn` or `fail`. It exits `0` when
+no check failed (warnings still exit `0`) and `1` when any failed: a missing,
+linked or non-private state directory, missing or invalid config or identity, an
+expired certificate, or a missing home directory. A certificate that expires in
+under 2 days, a stopped service, and a report or failure detail waiting to be
+sent are warnings.
+
+`disk` makes one `statvfs` or `statfs` call per disk on a background thread and
+waits up to 2 seconds. If it does not answer, such as on a hung network mount,
+it prints `{"diskUsage": null, "timedOut": true}` and exits without waiting.
+
+`enroll`, `run` and `alias` need the exclusive lock and fail with "another
+fleet-agent process is using this state directory" while the service runs; stop
+the service first. `service` commands take no lock. Each command's `--help` says
+whether it is read-only.
+
 ## Change the Node alias
 
 Using the Node's own certificate:

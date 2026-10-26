@@ -14,17 +14,17 @@ const LABEL: &str = "dev.fleet.agent";
 
 #[derive(Clone, Copy, Debug, Subcommand)]
 pub enum ServiceCommand {
-    /// Install the service definition and enable startup.
+    /// Install the service definition and enable startup. Not read-only.
     Install,
-    /// Start the installed service.
+    /// Start the installed service. Not read-only.
     Start,
-    /// Stop the installed service.
+    /// Stop the installed service. Not read-only.
     Stop,
-    /// Restart the installed service.
+    /// Restart the installed service. Not read-only.
     Restart,
-    /// Show service-manager status.
+    /// Show service-manager status. Read-only and safe to run while the service runs.
     Status,
-    /// Stop, disable, and remove the service definition.
+    /// Stop, disable, and remove the service definition. Not read-only.
     Uninstall,
 }
 

@@ -69,6 +69,22 @@ impl CredentialStore {
         Ok(Self { directory })
     }
 
+    /// Opens an existing credentials directory without creating it or changing
+    /// its permissions. `None` means it does not exist. A link, a directory
+    /// owned by someone else or one that others can enter is an error.
+    pub fn open_read_only(directory: impl Into<PathBuf>) -> io::Result<Option<Self>> {
+        use crate::state::{DirectoryState, classify_directory};
+        let directory = directory.into();
+        match classify_directory(&directory)? {
+            DirectoryState::Missing => Ok(None),
+            DirectoryState::Private => Ok(Some(Self { directory })),
+            DirectoryState::Unsafe(reason) => Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                format!("credential directory {reason}"),
+            )),
+        }
+    }
+
     pub fn load_identity(&self) -> io::Result<Option<StoredIdentity>> {
         let path = self.directory.join(IDENTITY_FILE);
         let bytes = match read_private_file(&path) {
@@ -364,6 +380,42 @@ mod tests {
         assert_eq!(
             error_kind(store.load_identity()),
             io::ErrorKind::InvalidData
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn read_only_open_never_creates_or_changes_the_directory() {
+        use std::os::unix::fs::{PermissionsExt, symlink};
+
+        let root = TestDirectory::new();
+        assert!(CredentialStore::open_read_only(&root.0).unwrap().is_none());
+        assert!(!root.0.exists());
+
+        let store = CredentialStore::open(&root.0).unwrap();
+        let pending = store.load_or_generate_pending().unwrap();
+        store.complete_enrollment(&pending, &enrollment()).unwrap();
+        let reader = CredentialStore::open_read_only(&root.0).unwrap().unwrap();
+        assert_eq!(
+            reader.load_identity().unwrap().unwrap().node_id,
+            Uuid::from_u128(2)
+        );
+
+        fs::set_permissions(&root.0, fs::Permissions::from_mode(0o755)).unwrap();
+        assert_eq!(
+            error_kind(CredentialStore::open_read_only(&root.0)),
+            io::ErrorKind::InvalidInput
+        );
+        let mode = fs::metadata(&root.0).unwrap().permissions().mode();
+        assert_eq!(mode & 0o777, 0o755);
+        fs::set_permissions(&root.0, fs::Permissions::from_mode(0o700)).unwrap();
+
+        let linked = root.0.with_extension("link");
+        let _linked_cleanup = TestDirectory(linked.clone());
+        symlink(&root.0, &linked).unwrap();
+        assert_eq!(
+            error_kind(CredentialStore::open_read_only(&linked)),
+            io::ErrorKind::InvalidInput
         );
     }
 
