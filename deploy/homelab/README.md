@@ -7,8 +7,8 @@ HTTPS. Docker Compose v2, Python 3, and OpenSSL are required for setup.
 
 After upgrading to Server `0.3.0`, open
 `https://FLEET_HOSTNAME:FLEET_PORT/dashboard` and sign in with the Operator token
-from `operator.env`. Your browser must trust the homelab CA. Create a link for
-the Node's alias, then run `fleet-agent enroll --link` on that Node and paste it.
+from `operator.env`. Your browser must trust the homelab CA. Choose **Add
+machine** to create a link for the Node's alias, then run `fleet-agent enroll --link` on that Node and paste it.
 The link carries public CA trust, so the Node needs no separate CA or JSON file.
 
 Compose supplies `Fleet__PublicUrl` from `FLEET_HOSTNAME` and `FLEET_PORT`.

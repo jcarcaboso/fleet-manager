@@ -197,8 +197,8 @@ prefixes with scope `admin`. Their bodies and responses are unchanged.
 
 ### `GET issues`
 
-The structured successor of `GET diagnostics`, which stays available unchanged
-for one release.
+The structured list of open problems. It replaced the original dashboard's
+`GET diagnostics`, which has been removed.
 
 ```json
 { "items": [{

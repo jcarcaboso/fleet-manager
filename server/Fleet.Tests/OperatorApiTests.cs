@@ -448,11 +448,9 @@ public sealed partial class OperatorApiTests(OperatorApiFixture fixture) : IClas
 
         // Every code the endpoint can return is explained by the catalog.
         Assert.All(items.Select(x => x["code"]!.GetValue<string>()).Distinct(), code => Assert.NotNull(ErrorCatalog.Find(code)));
-        // The legacy diagnostics keep their combined issue for one more release.
+        // The removed legacy endpoint is gone from the dashboard API.
         await using var browser = new BrowserHandle(await fixture.BrowserAsync(OperatorApiFixture.ReadToken));
-        var legacy = await OperatorApiFixture.ReadAsync(await browser.Client.GetAsync("/dashboard/api/diagnostics"));
-        Assert.Contains(legacy["issues"]!.AsArray(), x => x!["code"]!.GetValue<string>() == "nodes_not_contacting");
-        Assert.DoesNotContain(legacy["issues"]!.AsArray(), x => x!["code"]!.GetValue<string>() == "node_not_contacting");
+        Assert.Equal(HttpStatusCode.NotFound, (await browser.Client.GetAsync("/dashboard/api/diagnostics")).StatusCode);
     }
 
     [Fact]

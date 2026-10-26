@@ -101,18 +101,18 @@ public sealed class HostingTests : IAsyncLifetime
     }
 
     [Fact]
-    public async Task Dashboard_diagnostics_require_login_and_identify_current_configuration_failures()
+    public async Task Dashboard_issues_require_login_and_identify_current_configuration_failures()
     {
         using var browser = _factory.CreateClient(new() { BaseAddress = new Uri("https://localhost") });
-        Assert.Equal(HttpStatusCode.Unauthorized, (await browser.GetAsync("/dashboard/api/diagnostics")).StatusCode);
+        Assert.Equal(HttpStatusCode.Unauthorized, (await browser.GetAsync("/dashboard/api/issues")).StatusCode);
         browser.DefaultRequestHeaders.Add("Origin", "https://localhost");
         await DashboardCsrf(browser);
         (await browser.PostAsJsonAsync("/dashboard/api/login", new { token = Token })).EnsureSuccessStatusCode();
         using var scope = _factory.Services.CreateScope();
         var options = scope.ServiceProvider.GetRequiredService<Microsoft.Extensions.Options.IOptions<FleetOptions>>().Value;
         options.CliProxyApiKey = "";
-        var initial = await browser.GetFromJsonAsync<JsonElement>("/dashboard/api/diagnostics");
-        Assert.DoesNotContain(initial.GetProperty("issues").EnumerateArray(), issue => issue.GetProperty("code").GetString() == "cliproxy_key_missing");
+        var initial = await browser.GetFromJsonAsync<JsonElement>("/dashboard/api/issues");
+        Assert.DoesNotContain(initial.GetProperty("items").EnumerateArray(), issue => issue.GetProperty("code").GetString() == "cliproxy_key_missing");
         var enrolled = await EnrollNode("diagnostic-node");
         var coordinator = scope.ServiceProvider.GetRequiredService<IFleetCoordinator>();
         await coordinator.AcceptSourceSnapshotAsync(new("diagnostics", [], [new SnapshotTarget(enrolled.NodeId,
@@ -121,19 +121,19 @@ public sealed class HostingTests : IAsyncLifetime
         var db = scope.ServiceProvider.GetRequiredService<FleetDbContext>();
         await db.Assignments.Where(row => row.NodeId == enrolled.NodeId.Value).ExecuteUpdateAsync(set => set.SetProperty(row => row.State, (int)ConvergenceState.Failed));
         await db.Nodes.Where(row => row.Id == enrolled.NodeId.Value).ExecuteUpdateAsync(set => set.SetProperty(row => row.LastContactAt, DateTimeOffset.UtcNow.AddDays(-1)));
-        var result = await browser.GetFromJsonAsync<JsonElement>("/dashboard/api/diagnostics");
-        var codes = result.GetProperty("issues").EnumerateArray().Select(issue => issue.GetProperty("code").GetString()).ToArray();
+        var result = await browser.GetFromJsonAsync<JsonElement>("/dashboard/api/issues");
+        var codes = result.GetProperty("items").EnumerateArray().Select(issue => issue.GetProperty("code").GetString()).ToArray();
         Assert.Contains("cliproxy_key_missing", codes);
         Assert.Contains("assignment_failed", codes);
-        Assert.Contains("nodes_not_contacting", codes);
+        Assert.Contains("node_not_contacting", codes);
         Assert.Contains("source_not_configured", codes);
         Assert.DoesNotContain(CliProxyKey, result.ToString());
         await db.Nodes.Where(row => row.Id == enrolled.NodeId.Value).ExecuteUpdateAsync(set => set.SetProperty(row => row.RevokedAt, DateTimeOffset.UtcNow));
-        result = await browser.GetFromJsonAsync<JsonElement>("/dashboard/api/diagnostics");
-        codes = result.GetProperty("issues").EnumerateArray().Select(issue => issue.GetProperty("code").GetString()).ToArray();
+        result = await browser.GetFromJsonAsync<JsonElement>("/dashboard/api/issues");
+        codes = result.GetProperty("items").EnumerateArray().Select(issue => issue.GetProperty("code").GetString()).ToArray();
         Assert.DoesNotContain("cliproxy_key_missing", codes);
         Assert.DoesNotContain("assignment_failed", codes);
-        Assert.DoesNotContain("nodes_not_contacting", codes);
+        Assert.DoesNotContain("node_not_contacting", codes);
     }
 
     [Fact]

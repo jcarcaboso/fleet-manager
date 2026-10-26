@@ -7,13 +7,13 @@ with CA/token files remain supported.
 ## Enroll a Node
 
 1. Open `https://your-server:7443/dashboard` and sign in with an Operator token.
-2. Enter a unique alias and create a link. It expires after 15 minutes by default,
-   with a maximum lifetime of one hour.
+2. Choose **Add machine**, enter a unique alias and create a link. It expires
+   after 15 minutes by default, with a maximum lifetime of one hour.
 3. Run `fleet-agent enroll --link` on the Node and paste the link at the prompt.
 4. The Agent generates its P-256 key and CSR locally, verifies HTTPS, and enrolls.
    No separate CA or enrollment JSON download is needed.
-5. Run `fleet-agent service install` and `fleet-agent service start`. Refresh the
-   dashboard to check contact status.
+5. Run `fleet-agent service install` and `fleet-agent service start`. The **Add
+   machine** dialog shows when the machine first checks in.
 
 The alias is bound to the link and must match the Node's key in `fleet.yml`.
 The dashboard also supports alias changes. Update the source entry after a
