@@ -142,6 +142,7 @@ public sealed class DriftTests(OperatorApiFixture fixture) : IClassFixture<Opera
     {
         var noisy = await AssignedAsync("drift-noisy");
         var calm = await AssignedAsync("drift-calm");
+        fixture.FreezeRateLimit(noisy);
         var results = await Task.WhenAll(Enumerable.Range(0, NodeRequestRateLimit.Burst + 40).Select(_ => PostAsync(noisy, Valid())));
         Assert.Contains(results, x => x.Status == 204);
         var limited = results.Where(x => x.Status == 429).ToArray();
@@ -152,7 +153,7 @@ public sealed class DriftTests(OperatorApiFixture fixture) : IClassFixture<Opera
             Assert.False(string.IsNullOrWhiteSpace(x.Body.GetProperty("message").GetString()));
         });
         Assert.All(results, x => Assert.True(x.Status is 204 or 429, x.Status.ToString()));
-        Assert.True(results.Count(x => x.Status == 204) <= NodeRequestRateLimit.Burst + 5);
+        Assert.Equal(NodeRequestRateLimit.Burst, results.Count(x => x.Status == 204));
 
         // The bucket is shared: telemetry, disk usage and attempt detail of the same Node are limited too.
         var telemetry = await fixture.SendNodeAsync("/agent/v1/telemetry", noisy.Certificate, new JsonObject
