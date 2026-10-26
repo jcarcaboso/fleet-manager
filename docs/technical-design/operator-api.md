@@ -504,3 +504,118 @@ release.
     `cli-installation.md`.
   - Binary: replace the binary from the release archive and restart the
     service.
+
+## Phase 4: deployments, drift and issue state
+
+### Commit metadata
+
+When a scan accepts a new desired revision, the Server reads the tip commit
+with `git show -s` and stores it with the revision:
+
+- `subject`: the first line of the message, at most 200 characters.
+- `author`: the author name, at most 128 characters. The author's email is
+  not stored.
+- `committedAt`: the committer date.
+
+Revisions accepted before this change have `commit: null`. A failure to read
+the metadata never fails the scan.
+
+`GET desired-revisions` items gain `commit`:
+`{ "subject", "author", "committedAt" }` or `null`.
+
+### `GET desired-revisions/{id}`
+
+```json
+{
+  "desiredRevisionId": "…", "sourceRevision": "…", "acceptedAt": "…",
+  "commit": { "subject": "Add incident-runbook skill", "author": "Joan", "committedAt": "…" },
+  "previous": { "desiredRevisionId": "…", "sourceRevision": "…" },
+  "rolloutId": "…",
+  "skills": { "added": ["incident-runbook"], "changed": ["release-notes"], "removed": [] },
+  "targets": { "added": 2, "changed": 5, "removed": 0, "nodes": 4 }
+}
+```
+
+- `previous` is the desired revision accepted immediately before this one in
+  the Workspace, or `null` for the first.
+- `skills` compares the union of `(skill name → bundle digest)` across the
+  effective Assignments at each revision, including unchanged Assignments
+  retained from earlier revisions. A name that is new is `added`, one with a
+  different digest is `changed`, and one that is gone is `removed`. Each list
+  is sorted and holds at most 200 names.
+- `targets` compares `(Node, Target name)` pairs and their content: Skills,
+  file digest and AI-client settings. `nodes` counts the distinct Nodes with
+  any added or changed Target. A Target omitted from a manifest retains its
+  current Assignment, so `removed` is currently always zero.
+- `rolloutId` is the rollout created for this revision, or `null`.
+- 404 `revision_not_found`.
+
+### `GET rollouts/{id}`
+
+```json
+{
+  "rolloutId": "…", "desiredRevisionId": "…", "sourceRevision": "…", "createdAt": "…",
+  "summary": { "pending": 0, "applying": 1, "succeeded": 30, "failed": 2, "superseded": 0 },
+  "nodes": [{
+    "nodeId": "…", "nodeName": "studio-mini", "state": "failed",
+    "firstAttemptAt": "…", "lastAttemptAt": "…",
+    "targets": [{ "name": "skills", "state": "succeeded", "errorCode": null, "updatedAt": "…" }]
+  }]
+}
+```
+
+- `nodes` lists every Node with an Assignment in the rollout, ordered by name,
+  with at most 500 Nodes. A Node's `state` is the worst of its Targets, in the
+  order `failed`, `applying`, `pending`, `succeeded`, `superseded`.
+- `firstAttemptAt` and `lastAttemptAt` are the earliest and latest Attempt
+  `updatedAt` for that Node in the rollout, or `null`.
+- `targets[].errorCode` is from the latest Attempt of that Assignment.
+- 404 `rollout_not_found`.
+
+### Drift reports
+
+When reconciliation repairs files that were changed outside Fleet in a Target
+it owns, the Agent reports it:
+
+`POST /agent/v1/drift` (Node mTLS), body
+`{ "target": "skills", "files": [".agents/skills/incident-runbook/SKILL.md"] }`.
+
+- `target` is an assigned Target name. `files` holds 1 to 20 paths relative to
+  the Target base (the user's home directory for `home` Targets), each at most
+  512 characters, never absolute and without `..`.
+  The Agent sends at most the first 20 files of one repair.
+- The Agent sends the report as a best-effort side task after the cycle. It
+  never retries or persists it. HTTP 404 means an older Server.
+- 204, 400 `invalid_request`, or 429 `rate_limited` from the shared per-Node
+  limiter.
+- The Server keeps the 20 newest drift events per Node, each with the
+  `detectedAt` time it received the report. Older ones are deleted on insert.
+
+`GET nodes/{node}` gains `drift`: the newest events first, as
+`[{ "target", "files", "detectedAt" }]`, or `[]`.
+
+### Issue state
+
+Operators can acknowledge or snooze an issue.
+
+`POST issues/state` (scope `operate`), body
+`{ "id": "<issue id>", "action": "acknowledge" | "snooze" | "reopen", "hours": 24 }`.
+
+- `hours` is required for `snooze` (1 to 168) and not allowed otherwise.
+- An acknowledgement applies to the current occurrence only. The Server stores
+  the issue's `since` with the state, and the state no longer applies once the
+  issue's `since` differs. A snooze applies until its time passes. `reopen`
+  removes the state.
+  CLIProxy refresh failures use the start of the current outage as `since`:
+  repeated failed refreshes keep it, recovery clears it, and a later failure
+  starts a new occurrence. Configuration issues without an occurrence timestamp
+  retain their acknowledgement until reopened or removed by state cleanup.
+- Responses: 200 with the updated issue item; 404 `issue_not_found` if no
+  current issue has that ID; 400 `invalid_request`.
+- Each change writes an `issue.acknowledged`, `issue.snoozed` or
+  `issue.reopened` audit event.
+
+`GET issues` items gain `state` (`open`, `acknowledged` or `snoozed`),
+`stateBy` (the Operator), `stateAt`, and `snoozedUntil`. Absent values are
+`null`. Issues keep the same order. `fleet doctor` counts only `open` issues
+in its summary and exit code, unless it is run with `--all`.

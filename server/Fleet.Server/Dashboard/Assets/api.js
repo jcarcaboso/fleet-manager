@@ -28,6 +28,9 @@
     stale_selection: 'Another operator saved this selection. It was reloaded; review it and save again.',
     invalid_selection: 'This selection is invalid or would leave no models enabled.',
     catalog_unavailable: 'This model catalog is no longer available. Reload the selection.',
+    issue_not_found: 'That problem is gone. It may have been fixed. The page was refreshed.',
+    revision_not_found: 'That revision no longer exists.',
+    rollout_not_found: 'That rollout no longer exists.',
     pinned_model_excluded: 'A pinned default model cannot be excluded. Keep it selected, change the pinned default, or turn off the Claude restriction for other clients.',
   };
 

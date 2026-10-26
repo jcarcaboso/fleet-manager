@@ -90,6 +90,42 @@ public sealed class CertificateIssuerTests
     }
 
     [Fact]
+    public void Validation_reads_signed_usage_bytes_instead_of_the_shared_decoded_cache()
+    {
+        using var fixture = IssuerFixture.Create();
+        using var key = ECDsa.Create(ECCurve.NamedCurves.nistP256);
+        var request = NodeCertificateIssuer.ValidateRequest(new CertificateRequest("CN=node", key, HashAlgorithmName.SHA256).CreateSigningRequestPem());
+        using var certificate = X509Certificate2.CreateFromPem(fixture.Issuer.Issue(request, Guid.NewGuid()).CertificatePem);
+        var usage = certificate.Extensions.OfType<X509EnhancedKeyUsageExtension>().Single();
+        var encoded = usage.RawData.ToArray();
+
+        // Reproduce the .NET lazy-decode race deterministically: a second decoder can publish an empty collection after
+        // the first sets _decoded. Change only that runtime cache, leaving the signed extension bytes intact.
+        Assert.NotEmpty(usage.EnhancedKeyUsages.Cast<Oid>());
+        var cache = typeof(X509EnhancedKeyUsageExtension).GetField("_enhancedKeyUsages",
+            System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic);
+        Assert.NotNull(cache);
+        cache.SetValue(usage, new OidCollection());
+        Assert.Equal(encoded, usage.RawData);
+        Assert.DoesNotContain(usage.EnhancedKeyUsages.Cast<Oid>(), x => x.Value == "1.3.6.1.5.5.7.3.2");
+        Assert.True(fixture.Issuer.ValidateChain(certificate));
+    }
+
+    [Fact]
+    public void Concurrent_requests_can_validate_one_connection_certificate()
+    {
+        using var fixture = IssuerFixture.Create();
+        using var key = ECDsa.Create(ECCurve.NamedCurves.nistP256);
+        var request = NodeCertificateIssuer.ValidateRequest(new CertificateRequest("CN=node", key, HashAlgorithmName.SHA256).CreateSigningRequestPem());
+        var pem = fixture.Issuer.Issue(request, Guid.NewGuid()).CertificatePem;
+        for (var round = 0; round < 8; round++)
+        {
+            using var certificate = X509Certificate2.CreateFromPem(pem);
+            Parallel.For(0, 32, _ => Assert.True(fixture.Issuer.ValidateChain(certificate)));
+        }
+    }
+
+    [Fact]
     public void Non_p256_and_rsa_requests_are_rejected()
     {
         using var p384 = ECDsa.Create(ECCurve.NamedCurves.nistP384);

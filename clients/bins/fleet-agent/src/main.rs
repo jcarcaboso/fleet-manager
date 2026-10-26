@@ -3,6 +3,7 @@ mod ai_client;
 mod credentials;
 mod detail;
 mod disk;
+mod drift;
 mod inspect;
 mod protocol;
 mod service;
@@ -269,7 +270,9 @@ async fn main() -> Result<()> {
             let mut telemetry_schedule = telemetry::Schedule::default();
             let mut telemetry_worker = telemetry::worker(directory.clone(), config.home.clone());
             let mut telemetry_report: Option<TelemetryTask> = None;
+            let mut drift_report: Option<drift::Task> = None;
             loop {
+                let mut drifted = Vec::new();
                 let result = cycle(
                     &config,
                     &store,
@@ -280,6 +283,7 @@ async fn main() -> Result<()> {
                     &actions,
                     &mut disk_schedule,
                     &mut telemetry_schedule,
+                    &mut drifted,
                 )
                 .await;
                 // After the cycle, so the report and reconciliation never wait for it.
@@ -300,6 +304,7 @@ async fn main() -> Result<()> {
                     &mut telemetry_report,
                 )
                 .await;
+                send_drift(&config, &identity, drifted, &mut drift_report);
                 let outcome = match result {
                     Ok(outcome) => outcome,
                     Err(error) if once => return Err(error),
@@ -331,6 +336,9 @@ async fn main() -> Result<()> {
                 let _ = report.await;
             }
             if once && let Some(report) = telemetry_report {
+                let _ = report.await;
+            }
+            if once && let Some(report) = drift_report {
                 let _ = report.await;
             }
         }
@@ -703,6 +711,30 @@ async fn deliver_telemetry(client: &Api, report: &TelemetryReport) -> bool {
     }
 }
 
+/// Sends the drift repaired in this cycle as a best-effort side task. It runs
+/// after reconciliation and can neither fail nor delay a cycle.
+fn send_drift(
+    config: &state::Config,
+    identity: &StoredIdentity,
+    reports: Vec<drift::Report>,
+    in_flight: &mut Option<drift::Task>,
+) {
+    if reports.is_empty() {
+        return;
+    }
+    let client = match api(config, identity) {
+        Ok(client) => client,
+        Err(error) => {
+            eprintln!("dropped a drift report: {error}");
+            return;
+        }
+    };
+    drift::step(reports, in_flight, move |report| {
+        let client = client.clone();
+        async move { drift::deliver(&client, &report).await }
+    });
+}
+
 async fn deliver_disk_usage(client: &Api, report: &DiskUsageReport) {
     if let Err(error) = client.disk_usage(report).await {
         eprintln!("could not send disk usage; will retry later: {error}");
@@ -720,6 +752,7 @@ async fn cycle(
     actions: &actions::Registry<'_>,
     disk_schedule: &mut disk::Schedule,
     telemetry_schedule: &mut telemetry::Schedule,
+    drifted: &mut Vec<drift::Report>,
 ) -> Result<CycleOutcome> {
     migrate_run_state(run);
     for assignment in run
@@ -801,6 +834,12 @@ async fn cycle(
         let outcome = actions.apply(&client, &assignment).await;
         let attempt_id = assignment.attempt_id;
         let error_code = outcome.as_ref().err().map(|error| error.code().to_owned());
+        if let Ok(repaired) = &outcome {
+            drifted.extend(drift::Report::new(
+                &assignment.target_name,
+                repaired.clone(),
+            ));
+        }
         let failure_detail = outcome.as_ref().err().map(|error| {
             detail::build(
                 error,
@@ -842,10 +881,11 @@ async fn cycle(
             .collect::<Vec<_>>();
         for assignment in active {
             actions.prepare(&client, &assignment).await?;
-            actions
+            let repaired = actions
                 .apply(&client, &assignment)
                 .await
                 .map_err(anyhow::Error::new)?;
+            drifted.extend(drift::Report::new(&assignment.target_name, repaired));
         }
     }
     Ok(CycleOutcome {

@@ -28,6 +28,8 @@ const MAX_DEPTH: usize = 16;
 const MAX_FILE: usize = 16 * 1024 * 1024;
 const MAX_TOTAL: u64 = 256 * 1024 * 1024;
 const MAX_STATE_FILE: u64 = 2 * 1024 * 1024;
+/// Most repaired paths one reconcile reports.
+pub const MAX_REPAIRED_PATHS: usize = 20;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum TargetBase {
@@ -80,6 +82,10 @@ pub struct FileReconcileOutcome {
     pub desired_revision_id: String,
     pub changed: bool,
     pub owned_digest: Option<String>,
+    /// Home-relative paths of owned content that had drifted from the receipt
+    /// and was repaired: sorted, unique, at most `MAX_REPAIRED_PATHS`, and
+    /// only paths that `report_path` accepts.
+    pub repaired: Vec<String>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -89,6 +95,8 @@ pub struct ReconcileOutcome {
     pub desired_revision_id: String,
     pub changed: bool,
     pub owned_skills: BTreeMap<String, String>,
+    /// See `FileReconcileOutcome::repaired`.
+    pub repaired: Vec<String>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -250,6 +258,13 @@ impl ReconcileError {
 /// path that stays below its base (no root, `.`, `..`, empty or control
 /// characters) is returned.
 pub fn report_path(path: &Path) -> Option<String> {
+    // Reject Windows drive prefixes on Unix as well: reports are consumed
+    // across platforms, where a drive-relative path is not a safe relative path.
+    let raw = path.to_str()?;
+    let bytes = raw.as_bytes();
+    if bytes.len() >= 2 && bytes[0].is_ascii_alphabetic() && bytes[1] == b':' {
+        return None;
+    }
     let mut parts = Vec::new();
     for component in path.components() {
         let Component::Normal(part) = component else {
@@ -469,6 +484,10 @@ impl Reconciler {
         assignment: &Assignment,
     ) -> Result<ReconcileOutcome> {
         self.reconcile_skills(target, assignment)
+            .map(|mut outcome| {
+                outcome.repaired = repaired_paths(&target.path, outcome.repaired);
+                outcome
+            })
             .map_err(|error| error.anchored(&target.path, None))
     }
 
@@ -529,6 +548,10 @@ impl Reconciler {
         assignment: &FileAssignment,
     ) -> Result<FileReconcileOutcome> {
         self.reconcile_managed_file(target, assignment)
+            .map(|mut outcome| {
+                outcome.repaired = repaired_paths(&target.path, outcome.repaired);
+                outcome
+            })
             .map_err(|error| error.anchored(&target.path, Some(&assignment.file.name)))
     }
 
@@ -644,8 +667,16 @@ impl Reconciler {
             _ => false,
         };
         if unchanged {
-            return Ok(file_outcome(target, assignment, false));
+            return Ok(file_outcome(target, assignment, false, Vec::new()));
         }
+        // Owned content that differs from its receipt was changed outside
+        // Fleet; rewriting it is a drift repair. Removing it is not.
+        let repaired = match (&old, &desired) {
+            (Some(receipt), Some(_)) if observed.as_ref() != Some(&receipt.digest) => {
+                vec![assignment.file.name.clone()]
+            }
+            _ => Vec::new(),
+        };
 
         let tx = hex_sha256(
             format!(
@@ -736,7 +767,7 @@ impl Reconciler {
         }
         remove_tree(&tx_root)?;
         remove_file_sync(&journal_path)?;
-        Ok(file_outcome(target, assignment, true))
+        Ok(file_outcome(target, assignment, true, repaired))
     }
 
     fn resolve_target(&self, target: &TargetDescriptor) -> Result<PathBuf> {
@@ -859,8 +890,12 @@ impl Reconciler {
                     && r.desired_revision_id == assignment.desired_revision_id
             });
         if unchanged {
-            return Ok(outcome(target, assignment, false, desired));
+            return Ok(outcome(target, assignment, false, desired, Vec::new()));
         }
+        let repaired = old
+            .as_ref()
+            .map(|receipt| drifted_paths(target, receipt, &observed_owned, &parsed))
+            .unwrap_or_default();
 
         let tx = hex_sha256(
             format!(
@@ -952,7 +987,7 @@ impl Reconciler {
         }
         remove_tree(&tx_root)?;
         remove_file_sync(&journal_path)?;
-        Ok(outcome(target, assignment, true, desired))
+        Ok(outcome(target, assignment, true, desired, repaired))
     }
 }
 
@@ -961,6 +996,7 @@ fn outcome(
     a: &Assignment,
     changed: bool,
     skills: BTreeMap<String, String>,
+    repaired: Vec<String>,
 ) -> ReconcileOutcome {
     ReconcileOutcome {
         target: target.to_owned(),
@@ -968,7 +1004,85 @@ fn outcome(
         desired_revision_id: a.desired_revision_id.clone(),
         changed,
         owned_skills: skills,
+        repaired,
     }
+}
+
+/// Entries below the Target directory of still-wanted owned Skills whose
+/// observed content differs from the receipt. When the Assignment carries the
+/// content the receipt recorded, the differing files are named; otherwise (the
+/// Skill is also being updated, or its files cannot be listed) the Skill
+/// directory is.
+fn drifted_paths(
+    target: &Path,
+    receipt: &Receipt,
+    observed: &BTreeMap<String, String>,
+    parsed: &[ParsedSkill],
+) -> Vec<String> {
+    let mut out = Vec::new();
+    for (name, digest) in &receipt.skills {
+        if observed.get(name) == Some(digest) {
+            continue;
+        }
+        // A Skill the Assignment drops is removed, not repaired.
+        let Some(wanted) = parsed.iter().find(|s| s.name == *name) else {
+            continue;
+        };
+        let files = (wanted.digest == *digest)
+            .then(|| differing_files(&target.join(name), wanted))
+            .flatten()
+            .filter(|files| !files.is_empty());
+        match files {
+            Some(files) => out.extend(files.into_iter().map(|file| format!("{name}/{file}"))),
+            None => out.push(name.clone()),
+        }
+    }
+    out
+}
+
+fn differing_files(root: &Path, skill: &ParsedSkill) -> Option<Vec<String>> {
+    let mut observed = Vec::new();
+    match fs::symlink_metadata(root) {
+        Ok(meta) if meta.is_dir() && !meta.file_type().is_symlink() => {
+            collect_files(root, root, &mut observed, &mut ObservationLimits::default()).ok()?
+        }
+        Ok(_) => return None,
+        Err(e) if e.kind() == io::ErrorKind::NotFound => {}
+        Err(_) => return None,
+    }
+    let expected: BTreeMap<&str, (bool, &[u8])> = skill
+        .files
+        .iter()
+        .map(|f| (f.path.as_str(), (f.executable, f.bytes.as_slice())))
+        .collect();
+    let mut seen = BTreeSet::new();
+    let mut out = Vec::new();
+    for (path, executable, bytes) in &observed {
+        seen.insert(path.as_str());
+        if expected.get(path.as_str()) != Some(&(*executable, bytes.as_slice())) {
+            out.push(path.clone());
+        }
+    }
+    out.extend(
+        expected
+            .keys()
+            .filter(|path| !seen.contains(*path))
+            .map(|path| (*path).to_owned()),
+    );
+    Some(out)
+}
+
+/// Anchors Target-directory-relative entries at the Target path and keeps
+/// only reportable ones: sorted, unique, and at most `MAX_REPAIRED_PATHS`.
+fn repaired_paths(base: &Path, entries: Vec<String>) -> Vec<String> {
+    let mut paths: Vec<String> = entries
+        .iter()
+        .filter_map(|entry| report_path(&base.join(entry)))
+        .collect();
+    paths.sort();
+    paths.dedup();
+    paths.truncate(MAX_REPAIRED_PATHS);
+    paths
 }
 
 fn validate_assignment(a: &Assignment) -> Result<Vec<ParsedSkill>> {
@@ -1947,7 +2061,12 @@ fn recover_file_journal(
     remove_file_sync(journal_path)
 }
 
-fn file_outcome(target: &Path, assignment: &FileAssignment, changed: bool) -> FileReconcileOutcome {
+fn file_outcome(
+    target: &Path,
+    assignment: &FileAssignment,
+    changed: bool,
+    repaired: Vec<String>,
+) -> FileReconcileOutcome {
     FileReconcileOutcome {
         target: target.to_owned(),
         file: assignment.file.name.clone(),
@@ -1955,6 +2074,7 @@ fn file_outcome(target: &Path, assignment: &FileAssignment, changed: bool) -> Fi
         desired_revision_id: assignment.desired_revision_id.clone(),
         changed,
         owned_digest: assignment.file.digest.clone(),
+        repaired,
     }
 }
 
@@ -2550,6 +2670,175 @@ mod tests {
             b"x"
         );
     }
+    #[cfg(unix)]
+    #[test]
+    fn drift_file_listing_refuses_a_replaced_skill_root() {
+        let (_t, r, _) = setup();
+        let foreign = r.home.join("foreign");
+        fs::create_dir(&foreign).unwrap();
+        fs::write(foreign.join("private-name"), b"private content").unwrap();
+        let root = r.home.join("replaced");
+        std::os::unix::fs::symlink(&foreign, &root).unwrap();
+        let current = assignment("1", vec![skill("alpha", &[("SKILL.md", false, b"x")])]);
+        let parsed = validate_assignment(&current).unwrap();
+        assert_eq!(differing_files(&root, &parsed[0]), None);
+        fs::remove_file(&root).unwrap();
+        fs::write(&root, b"not a directory").unwrap();
+        assert_eq!(differing_files(&root, &parsed[0]), None);
+    }
+
+    #[test]
+    fn reports_repaired_skill_drift_as_modified_deleted_and_added_files() {
+        let (_t, r, d) = setup();
+        let entries: &[(&str, bool, &[u8])] = &[
+            ("SKILL.md", false, b"x"),
+            ("docs/a.md", false, b"a"),
+            ("docs/b.md", false, b"b"),
+        ];
+        let current = assignment("1", vec![skill("alpha", entries)]);
+        let clean = r.reconcile(&d, &current).unwrap();
+        assert!(clean.changed && clean.repaired.is_empty());
+        assert!(r.reconcile(&d, &current).unwrap().repaired.is_empty());
+
+        let alpha = r.home.join("skills/alpha");
+        fs::write(alpha.join("SKILL.md"), b"edit").unwrap();
+        fs::remove_file(alpha.join("docs/a.md")).unwrap();
+        fs::write(alpha.join("extra.md"), b"new").unwrap();
+        let repaired = r.reconcile(&d, &current).unwrap();
+        assert!(repaired.changed);
+        assert_eq!(
+            repaired.repaired,
+            [
+                "skills/alpha/SKILL.md",
+                "skills/alpha/docs/a.md",
+                "skills/alpha/extra.md"
+            ]
+        );
+        assert!(r.reconcile(&d, &current).unwrap().repaired.is_empty());
+
+        // A deleted Skill directory reports its files.
+        fs::remove_dir_all(&alpha).unwrap();
+        assert_eq!(
+            r.reconcile(&d, &current).unwrap().repaired,
+            [
+                "skills/alpha/SKILL.md",
+                "skills/alpha/docs/a.md",
+                "skills/alpha/docs/b.md"
+            ]
+        );
+    }
+
+    #[test]
+    fn new_revisions_and_removals_are_not_drift() {
+        let (_t, r, d) = setup();
+        let first = assignment("1", vec![skill("alpha", &[("SKILL.md", false, b"x")])]);
+        r.reconcile(&d, &first).unwrap();
+        let second = assignment("2", vec![skill("alpha", &[("SKILL.md", false, b"y")])]);
+        let updated = r.reconcile(&d, &second).unwrap();
+        assert!(updated.changed && updated.repaired.is_empty());
+        let third = assignment("3", vec![skill("alpha", &[("SKILL.md", false, b"y")])]);
+        let renewed = r.reconcile(&d, &third).unwrap();
+        assert!(renewed.changed && renewed.repaired.is_empty());
+        // A drifted Skill that the Assignment drops is removed, not repaired.
+        fs::write(r.home.join("skills/alpha/SKILL.md"), b"edit").unwrap();
+        let removed = r.reconcile(&d, &assignment("4", vec![])).unwrap();
+        assert!(removed.changed && removed.repaired.is_empty());
+    }
+
+    #[test]
+    fn drift_in_a_skill_that_is_also_updated_reports_the_skill_directory() {
+        let (_t, r, d) = setup();
+        r.reconcile(
+            &d,
+            &assignment("1", vec![skill("alpha", &[("SKILL.md", false, b"x")])]),
+        )
+        .unwrap();
+        fs::write(r.home.join("skills/alpha/SKILL.md"), b"edit").unwrap();
+        let outcome = r
+            .reconcile(
+                &d,
+                &assignment("2", vec![skill("alpha", &[("SKILL.md", false, b"y")])]),
+            )
+            .unwrap();
+        assert_eq!(outcome.repaired, ["skills/alpha"]);
+    }
+
+    #[test]
+    fn repaired_paths_are_safe_sorted_unique_and_capped() {
+        let base = Path::new("skills");
+        let mut entries: Vec<String> = (0..30).rev().map(|i| format!("s/f{i:02}.md")).collect();
+        entries.push("s/f05.md".into());
+        entries.push("s/../escape".into());
+        entries.push("s/bad\u{7}name".into());
+        entries.push("s/back\\slash".into());
+        entries.push("x".repeat(513));
+        let paths = repaired_paths(base, entries);
+        assert_eq!(paths.len(), MAX_REPAIRED_PATHS);
+        assert_eq!(paths[0], "skills/s/f00.md");
+        assert_eq!(paths[19], "skills/s/f19.md");
+        assert!(paths.windows(2).all(|w| w[0] < w[1]));
+        let unsafe_only = repaired_paths(base, vec!["../x".into(), "a/../b".into()]);
+        assert!(unsafe_only.is_empty());
+        assert!(repaired_paths(Path::new("/abs"), vec!["a".into()]).is_empty());
+    }
+
+    #[test]
+    fn many_drifted_files_are_capped_in_the_outcome() {
+        let (_t, r, d) = setup();
+        let mut names: Vec<String> = vec!["SKILL.md".into()];
+        names.extend((0..30).map(|i| format!("f{i:02}.md")));
+        let entries: Vec<(&str, bool, &[u8])> = names
+            .iter()
+            .map(|n| (n.as_str(), false, &b"x"[..]))
+            .collect();
+        let current = assignment("1", vec![skill("alpha", &entries)]);
+        r.reconcile(&d, &current).unwrap();
+        for name in &names {
+            fs::write(r.home.join("skills/alpha").join(name), b"edit").unwrap();
+        }
+        let outcome = r.reconcile(&d, &current).unwrap();
+        assert_eq!(outcome.repaired.len(), MAX_REPAIRED_PATHS);
+        assert_eq!(outcome.repaired[0], "skills/alpha/SKILL.md");
+        assert_eq!(outcome.repaired[1], "skills/alpha/f00.md");
+    }
+
+    #[test]
+    fn reports_repaired_managed_file_drift_only() {
+        let (_t, r, mut target) = setup();
+        target.path = ".config/opencode".into();
+        let first = file_assignment("1", "AGENTS.md", Some(b"fleet"));
+        let installed = r.reconcile_file(&target, &first).unwrap();
+        assert!(installed.changed && installed.repaired.is_empty());
+        assert!(
+            r.reconcile_file(&target, &first)
+                .unwrap()
+                .repaired
+                .is_empty()
+        );
+        let path = r.home.join(".config/opencode/AGENTS.md");
+
+        fs::write(&path, b"drift").unwrap();
+        assert_eq!(
+            r.reconcile_file(&target, &first).unwrap().repaired,
+            [".config/opencode/AGENTS.md"]
+        );
+        fs::remove_file(&path).unwrap();
+        assert_eq!(
+            r.reconcile_file(&target, &first).unwrap().repaired,
+            [".config/opencode/AGENTS.md"]
+        );
+
+        // A new revision over clean content is an update.
+        let second = file_assignment("2", "AGENTS.md", Some(b"fleet 2"));
+        let updated = r.reconcile_file(&target, &second).unwrap();
+        assert!(updated.changed && updated.repaired.is_empty());
+        // Removing a drifted owned file is a removal.
+        fs::write(&path, b"drift").unwrap();
+        let removal = file_assignment("3", "AGENTS.md", None);
+        let removed = r.reconcile_file(&target, &removal).unwrap();
+        assert!(removed.changed && removed.repaired.is_empty());
+    }
+
     #[test]
     fn restores_missing_owned_skill_and_preserves_unowned() {
         let (_t, r, d) = setup();
@@ -2861,7 +3150,17 @@ mod tests {
 
     #[test]
     fn reported_paths_are_always_safe_relative_paths() {
-        for unsafe_path in ["/etc/passwd", "../x", "a/../b", "", ".", "a\\b", "a/\u{7}b"] {
+        for unsafe_path in [
+            "/etc/passwd",
+            "../x",
+            "a/../b",
+            "",
+            ".",
+            "a\\b",
+            "a/\u{7}b",
+            "C:/secret",
+            "z:secret",
+        ] {
             assert_eq!(report_path(Path::new(unsafe_path)), None, "{unsafe_path:?}");
         }
         assert_eq!(
@@ -2870,6 +3169,8 @@ mod tests {
         );
         assert_eq!(report_path(&PathBuf::from("x".repeat(513))), None);
         assert!(report_path(&PathBuf::from("x".repeat(512))).is_some());
+        assert!(report_path(&PathBuf::from("😀".repeat(256))).is_some());
+        assert!(report_path(&PathBuf::from("😀".repeat(257))).is_none());
         // Non-reportable targets are omitted, not rewritten.
         let (_t, r, mut d) = setup();
         d.path = "../escape".into();

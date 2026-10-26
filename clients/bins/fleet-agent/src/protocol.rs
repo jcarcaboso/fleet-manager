@@ -13,7 +13,8 @@ const MAX_CLIPROXY_CREDENTIAL_BYTES: usize = 4096;
 const MAX_DETAIL_REQUEST_BYTES: usize = 16 * 1024;
 const MAX_DISK_USAGE_REQUEST_BYTES: usize = 4 * 1024;
 const MAX_TELEMETRY_REQUEST_BYTES: usize = 8 * 1024;
-/// Timeout of the best-effort reports (disk usage and machine information).
+const MAX_DRIFT_REQUEST_BYTES: usize = 64 * 1024;
+/// Timeout of the best-effort reports (disk usage, machine information and drift).
 const SIDE_REPORT_TIMEOUT: Duration = Duration::from_secs(10);
 /// Tells the Server which optional features this Agent understands. Only then
 /// may the poll response carry the matching fields.
@@ -308,19 +309,42 @@ impl Api {
     /// Sends the latest disk usage. Best effort: the response body is never
     /// read, and the caller decides when to try again.
     pub async fn disk_usage(&self, report: &DiskUsageReport) -> Result<(), ProtocolError> {
-        self.put_report("agent/v1/disk-usage", report, MAX_DISK_USAGE_REQUEST_BYTES)
-            .await
+        self.send_report(
+            Method::PUT,
+            "agent/v1/disk-usage",
+            report,
+            MAX_DISK_USAGE_REQUEST_BYTES,
+        )
+        .await
     }
 
     /// Sends the machine and Agent information. Best effort like
     /// [`Api::disk_usage`]: the response body is never read.
     pub async fn telemetry(&self, report: &TelemetryReport) -> Result<(), ProtocolError> {
-        self.put_report("agent/v1/telemetry", report, MAX_TELEMETRY_REQUEST_BYTES)
-            .await
+        self.send_report(
+            Method::PUT,
+            "agent/v1/telemetry",
+            report,
+            MAX_TELEMETRY_REQUEST_BYTES,
+        )
+        .await
     }
 
-    async fn put_report(
+    /// Sends the files repaired in one Target. Best effort like
+    /// [`Api::disk_usage`]: the response body is never read.
+    pub async fn drift(&self, report: &crate::drift::Report) -> Result<(), ProtocolError> {
+        self.send_report(
+            Method::POST,
+            "agent/v1/drift",
+            report,
+            MAX_DRIFT_REQUEST_BYTES,
+        )
+        .await
+    }
+
+    async fn send_report(
         &self,
+        method: Method,
         path: &str,
         report: &impl Serialize,
         limit: usize,
@@ -331,7 +355,7 @@ impl Api {
         }
         let response = self
             .authenticated()?
-            .put(self.endpoint(path)?)
+            .request(method, self.endpoint(path)?)
             .header(CONTENT_TYPE, "application/json")
             .timeout(SIDE_REPORT_TIMEOUT)
             .body(body)

@@ -148,6 +148,9 @@ public sealed partial class PostgresFleetCoordinator
             : new NodeDisk(stored.Count == 0 ? null : stored.Max(x => x.MeasuredAt), node.DiskUsageRefreshRequestedAt,
                 stored.Select(x => new NodeDiskVolume(x.Label, x.TotalBytes, x.UsedBytes, x.AvailableBytes,
                     DiskUsageRules.UsedPercent(x.UsedBytes, x.AvailableBytes))).ToList());
+        var drift = (await db.NodeDriftEvents.AsNoTracking().Where(x => x.NodeId == id)
+                .OrderByDescending(x => x.DetectedAt).ThenByDescending(x => x.Id).Take(DriftRules.MaximumEvents).ToListAsync(cancellationToken))
+            .Select(x => new NodeDriftEvent(x.Target, x.Files, x.DetectedAt)).ToList();
         var telemetry = await db.NodeTelemetries.AsNoTracking().SingleOrDefaultAsync(x => x.NodeId == id, cancellationToken);
         var agent = telemetry is null ? null : new NodeAgent(telemetry.AgentVersion, options.LatestAgentVersion.Text,
             AgentTelemetryRules.IsOutdated(telemetry.AgentVersion, options.LatestAgentVersion),
@@ -157,7 +160,7 @@ public sealed partial class PostgresFleetCoordinator
             Freshness(node.LastContactAt, now, staleAfter), node.RevokedAt != null, node.RevokedAt,
             newest is null ? null : new(new(newest.Id), newest.NotBefore, newest.NotAfter, newest.RevokedAt, newest.RevokedBy,
                 credentialCount - 1),
-            targets, StateCounts(current.Select(x => (x.Assignment.State, 1))), disk, agent);
+            targets, StateCounts(current.Select(x => (x.Assignment.State, 1))), disk, agent, drift);
     }
 
     private sealed record LatestAttemptRow(Guid Id, int State, string? ErrorCode, string? Diagnostic, string? FailurePath, string? FailureStep,

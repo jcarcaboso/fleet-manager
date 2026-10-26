@@ -1,3 +1,4 @@
+using Fleet.Core.Coordination;
 using Microsoft.EntityFrameworkCore;
 
 namespace Fleet.Server.Persistence;
@@ -23,6 +24,8 @@ public sealed class FleetDbContext(DbContextOptions<FleetDbContext> options) : D
     public DbSet<SourceScanRow> SourceScans => Set<SourceScanRow>();
     public DbSet<AuditEventRow> AuditEvents => Set<AuditEventRow>();
     public DbSet<CliProxySelectionRow> CliProxySelections => Set<CliProxySelectionRow>();
+    public DbSet<NodeDriftEventRow> NodeDriftEvents => Set<NodeDriftEventRow>();
+    public DbSet<IssueStateRow> IssueStates => Set<IssueStateRow>();
 
     protected override void OnModelCreating(ModelBuilder model)
     {
@@ -39,6 +42,16 @@ public sealed class FleetDbContext(DbContextOptions<FleetDbContext> options) : D
         model.Entity<NodeDiskUsageRow>().ToTable("node_disk_usage").HasKey(x => new { x.NodeId, x.Label });
         model.Entity<NodeDiskUsageRow>().Property(x => x.Label).HasMaxLength(16);
         model.Entity<NodeDiskUsageRow>().HasOne<NodeRow>().WithMany().HasForeignKey(x => x.NodeId).OnDelete(DeleteBehavior.Cascade);
+        model.Entity<NodeDriftEventRow>().ToTable("node_drift_events").HasKey(x => x.Id);
+        model.Entity<NodeDriftEventRow>().Property(x => x.Target).HasMaxLength(100);
+        model.Entity<NodeDriftEventRow>().Property(x => x.Files).HasColumnType("text[]");
+        model.Entity<NodeDriftEventRow>().HasIndex(x => new { x.NodeId, x.DetectedAt, x.Id });
+        model.Entity<NodeDriftEventRow>().HasOne<NodeRow>().WithMany().HasForeignKey(x => x.NodeId).OnDelete(DeleteBehavior.Cascade);
+        model.Entity<IssueStateRow>().ToTable("issue_states").HasKey(x => new { x.WorkspaceId, x.IssueId });
+        model.Entity<IssueStateRow>().Property(x => x.IssueId).HasMaxLength(300);
+        model.Entity<IssueStateRow>().Property(x => x.State).HasMaxLength(16);
+        model.Entity<IssueStateRow>().Property(x => x.Actor).HasMaxLength(200);
+        model.Entity<IssueStateRow>().HasOne<WorkspaceRow>().WithMany().HasForeignKey(x => x.WorkspaceId).OnDelete(DeleteBehavior.Cascade);
         model.Entity<NodeTelemetryRow>().ToTable("node_telemetry").HasKey(x => x.NodeId);
         model.Entity<NodeTelemetryRow>().Property(x => x.AgentVersion).HasMaxLength(128);
         model.Entity<NodeTelemetryRow>().Property(x => x.OsName).HasMaxLength(128);
@@ -63,6 +76,8 @@ public sealed class FleetDbContext(DbContextOptions<FleetDbContext> options) : D
         model.Entity<BundleRow>().ToTable("bundles").HasKey(x => x.Digest);
         model.Entity<BundleRow>().Property(x => x.Content).HasColumnType("bytea");
         model.Entity<DesiredRevisionRow>().ToTable("desired_revisions").HasKey(x => x.Id);
+        model.Entity<DesiredRevisionRow>().Property(x => x.CommitSubject).HasMaxLength(CommitMetadataRules.MaximumSubjectLength);
+        model.Entity<DesiredRevisionRow>().Property(x => x.CommitAuthor).HasMaxLength(CommitMetadataRules.MaximumAuthorLength);
         model.Entity<DesiredRevisionRow>().HasIndex(x => new { x.WorkspaceId, x.SourceRevision }).IsUnique();
         model.Entity<DesiredRevisionRow>().HasIndex(x => new { x.WorkspaceId, x.AcceptedAt, x.Id });
         model.Entity<DesiredRevisionRow>().HasOne<WorkspaceRow>().WithMany().HasForeignKey(x => x.WorkspaceId).OnDelete(DeleteBehavior.Cascade);
@@ -75,6 +90,8 @@ public sealed class FleetDbContext(DbContextOptions<FleetDbContext> options) : D
         model.Entity<AssignmentRow>().ToTable("assignments").HasKey(x => x.Id);
         model.Entity<AssignmentRow>().HasIndex(x => new { x.NodeId, x.TargetName, x.IsCurrent }).HasFilter("\"IsCurrent\"").IsUnique();
         model.Entity<AssignmentRow>().HasIndex(x => new { x.RolloutId, x.Id });
+        // The history of one Target of one Node, for the previous Assignment in the revision diff.
+        model.Entity<AssignmentRow>().HasIndex(x => new { x.NodeId, x.TargetName, x.CreatedAt });
         model.Entity<AssignmentRow>().HasOne<RolloutRow>().WithMany().HasForeignKey(x => x.RolloutId).OnDelete(DeleteBehavior.Cascade);
         model.Entity<AssignmentRow>().HasOne<DesiredRevisionRow>().WithMany().HasForeignKey(x => x.DesiredRevisionId).OnDelete(DeleteBehavior.Restrict);
         model.Entity<AssignmentRow>().HasOne<NodeRow>().WithMany().HasForeignKey(x => x.NodeId).OnDelete(DeleteBehavior.Cascade);
@@ -198,6 +215,10 @@ public sealed class DesiredRevisionRow
     public Guid WorkspaceId { get; set; }
     public required string SourceRevision { get; set; }
     public DateTimeOffset AcceptedAt { get; set; }
+    // The tip commit, read when the scan accepted the revision. Null for older revisions and when Git could not be read. No email.
+    public string? CommitSubject { get; set; }
+    public string? CommitAuthor { get; set; }
+    public DateTimeOffset? CommittedAt { get; set; }
 }
 public sealed class WarningRow
 {
@@ -282,4 +303,24 @@ public sealed class CliProxySelectionRow
     public required string BaseUrl { get; set; }
     public required string PolicyJson { get; set; }
     public long Version { get; set; }
+}
+// Files an Agent repaired in a Target because they were changed outside Fleet. The newest 20 per Node are kept.
+public sealed class NodeDriftEventRow
+{
+    public Guid Id { get; set; }
+    public Guid NodeId { get; set; }
+    public required string Target { get; set; }
+    public required string[] Files { get; set; }
+    public DateTimeOffset DetectedAt { get; set; }
+}
+// An Operator's acknowledgement or snooze of one issue. Expired and obsolete rows are deleted lazily by the next change.
+public sealed class IssueStateRow
+{
+    public Guid WorkspaceId { get; set; }
+    public required string IssueId { get; set; }
+    public required string State { get; set; }
+    public DateTimeOffset? Since { get; set; }
+    public DateTimeOffset? SnoozedUntil { get; set; }
+    public required string Actor { get; set; }
+    public DateTimeOffset At { get; set; }
 }

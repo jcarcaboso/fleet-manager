@@ -1,6 +1,6 @@
 'use strict';
 /* Fleet dashboard: one machine, with Overview, Installed, Problems, Activity, Security and Settings tabs.
-   API: GET nodes/{node} (with disk and agent), POST nodes/{node}/disk-usage/refresh, GET nodes/{node}/checkins, GET nodes/{node}/attempts, GET audit?node=&order=newest, GET issues, GET errors,
+   API: GET nodes/{node} (with disk, agent and drift events), POST issues/state (acknowledge, snooze, reopen), POST nodes/{node}/disk-usage/refresh, GET nodes/{node}/checkins, GET nodes/{node}/attempts, GET audit?node=&order=newest, GET issues, GET errors,
    POST nodes/{node}/retry, POST nodes/rename, POST nodes/{id}/revoke, POST nodes/{id}/remove. */
 (function () {
   const Fleet = window.Fleet = window.Fleet || {};
@@ -12,7 +12,7 @@
   /* Everything that belongs to one loaded machine. A load builds it locally and commits it only if no newer load started. */
   const blank = () => ({ checkins: {}, checkinsErr: null, attempts: [], attemptsNext: null, attemptsErr: null,
     audit: [], auditNext: null, auditErr: null, tAttempts: new Map(), actFilter: 'all' });
-  const S = { alias: null, tab: 'overview', raw: null, n: null, issues: [], issuesOk: false, hours: 168, ...blank(),
+  const S = { alias: null, tab: 'overview', raw: null, n: null, issues: [], issuesOk: false, hours: 168, probState: 'open', ...blank(),
     renameMsg: null, retrying: new Set(), cacheAt: 0, token: 0, loadingMore: null, visit: 0, key: null };
   const PAGE = 25;
   const here = n => S.n?.id === n.id && Fleet.nav.current?.view === Fleet.views.node;
@@ -39,13 +39,13 @@
       if (match) used.add(match.id);
       const code = t.latestAttempt?.errorCode || match?.errorCode || null;
       const cat = catalog.get(code);
-      out.push({ kind: 'target', id: `target:${t.name}`, level: 'critical', glyph: 'x', badge: 'Error', target: t, issue: match || null, code, cat,
+      out.push({ kind: 'target', id: `target:${t.name}`, level: 'critical', glyph: 'x', badge: 'Error', target: t, issue: match || null, code, cat, st: model.issueState(match),
         title: cat?.title || code || `${u.targetLabel(t)} failed`, since: t.firstFailedAt });
     }
     for (const i of issues) {
       if (used.has(i.id)) continue;
       const level = model.issueLevel(i);
-      out.push({ kind: 'issue', id: i.id, level, glyph: model.issueKind(level, i), badge: model.issueBadge(level, i), issue: i, code: i.errorCode || i.code,
+      out.push({ kind: 'issue', id: i.id, level, glyph: model.issueKind(level, i), badge: model.issueBadge(level, i), issue: i, code: i.errorCode || i.code, st: model.issueState(i),
         cat: catalog.get(i.errorCode) || catalog.get(i.code), title: i.title, since: i.since });
     }
     return out.sort((a, b) => model.LRANK[a.level] - model.LRANK[b.level]);
@@ -84,9 +84,13 @@
       : !api.can('operate') ? ui.locked('operate', 'btn-primary', `${ic('retry')}Retry now`)
         : `<button type="button" class="btn btn-sm btn-primary" data-act="retry" data-target="${esc(t.name)}" ${retrying ? 'disabled' : ''}>${ic('retry', retrying ? 'spin' : '')}${retrying ? 'Requesting…' : 'Retry now'}</button>`;
     const retryBtn = retry.replace('class="btn btn-primary', 'class="btn btn-sm btn-primary');
-    return `<article class="prob prob--${p.level}" id="p-${u.slug(p.id)}">
+    const quiet = p.st.key !== 'open', busy = !!i && Fleet.issueBusy.has(i.id);
+    const stateActs = i ? ui.issueActions(i, busy) : '';
+    const lock = api.can('operate') ? '' : ui.lockNote('operate').replace('lock-note', 'lock-note lock-note--inline');
+    return `<article class="prob prob--${p.level}${quiet ? ' is-quiet' : ''}" id="p-${u.slug(p.id)}">
     <header class="prob-head"><span class="prob-ic t-${p.level}">${glyph(p.level, p.glyph)}</span><div class="prob-titles"><h3>${esc(p.title)}</h3><p class="prob-where">${where}</p></div>${u.pill(p.level, p.glyph, p.badge)}</header>
     <div class="prob-body">
+      ${i ? ui.issueBanner(i) : ''}
       ${explanation ? `<p class="prob-expl">${u.md(explanation)}${specific ? ` <strong>${u.md(specific)}</strong>` : ''}</p>` : '<p class="prob-expl muted">The Server has no catalog entry for this code yet.</p>'}
       ${factList.length ? facts(factList) : ''}
       ${detail}
@@ -101,7 +105,7 @@
         <dl class="kv"><div><dt>Error code</dt><dd><code>${esc(p.code || '—')}</code></dd></div>${t ? `<div><dt>Target path</dt><dd class="mono">${esc(u.targetWhere(t))}</dd></div><div><dt>Assignment</dt><dd class="mono">${esc(t.assignmentId)}</dd></div>${t.latestAttempt ? `<div><dt>Latest attempt</dt><dd class="mono">${esc(t.latestAttempt.attemptId)}</dd></div>` : ''}` : ''}${i ? `<div><dt>Issue</dt><dd class="mono">${esc(i.id)}</dd></div>` : ''}</dl>
         ${attempts ? `<p class="kv-label">Recent attempts</p>${attempts.length ? attemptRows(attempts) : '<p class="muted small">No attempts recorded.</p>'}` : ''}
       </div></details>
-      ${t ? `<footer class="prob-actions">${retryBtn}${n.revoked ? '<span class="muted small">Revoked machines cannot be retried.</span>' : ui.lockNote('operate').replace('lock-note', 'lock-note lock-note--inline')}</footer>` : ''}
+      ${t || i ? `<footer class="prob-actions">${t ? retryBtn : ''}${stateActs}${n.revoked && t ? '<span class="muted small">Revoked machines cannot be retried.</span>' : lock}</footer>` : ''}
     </div></article>`;
   };
 
@@ -133,6 +137,11 @@
       const a = n.agent;
       out.push(a.outdated ? { level: 'warning', kind: 'bang', title: 'Agent update available', text: `Running ${a.version}${a.latestVersion ? `; ${a.latestVersion} is the latest` : ''}` }
         : { level: 'good', kind: 'check', title: 'Agent is up to date', text: `Running ${a.version}` });
+    }
+    const drift = model.recentDrift(n);
+    if (!n.revoked && drift.length) {
+      const last = drift[0];
+      out.push({ level: 'info', kind: 'info', title: 'Local changes were repaired', text: `${drift.length === 1 ? 'Once' : `${drift.length} times`} in the last 24 hours. Latest ${u.rel(last.detectedAt)}: ${last.target}, ${u.plural(last.files.length, 'file')}. Make permanent changes in Git instead.` });
     }
     if (n.credential) out.push({ level: 'neutral', kind: 'info', title: `${u.plural(n.credential.renewals, 'renewal')} since enrollment`, text: `Issued ${u.fmtFull(n.credential.notBefore)} UTC` });
     return out;
@@ -380,7 +389,14 @@
     if (n.revoked) return `<div class="empty empty--good"><div class="empty-art good">${glyph('neutral', 'minus')}</div><h2>${esc(n.alias)} is retired</h2><p>Revoked machines get no new assignments, so Fleet no longer tracks problems for them.</p></div>`;
     const note = S.issuesOk ? '' : `<div class="callout callout--warning">${glyph('warning', 'bang')}<div><b>Issue details are unavailable</b><p>Failed Targets are shown from the machine record, without CLI commands or other issues.</p></div></div>`;
     if (!list.length) return note + `<div class="empty empty--good"><div class="empty-art good">${glyph('good', 'check')}</div><h2>Nothing to fix on ${esc(n.alias)}</h2><p>${model.total(n) ? `All ${u.plural(model.total(n), 'Target')} are in sync and the Agent is checking in.` : 'Nothing is assigned to this machine yet.'}</p></div>`;
-    return note + list.map(problemCard).join('');
+    const inState = k => list.filter(p => p.st.key === k), shown = inState(S.probState);
+    const tabs = `<div class="toolbar toolbar--plain">${ui.chips('node-prob-state', S.probState, [['open', 'Open', inState('open').length], ['acknowledged', 'Acknowledged', inState('acknowledged').length], ['snoozed', 'Snoozed', inState('snoozed').length]], 'Filter problems by state')}</div>`;
+    if (!shown.length) {
+      return note + tabs + (S.probState === 'open'
+        ? `<div class="empty empty--good"><div class="empty-art good">${glyph('good', 'check')}</div><h2>Nothing open on ${esc(n.alias)}</h2><p>Everything that needs attention is acknowledged or snoozed. Open the other tabs to review it.</p></div>`
+        : `<div class="empty empty--good"><div class="empty-art good">${glyph('good', 'check')}</div><h2>Nothing ${esc(S.probState)}</h2><p>${S.probState === 'snoozed' ? 'Snooze a problem to hide it from Open for a while.' : 'Acknowledge a problem you know about. It stays listed here.'}</p></div>`);
+    }
+    return note + tabs + shown.map(problemCard).join('');
   };
 
   const events = () => {
@@ -395,15 +411,19 @@
       const bad = /revoked|removed/.test(e.action);
       ev.push({ at: e.recordedAt, level: bad ? 'neutral' : 'good', kind: bad ? 'minus' : 'check', cat: sec ? 'security' : 'change', title: Fleet.auditLabel(e.action), sub: `by ${Fleet.actorName(e)}` });
     }
+    for (const d of n.drift || []) {
+      ev.push({ at: d.detectedAt, level: 'info', kind: 'info', cat: 'drift', title: `Repaired local changes in ${d.target}: ${u.plural(d.files.length, 'file')}`,
+        sub: 'Files changed outside Fleet were restored from the verified cache', files: d.files, key: 'drift:' + d.target + d.detectedAt });
+    }
     if (n.enrolledAt && !S.auditNext && !S.audit.some(e => e.action === 'node_enrolled')) ev.push({ at: n.enrolledAt, level: 'good', kind: 'check', cat: 'change', title: `Enrolled as ${n.alias}`, sub: `${u.platformLabel(n.platform)} machine` });
     return ev.filter(e => u.valid(e.at)).sort((a, b) => u.ms(b.at) - u.ms(a.at));
   };
   const tabActivity = () => {
     const all = events();
-    const cats = [['all', 'Everything'], ['attempt', 'Attempts'], ['change', 'Changes'], ['security', 'Certificates']];
+    const cats = [['all', 'Everything'], ['attempt', 'Attempts'], ['drift', 'Local changes'], ['change', 'Changes'], ['security', 'Certificates']];
     const f = S.actFilter, ev = f === 'all' ? all : all.filter(e => e.cat === f);
     const errs = [S.attemptsErr && ui.inlineError(S.attemptsErr, 'attempts'), S.auditErr && ui.inlineError(S.auditErr, 'the audit log')].filter(Boolean).join('');
-    return `<section class="panel"><header class="panel-head row"><div><h2>Activity</h2><p>Attempts and changes for ${esc(S.n.alias)}, newest first. Times in UTC.</p></div>
+    return `<section class="panel"><header class="panel-head row"><div><h2>Activity</h2><p>Attempts, repaired local changes and changes for ${esc(S.n.alias)}, newest first. Times in UTC.</p></div>
       ${ui.chips('act-filter', f, cats.map(([k, l]) => [k, l, k === 'all' ? all.length : all.filter(e => e.cat === k).length]), 'Filter activity')}</header>
       ${errs}${ui.timeline(ev)}
       ${S.attemptsNext || S.auditNext ? `<div class="load-more"><button type="button" class="btn btn-secondary" data-act="more-activity" ${S.loadingMore ? 'disabled' : ''}>Load older activity</button></div>` : ''}</section>`;
@@ -474,7 +494,7 @@
 
   const paint = () => {
     const n = S.n, h = health(), a = enc(n.alias), tab = S.tab;
-    const probs = problems();
+    const probs = problems().filter(p => p.st.key === 'open');
     const serious = probs.filter(p => p.level !== 'info').length;
     const worst = probs[0]?.level || 'info';
     const total = model.total(n), synced = n.counts.succeeded;
@@ -548,7 +568,7 @@
       const key = params[0];
       const tab = TABS.includes(params[1]) ? params[1] : 'overview';
       /* The address may name the machine by alias or by ID, and tabs switch between them, so compare with the machine on screen too. */
-      if (S.key !== null && key !== S.key && !(S.n && (S.n.alias === key || S.n.id === key))) { S.visit++; stopDisk(); }
+      if (S.key !== null && key !== S.key && !(S.n && (S.n.alias === key || S.n.id === key))) { S.visit++; stopDisk(); S.probState = 'open'; }
       S.key = key;
       /* Every await below can outlive this navigation. The generation says whether this load is still the newest. */
       const gen = ++S.token;
@@ -579,6 +599,7 @@
       return paint();
     },
     paint: () => S.n ? paint() : notFound(S.alias),
+    issueUpdated(item) { S.issues = model.patchIssue(S.issues, item); },
     unmount() { S.visit++; S.key = null; stopDisk(); },
   };
 
@@ -597,6 +618,7 @@
     }
     Fleet.repaint();
   };
+  Fleet.actions['node-prob-state'] = el => { S.probState = el.dataset.v; Fleet.repaint(); };
   Fleet.actions['act-filter'] = el => { S.actFilter = el.dataset.v; Fleet.repaint(); };
   Fleet.actions['more-activity'] = async () => {
     if (S.loadingMore) return;

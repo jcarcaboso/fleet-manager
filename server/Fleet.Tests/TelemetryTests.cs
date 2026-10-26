@@ -284,6 +284,7 @@ public sealed class TelemetryTests(OperatorApiFixture fixture) : IClassFixture<O
     {
         var noisy = await fixture.EnrollAsync("tel-noisy");
         var calm = await fixture.EnrollAsync("tel-calm");
+        fixture.FreezeRateLimit(noisy);
         var results = await Task.WhenAll(Enumerable.Range(0, NodeRequestRateLimit.Burst + 40).Select(_ => PutAsync(noisy, Valid())));
         Assert.Contains(results, x => x.Status == 204);
         var limited = results.Where(x => x.Status == 429).ToArray();
@@ -294,7 +295,7 @@ public sealed class TelemetryTests(OperatorApiFixture fixture) : IClassFixture<O
             Assert.False(string.IsNullOrWhiteSpace(x.Body.GetProperty("message").GetString()));
         });
         Assert.All(results, x => Assert.True(x.Status is 204 or 429, x.Status.ToString()));
-        Assert.True(results.Count(x => x.Status == 204) <= NodeRequestRateLimit.Burst + 5);
+        Assert.Equal(NodeRequestRateLimit.Burst, results.Count(x => x.Status == 204));
 
         // The same bucket limits disk usage reports and attempt detail.
         var disk = await fixture.SendNodeAsync("/agent/v1/disk-usage", noisy.Certificate,
@@ -304,6 +305,7 @@ public sealed class TelemetryTests(OperatorApiFixture fixture) : IClassFixture<O
 
         // And the other way round: a Node that used its burst on disk reports is limited for telemetry.
         var diskNoisy = await fixture.EnrollAsync("tel-disk-noisy");
+        fixture.FreezeRateLimit(diskNoisy);
         var disks = await Task.WhenAll(Enumerable.Range(0, NodeRequestRateLimit.Burst + 40).Select(_ => fixture.SendNodeAsync(
             "/agent/v1/disk-usage", diskNoisy.Certificate,
             new { volumes = new[] { new { label = "home", totalBytes = 1000, usedBytes = 100, availableBytes = 800 } } }, "PUT")));

@@ -17,7 +17,8 @@ Setup:
   export FLEET_OPERATOR_TOKEN=<operator token>   (environment only; there is no token flag)
 
 Start here:
-  fleet doctor                    every open problem, its explanation, and the commands that fix it
+  fleet doctor                    every problem with its state, explanation and the commands that fix it
+                                  (only open problems count; --all counts acknowledged and snoozed ones too)
   fleet nodes list                all machines with freshness and target counts
   fleet nodes show <node>         one machine in detail (alias or UUID)
   fleet explain <error-code>      what an error code means and how to fix it
@@ -25,10 +26,10 @@ Start here:
 Exit codes:
   0 ok   2 usage error   3 authentication or authorization failed (401/403, including a token
   scope that is too low)   4 not found   5 conflict (409)   6 other server or transport error
-  10 `fleet doctor` found error-severity issues (its JSON is still printed on stdout)
+  10 `fleet doctor` found open error-severity issues (its JSON is still printed on stdout)
 
-Token scopes: read (every list/show command), operate (retry, nodes disk --refresh, source rescan, models select and
-refresh), admin (enrollment, rename, revoke, remove). Destructive commands need --yes.
+Token scopes: read (every list/show command), operate (retry, issues ack/snooze/reopen, nodes disk --refresh, source
+rescan, models select and refresh), admin (enrollment, rename, revoke, remove). Destructive commands need --yes.
 Help does not require FLEET_SERVER_URL or FLEET_OPERATOR_TOKEN.";
 
 #[derive(Debug, Parser)]
@@ -66,7 +67,7 @@ pub(crate) enum Command {
         /// Target name as shown by `nodes show`, for example `skills` or `ai-client/claude`.
         target: String,
     },
-    /// List open issues (problems) with severity, error code and suggested commands.
+    /// List issues (problems) with severity, state, error code and suggested commands; acknowledge, snooze or reopen them.
     Issues(IssuesCommand),
     /// Browse the error catalog of every agent and server error code.
     Errors(ErrorsCommand),
@@ -78,11 +79,11 @@ pub(crate) enum Command {
         /// Error code, for example `lock_failed`. Codes appear as `errorCode` in issues and attempts.
         code: String,
     },
-    /// Report every open issue with its explanation; exits 10 when error-severity issues exist.
+    /// Report every issue with its state and explanation; exits 10 when an open issue has severity error.
     #[command(
-        after_help = "Prints {\"ok\": bool, \"issues\": [{...issue, \"explanation\": {title, explanation, fix} | null}], \"summary\": {\"errors\": n, \"warnings\": n}}.\nEach issue's `commands` array lists fleet commands that inspect or fix it.\nA failed-Target issue also carries `diagnostic`, `path` and `step` from the latest failed attempt (null when the Agent sent none); read them before choosing a fix.\nExit 0 when no issue has severity error (warnings alone are ok); exit 10 when at least one does.\n\nExamples:\n  fleet doctor\n  fleet doctor | jq '.issues[].commands[]'"
+        after_help = "Prints {\"ok\": bool, \"counted\": \"open\" | \"all\", \"issues\": [{...issue, \"state\": \"open\" | \"acknowledged\" | \"snoozed\", \"explanation\": {title, explanation, fix} | null}], \"summary\": {\"errors\": n, \"warnings\": n}, \"states\": {\"open\": n, \"acknowledged\": n, \"snoozed\": n}}.\nEvery issue is listed with its `state` (and `stateBy`, `stateAt`, `snoozedUntil` when it is not open). The summary, `ok` and the exit code count only open issues, so an acknowledged or snoozed error does not fail the check. With --all they count every issue, as before.\nEach issue's `commands` array lists fleet commands that inspect or fix it.\nA failed-Target issue also carries `diagnostic`, `path` and `step` from the latest failed attempt (null when the Agent sent none); read them before choosing a fix.\nExit 0 when no counted issue has severity error (warnings alone are ok); exit 10 when at least one does.\n\nExamples:\n  fleet doctor\n  fleet doctor --all\n  fleet doctor | jq '.issues[] | select(.state == \"open\") | .commands[]'"
     )]
-    Doctor,
+    Doctor(DoctorArgs),
     /// List rollouts or inspect one rollout's attempts.
     Rollouts(RolloutsArgs),
     /// List desired revisions (source revisions published for rollout).
@@ -239,7 +240,16 @@ enum NodesSubcommand {
 // ---- issues and errors --------------------------------------------------------------------
 
 #[derive(Debug, Args)]
-#[command(after_help = "Example:\n  fleet issues list")]
+pub(crate) struct DoctorArgs {
+    /// Count acknowledged and snoozed issues too, in the summary and the exit code.
+    #[arg(long)]
+    pub(crate) all: bool,
+}
+
+#[derive(Debug, Args)]
+#[command(
+    after_help = "Examples:\n  fleet issues list\n  fleet issues ack \"disk_space_low:00000000-0000-0000-0000-000000000001\"\n  fleet issues snooze \"node_not_contacting:00000000-0000-0000-0000-000000000001\" --hours 4\n  fleet issues reopen \"disk_space_low:00000000-0000-0000-0000-000000000001\"\n\nAcknowledge, snooze and reopen need scope operate. An issue ID contains ':' and can contain URLs; quote it. The CLI sends it in the request body."
+)]
 pub(crate) struct IssuesCommand {
     #[command(subcommand)]
     command: IssuesSubcommand,
@@ -247,11 +257,40 @@ pub(crate) struct IssuesCommand {
 
 #[derive(Debug, Subcommand)]
 enum IssuesSubcommand {
-    /// List open issues, errors first. Not paged; `fleet doctor` adds explanations.
+    /// List issues, errors first, each with its state (open, acknowledged or snoozed). Not paged; `fleet doctor` adds explanations.
     #[command(
-        after_help = "Example:\n  fleet issues list\n\nEach issue has severity (error or warning), code, errorCode, nodeName, target and a `commands` array."
+        after_help = "Example:\n  fleet issues list\n  fleet issues list | jq '.items[] | select(.state == \"open\") | .id'\n\nEach issue has id, severity (error or warning), code, errorCode, nodeName, target, `state` and a `commands` array. An acknowledged or snoozed issue also has stateBy, stateAt and, for a snooze, snoozedUntil."
     )]
     List,
+    /// Acknowledge one issue: you know about it. It stays listed and comes back to open if it starts over.
+    #[command(
+        name = "ack",
+        visible_alias = "acknowledge",
+        after_help = "Needs scope operate. Only acknowledge an issue with the human operator's agreement. Example:\n  fleet issues ack \"disk_space_low:00000000-0000-0000-0000-000000000001\"\n\nAn acknowledgement applies to the current occurrence only: when the issue's `since` changes (it was fixed and came back, or the Agent measured again) it is open again. Prints the updated issue. Undo it with `fleet issues reopen`."
+    )]
+    Ack {
+        /// Issue ID from `fleet issues list` (contains ':'; quote it).
+        id: String,
+    },
+    /// Snooze one issue for 1 to 168 hours: use it for a known, temporary problem.
+    #[command(
+        after_help = "Needs scope operate. Examples:\n  fleet issues snooze \"node_not_contacting:00000000-0000-0000-0000-000000000001\" --hours 4\n  fleet issues snooze \"disk_space_low:00000000-0000-0000-0000-000000000001\" --hours 168\n\nThe issue stays listed with state snoozed and `snoozedUntil`, and returns to open by itself when the time is up. Prints the updated issue. Undo it with `fleet issues reopen`."
+    )]
+    Snooze {
+        /// Issue ID from `fleet issues list` (contains ':'; quote it).
+        id: String,
+        /// How long to snooze, 1 to 168 hours (7 days).
+        #[arg(long, value_name = "N", value_parser = clap::value_parser!(u16).range(1..=168))]
+        hours: u16,
+    },
+    /// Reopen one issue: remove its acknowledgement or snooze.
+    #[command(
+        after_help = "Needs scope operate. Example:\n  fleet issues reopen \"disk_space_low:00000000-0000-0000-0000-000000000001\"\n\nPrints the updated issue, with state open."
+    )]
+    Reopen {
+        /// Issue ID from `fleet issues list` (contains ':'; quote it).
+        id: String,
+    },
 }
 
 #[derive(Debug, Args)]
@@ -274,7 +313,7 @@ enum ErrorsSubcommand {
 
 #[derive(Debug, Args)]
 #[command(
-    after_help = "Examples:\n  fleet rollouts list\n  fleet rollouts attempts 550e8400-e29b-41d4-a716-446655440000"
+    after_help = "Examples:\n  fleet rollouts list --newest\n  fleet rollouts show 550e8400-e29b-41d4-a716-446655440000\n  fleet rollouts attempts 550e8400-e29b-41d4-a716-446655440000"
 )]
 pub(crate) struct RolloutsArgs {
     #[command(subcommand)]
@@ -290,6 +329,14 @@ enum RolloutsSubcommand {
         after_help = "Examples:\n  fleet rollouts list\n  fleet rollouts list --newest\n  fleet rollouts list --newest --after <nextCursor>\n\nWithout --newest the Server lists rollouts in ID order, which is not chronological. Use --newest to find recent rollouts."
     )]
     List(NewestArgs),
+    /// Show one rollout: Assignment state counts and, per machine, its state, first and last attempt time and each Target's state and error code.
+    #[command(
+        after_help = "Examples:\n  fleet rollouts show 550e8400-e29b-41d4-a716-446655440000\n  fleet rollouts show 550e8400-e29b-41d4-a716-446655440000 | jq '.nodes[] | select(.state == \"failed\") | {nodeName, targets}'\n\nOutput: {rolloutId, desiredRevisionId, sourceRevision, createdAt, summary: {pending, applying, succeeded, failed, superseded}, nodes: [{nodeId, nodeName, state, firstAttemptAt, lastAttemptAt, targets: [{name, state, errorCode, updatedAt}]}]}.\nA machine's state is the worst of its Targets (failed, applying, pending, succeeded, superseded). Explain a failure with `fleet explain <errorCode>`; the rollout ID comes from `fleet rollouts list --newest` or `fleet revisions show`."
+    )]
+    Show {
+        /// Rollout ID (UUID) from `rollouts list` or `revisions show`.
+        rollout_id: Uuid,
+    },
     /// List every node's attempt in one rollout.
     #[command(
         after_help = "Examples:\n  fleet rollouts attempts 550e8400-e29b-41d4-a716-446655440000"
@@ -304,7 +351,9 @@ enum RolloutsSubcommand {
 }
 
 #[derive(Debug, Args)]
-#[command(after_help = "Examples:\n  fleet revisions list --newest")]
+#[command(
+    after_help = "Examples:\n  fleet revisions list --newest\n  fleet revisions show 550e8400-e29b-41d4-a716-446655440000"
+)]
 pub(crate) struct RevisionsCommand {
     #[command(subcommand)]
     command: RevisionsSubcommand,
@@ -317,6 +366,14 @@ enum RevisionsSubcommand {
         after_help = "Examples:\n  fleet revisions list\n  fleet revisions list --newest\n  fleet revisions list --newest --after <nextCursor>\n\nWithout --newest the Server lists revisions in ID order, which is not chronological. With --newest the first item is the newest revision."
     )]
     List(NewestArgs),
+    /// Show one desired revision: its commit, the previous revision and what it changed (Skills added, changed, removed; Target counts).
+    #[command(
+        after_help = "Examples:\n  fleet revisions show 550e8400-e29b-41d4-a716-446655440000\n  fleet revisions show 550e8400-e29b-41d4-a716-446655440000 | jq '.skills'\n\nOutput: {desiredRevisionId, sourceRevision, acceptedAt, commit: {subject, author, committedAt} | null, previous: {desiredRevisionId, sourceRevision} | null, rolloutId | null, skills: {added, changed, removed}, targets: {added, changed, removed, nodes}}.\nThe diff is against the previous revision (`previous` is null for the first). `commit` is null for revisions accepted before Fleet recorded commits. Follow `rolloutId` with `fleet rollouts show` to see how each machine is doing. Find IDs with `fleet revisions list --newest`."
+    )]
+    Show {
+        /// Desired revision ID (UUID) from `revisions list` (desiredRevisionId).
+        id: Uuid,
+    },
 }
 
 #[derive(Debug, Args)]
@@ -657,7 +714,7 @@ fn string_field<'a>(value: &'a Value, key: &str) -> Result<&'a str, CliError> {
 }
 
 pub(crate) async fn run(api: &Api, command: Command) -> Result<Outcome, CliError> {
-    if matches!(command, Command::Doctor) {
+    if let Command::Doctor(DoctorArgs { all }) = command {
         let issues = api.get(&["issues"], &[]).await?;
         let has_items = issues
             .get("items")
@@ -668,7 +725,7 @@ pub(crate) async fn run(api: &Api, command: Command) -> Result<Outcome, CliError
         } else {
             Value::Null
         };
-        let (document, failed) = doctor::report(&issues, &catalog)?;
+        let (document, failed) = doctor::report(&issues, &catalog, all)?;
         emit(&document)?;
         return Ok(if failed {
             Outcome::DoctorFoundErrors
@@ -682,7 +739,7 @@ pub(crate) async fn run(api: &Api, command: Command) -> Result<Outcome, CliError
 
 async fn dispatch(api: &Api, command: Command) -> Result<Value, CliError> {
     match command {
-        Command::Doctor => unreachable!("handled by run"),
+        Command::Doctor(_) => unreachable!("handled by run"),
         Command::Nodes(NodesArgs {
             command,
             legacy_after,
@@ -694,9 +751,14 @@ async fn dispatch(api: &Api, command: Command) -> Result<Value, CliError> {
             )
             .await
         }
-        Command::Issues(IssuesCommand {
-            command: IssuesSubcommand::List,
-        }) => api.get(&["issues"], &[]).await,
+        Command::Issues(IssuesCommand { command }) => match command {
+            IssuesSubcommand::List => api.get(&["issues"], &[]).await,
+            IssuesSubcommand::Ack { id } => issue_state(api, &id, "acknowledge", None).await,
+            IssuesSubcommand::Snooze { id, hours } => {
+                issue_state(api, &id, "snooze", Some(hours)).await
+            }
+            IssuesSubcommand::Reopen { id } => issue_state(api, &id, "reopen", None).await,
+        },
         Command::Errors(ErrorsCommand {
             command: ErrorsSubcommand::List,
         }) => api.get(&["errors"], &[]).await,
@@ -710,6 +772,10 @@ async fn dispatch(api: &Api, command: Command) -> Result<Value, CliError> {
                 let after = merge_after(legacy_after, args.after)?;
                 to_value(api.list(&["rollouts"], &filters, after.as_deref()).await?)
             }
+            RolloutsSubcommand::Show { rollout_id } => {
+                reject_legacy_after(legacy_after, "rollouts list")?;
+                api.get(&["rollouts", &rollout_id.to_string()], &[]).await
+            }
             RolloutsSubcommand::Attempts { rollout_id, after } => {
                 reject_legacy_after(legacy_after, "rollouts list")?;
                 to_value(
@@ -722,16 +788,19 @@ async fn dispatch(api: &Api, command: Command) -> Result<Value, CliError> {
                 )
             }
         },
-        Command::Revisions(RevisionsCommand {
-            command: RevisionsSubcommand::List(args),
-        }) => to_value(
-            api.list(
-                &["desired-revisions"],
-                &args.filters(),
-                args.after.as_deref(),
-            )
-            .await?,
-        ),
+        Command::Revisions(RevisionsCommand { command }) => match command {
+            RevisionsSubcommand::List(args) => to_value(
+                api.list(
+                    &["desired-revisions"],
+                    &args.filters(),
+                    args.after.as_deref(),
+                )
+                .await?,
+            ),
+            RevisionsSubcommand::Show { id } => {
+                api.get(&["desired-revisions", &id.to_string()], &[]).await
+            }
+        },
         Command::Warnings(WarningsArgs {
             command: WarningsSubcommand::List(args),
             legacy_after,
@@ -797,6 +866,26 @@ async fn dispatch(api: &Api, command: Command) -> Result<Value, CliError> {
             }
         },
     }
+}
+
+/// Acknowledges, snoozes or reopens one issue. The ID contains ':' and can contain URLs, so it goes in the JSON body, never in the path.
+async fn issue_state(
+    api: &Api,
+    id: &str,
+    action: &str,
+    hours: Option<u16>,
+) -> Result<Value, CliError> {
+    if id.trim().is_empty() {
+        return Err(CliError::usage(
+            "invalid_argument",
+            "the issue ID must not be blank; copy it from `fleet issues list`",
+        ));
+    }
+    let mut body = json!({"id": id, "action": action});
+    if let Some(hours) = hours {
+        body["hours"] = json!(hours);
+    }
+    api.post(&["issues", "state"], Some(&body)).await
 }
 
 async fn nodes(

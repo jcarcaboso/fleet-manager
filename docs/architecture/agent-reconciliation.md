@@ -251,6 +251,41 @@ file means not running) and trying a non-blocking shared lock, released at once.
 A conflict means a process holds the state lock: the service, but also a
 foreground `run`, `enroll` or `alias`.
 
+## Drift reports
+
+Reconciliation already repairs owned content that someone changed outside
+Fleet. The Agent now also says which files it repaired, so the dashboard can
+show drift. `fleet-reconcile` returns `repaired` in its outcomes using the ownership
+Receipt and observed digests.
+
+- A managed file counts when it had a Receipt, the Assignment still wants it
+  and the observed digest differs from the Receipt's (the file was edited or
+  deleted). Its path is the Target path joined with the file name.
+- A Skill counts when it is in the Receipt, the Assignment still contains it
+  and its observed tree digest differs from the Receipt's. If the Assignment
+  carries the content the Receipt recorded, the Agent lists the files that
+  differ (modified, missing or added in the owned directory) by comparing the
+  tree with the Bundle in an additional bounded read, which happens only on drift.
+  If the Skill is updated in the same Assignment, there is no known baseline,
+  so the Skill directory is named.
+- A new Assignment revision over clean content, removals, and the first
+  installation are not drift. AI-client settings are out of scope.
+
+`repaired` holds Home-relative paths, sorted, unique, at most 20 per Target and
+passed through `report_path` (relative, no `..`, no control characters, at most
+512 UTF-16 units); an unsafe path is omitted. The Agent applies the same rules
+again before sending.
+
+After the cycle, the Agent sends `POST /agent/v1/drift` with
+`{ "target", "files" }` for each Target that repaired something (the drift of
+an Attempt that failed is rolled back and not reported). The reports are one
+side task with the 10-second request timeout, at most one task in flight: if
+the previous one is still running, the new reports are dropped. The response is
+ignored, and nothing is persisted or retried, so a 404 from an older Server or
+any other error drops the report. The route does not need a capability header.
+The [Operator API](../technical-design/operator-api.md#drift-reports) defines
+the request.
+
 ## Work loop
 
 For each Target, the Agent follows this order:

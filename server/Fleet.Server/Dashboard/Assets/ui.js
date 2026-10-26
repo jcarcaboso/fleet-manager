@@ -168,6 +168,11 @@
     const k = 'diag:' + key;
     return `<details class="diag-line ${cls}" data-open-key="${esc(k)}" ${Fleet.openState.get(k) ? 'open' : ''}><summary><span class="diag-text">${esc(text)}</span>${ic('chevD', 'sumchev')}</summary></details>`;
   };
+  /* A collapsed list of file paths (drift events). Paths come from the Agent and are shown as text only. */
+  ui.fileList = (files, key) => {
+    const k = 'files:' + key;
+    return `<details class="tl-files" data-open-key="${esc(k)}" ${Fleet.openState.get(k) ? 'open' : ''}><summary>${ic('file')}<span>${esc(Fleet.u.plural(files.length, 'file'))}</span>${ic('chevD', 'sumchev')}</summary><ul class="tl-filelist">${files.map(f => `<li><code>${esc(f)}</code></li>`).join('')}</ul></details>`;
+  };
   ui.timeline = events => {
     if (!events.length) return `<div class="empty-mini">${ic('activity')}<p>Nothing to show here.</p></div>`;
     const days = [];
@@ -177,6 +182,37 @@
       if (!d || d.k !== k) days.push(d = { k, label: Fleet.u.dayLabel(e.at), items: [] });
       d.items.push(e);
     }
-    return days.map(d => `<div class="tl-day"><h3>${esc(d.label)}</h3><ol class="tl">${d.items.map(e => `<li class="tl-item"><span class="tl-dot">${glyph(e.level, e.kind)}</span><div class="tl-card"><div class="tl-top"><b>${esc(e.title)}</b><time datetime="${esc(e.at)}">${Fleet.u.fmtTime(e.at)}</time></div>${e.sub || e.step ? `<p class="tl-sub">${e.sub ? `<span>${esc(e.sub)}</span>` : ''}${Fleet.u.stepChip(e.step)}</p>` : ''}${e.text ? ui.diagLine(e.text, e.key || e.at + e.title, 'tl-text') : ''}</div></li>`).join('')}</ol></div>`).join('');
+    return days.map(d => `<div class="tl-day"><h3>${esc(d.label)}</h3><ol class="tl">${d.items.map(e => `<li class="tl-item"><span class="tl-dot">${glyph(e.level, e.kind)}</span><div class="tl-card"><div class="tl-top"><b>${esc(e.title)}</b><time datetime="${esc(e.at)}">${Fleet.u.fmtTime(e.at)}</time></div>${e.sub || e.step ? `<p class="tl-sub">${e.sub ? `<span>${esc(e.sub)}</span>` : ''}${Fleet.u.stepChip(e.step)}</p>` : ''}${e.text ? ui.diagLine(e.text, e.key || e.at + e.title, 'tl-text') : ''}${e.files?.length ? ui.fileList(e.files, e.key || e.at + e.title) : ''}</div></li>`).join('')}</ol></div>`).join('');
+  };
+
+  /* ---------------------------------------------------------------- phase 4: what changed, issue state */
+  /* Skills added (+), changed (~) and removed (−) as chips, and the Target counts. d is a model.revisionDetail. The sign is part of the chip, so colour is never the only signal. */
+  ui.changeChips = d => {
+    const chip = (cls, sign, label, name) => `<span class="chg chg--${cls}"><span class="chg-s" aria-label="${label}">${sign}</span>${esc(name)}</span>`;
+    const chips = [...d.skills.added.map(x => chip('add', '+', 'added', x)), ...d.skills.changed.map(x => chip('mod', '~', 'changed', x)), ...d.skills.removed.map(x => chip('rm', '−', 'removed', x))];
+    const t = d.targets, any = t.added + t.changed + t.removed > 0;
+    return `<div class="changes-block">${chips.length ? `<div class="changes">${chips.join('')}</div>` : '<p class="muted small">No Skill changes.</p>'}
+      <p class="chg-targets small">${any ? `<span class="muted">Targets:</span> <b>${Fleet.u.num(t.added)}</b> added · <b>${Fleet.u.num(t.changed)}</b> changed · <b>${Fleet.u.num(t.removed)}</b> removed, on ${Fleet.u.plural(t.nodes, 'machine')}` : '<span class="muted">No Target changes.</span>'}</p></div>`;
+  };
+  /* The line under a problem that is acknowledged or snoozed: who did it, and until when. */
+  ui.issueBanner = i => {
+    const st = Fleet.model.issueState(i), u = Fleet.u;
+    if (st.key === 'open') return '';
+    const who = st.by ? ` by <b>${esc(st.by)}</b>` : '', when = st.at ? `, ${esc(u.rel(st.at))}` : '';
+    return st.key === 'snoozed'
+      ? `<p class="prob-state prob-state--snoozed">${ic('snooze')}<span>Snoozed${who}${when}. Back in Open ${st.until ? `at <b>${esc(u.fmtFull(st.until))} UTC</b> (${esc(u.until(st.until))})` : 'later'}. It stays listed here until then.</span></p>`
+      : `<p class="prob-state prob-state--ack">${ic('ack')}<span>Acknowledged${who}${when}. It stays listed here and comes back to Open if it starts over.</span></p>`;
+  };
+  /* Acknowledge and Snooze for an open problem, Reopen for the others. Gated by the operate scope. busy disables them while the request runs. */
+  ui.issueActions = (i, busy) => {
+    const st = Fleet.model.issueState(i).key, id = esc(i.id), off = busy ? 'disabled' : '';
+    if (!Fleet.api.can('operate')) {
+      return st === 'open' ? ui.locked('operate', 'btn-sm btn-secondary', `${ic('ack')}Acknowledge`) + ui.locked('operate', 'btn-sm btn-secondary', `${ic('snooze')}Snooze`)
+        : ui.locked('operate', 'btn-sm btn-secondary', `${ic('retry')}Reopen`);
+    }
+    if (st !== 'open') return `<button type="button" class="btn btn-sm btn-secondary" data-act="issue-state" data-op="reopen" data-id="${id}" ${off}>${ic('retry')}Reopen</button>`;
+    return `<button type="button" class="btn btn-sm btn-secondary" data-act="issue-state" data-op="acknowledge" data-id="${id}" ${off}>${ic('ack')}Acknowledge</button>
+      <span class="snooze" role="group" aria-label="Snooze this problem"><span class="snooze-l">${ic('snooze')}Snooze</span>${Fleet.model.SNOOZE.map(([h, label, long]) =>
+        `<button type="button" class="btn btn-sm btn-ghost" data-act="issue-state" data-op="snooze" data-hours="${h}" data-id="${id}" aria-label="Snooze for ${long}" ${off}>${label}</button>`).join('')}</span>`;
   };
 })();

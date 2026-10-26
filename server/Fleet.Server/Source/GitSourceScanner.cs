@@ -1,5 +1,6 @@
 using System.Text;
 using Fleet.Core.Coordination;
+using Microsoft.Extensions.Logging;
 using YamlDotNet.Core;
 using YamlDotNet.Core.Events;
 
@@ -9,7 +10,8 @@ public sealed class GitSourceScanner(
     string remote,
     string mirrorPath,
     IEnrolledNodeSource nodes,
-    SourceLimits? limits = null) : ISourceScanner
+    SourceLimits? limits = null,
+    ILogger? logger = null) : ISourceScanner
 {
     private const int CoordinationWarningMessageChars = 2_048;
     private readonly SourceLimits _limits = limits ?? new();
@@ -85,7 +87,8 @@ public sealed class GitSourceScanner(
                     ? [SourceTargetPublishers.EmptyAgentInstructions]
                     : [])
                 .DistinctBy(x => x.Digest, StringComparer.Ordinal).OrderBy(x => x.Digest, StringComparer.Ordinal).ToArray();
-            return new SourceScanResult.Snapshot(new AcceptedSourceSnapshot(revision, bundles, targets, warnings, DateTimeOffset.UtcNow));
+            var commit = await ReadCommitMetadataAsync(revision, scanToken);
+            return new SourceScanResult.Snapshot(new AcceptedSourceSnapshot(revision, bundles, targets, warnings, DateTimeOffset.UtcNow, commit));
         }
         catch (Exception exception) when (exception is GitSourceException or IOException or UnauthorizedAccessException or DecoderFallbackException or FormatException or OverflowException)
         {
@@ -94,6 +97,32 @@ public sealed class GitSourceScanner(
         catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested)
         {
             return Invalid(null, "git_source_failure", "Source scanning exceeded its time limit.");
+        }
+    }
+
+    // Subject, author name and committer date of the tip commit. The format has no email, and the output is bounded: a failure,
+    // a malformed answer or an oversized message gives null and never fails the scan. Only cancellation propagates.
+    private async Task<CommitMetadata?> ReadCommitMetadataAsync(string revision, CancellationToken cancellationToken)
+    {
+        try
+        {
+            var output = await RunGitAsync(["show", "-s", "--no-show-signature", "--encoding=UTF-8", "--format=%s%x00%an%x00%cI", revision],
+                cancellationToken, 64 * 1024);
+            var fields = new UTF8Encoding(false, false).GetString(output).TrimEnd('\n').Split('\0');
+            if (fields.Length != 3) return null;
+            DateTimeOffset? committedAt = DateTimeOffset.TryParse(fields[2], System.Globalization.CultureInfo.InvariantCulture,
+                System.Globalization.DateTimeStyles.None, out var parsed) ? parsed.ToUniversalTime() : null;
+            return CommitMetadataRules.Sanitize(new CommitMetadata(fields[0], fields[1], committedAt));
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            throw;
+        }
+        catch (Exception exception) when (exception is GitSourceException or IOException or UnauthorizedAccessException or FormatException)
+        {
+            // The message of a Git failure may contain remote text, so only its type is logged.
+            logger?.LogWarning("Commit metadata could not be read: {ErrorType}", exception.GetType().Name);
+            return null;
         }
     }
 

@@ -23,7 +23,7 @@
       lastContactAt: raw.lastContactAt || null, freshness: raw.freshness, enrolledAt: raw.enrolledAt || null,
       notAfter: raw.credential?.notAfter || null, credential: raw.credential || null, targets,
       counts: { ...u.emptyCounts(), ...(raw.summary || {}) }, currentRevision: newest?.sourceRevision || null, currentAcceptedAt: newest?.acceptedAt || null,
-      disk: model.diskDetail(raw.disk), agent: model.agentInfo(raw.agent),
+      disk: model.diskDetail(raw.disk), agent: model.agentInfo(raw.agent), drift: model.drift(raw.drift),
     };
   };
   /* ---------------------------------------------------------------- Disk (operator-api.md, "Disk usage") */
@@ -182,6 +182,56 @@
     return 'other';
   };
 
+  /* ---------------------------------------------------------------- Phase 4 (operator-api.md, "Phase 4: deployments, drift and issue state") */
+  /* Commit metadata: { subject, author, committedAt } or null (a revision accepted before phase 4, or a Server before it). */
+  model.commit = raw => {
+    if (!raw || typeof raw !== 'object') return null;
+    const subject = text(raw.subject), author = text(raw.author);
+    return subject || author ? { subject, author, committedAt: raw.committedAt || null } : null;
+  };
+  /* The title of a revision: its commit subject, or its short SHA when the Server has no commit for it. */
+  model.revTitle = rev => model.commit(rev?.commit)?.subject || (rev ? `Revision ${u.shortSha(rev.sourceRevision)}` : '');
+  const names = v => (Array.isArray(v) ? v : []).filter(x => typeof x === 'string');
+  const int = v => { const x = Number(v); return Number.isFinite(x) && x > 0 ? Math.floor(x) : 0; };
+  /* GET desired-revisions/{id}. */
+  model.revisionDetail = raw => ({
+    id: raw.desiredRevisionId, sourceRevision: raw.sourceRevision, acceptedAt: raw.acceptedAt || null, commit: model.commit(raw.commit),
+    previous: raw.previous && raw.previous.desiredRevisionId ? { id: raw.previous.desiredRevisionId, sourceRevision: raw.previous.sourceRevision || '' } : null,
+    rolloutId: raw.rolloutId || null,
+    skills: { added: names(raw.skills?.added), changed: names(raw.skills?.changed), removed: names(raw.skills?.removed) },
+    targets: { added: int(raw.targets?.added), changed: int(raw.targets?.changed), removed: int(raw.targets?.removed), nodes: int(raw.targets?.nodes) },
+  });
+  /* A Node's state is the worst of its Targets, in this order. */
+  model.NODE_RANK = { failed: 0, applying: 1, pending: 2, succeeded: 3, superseded: 4 };
+  model.nodeRank = state => model.NODE_RANK[state] ?? 5;
+  /* GET rollouts/{id}. */
+  model.rolloutDetail = raw => ({
+    id: raw.rolloutId, revisionId: raw.desiredRevisionId, sourceRevision: raw.sourceRevision, createdAt: raw.createdAt || null,
+    summary: { ...u.emptyCounts(), ...(raw.summary || {}) },
+    nodes: (Array.isArray(raw.nodes) ? raw.nodes : []).map(n => ({ id: n.nodeId, name: String(n.nodeName ?? ''), state: n.state, first: n.firstAttemptAt || null, last: n.lastAttemptAt || null,
+      targets: (Array.isArray(n.targets) ? n.targets : []).map(t => ({ name: String(t.name ?? ''), state: t.state, errorCode: t.errorCode || null, updatedAt: t.updatedAt || null })) })),
+  });
+  /* Drift events of a Node (GET nodes/{node}.drift), newest first. A Server before phase 4 sends none. */
+  model.drift = raw => (Array.isArray(raw) ? raw : []).map(e => ({ target: String(e?.target ?? ''), files: names(e?.files), detectedAt: e?.detectedAt || null }))
+    .filter(e => u.valid(e.detectedAt)).sort((a, b) => u.ms(b.detectedAt) - u.ms(a.detectedAt));
+  model.recentDrift = (n, within = u.DAY) => (n.drift || []).filter(e => u.now() - u.ms(e.detectedAt) <= within);
+
+  /* Issue state: GET issues items carry state (open, acknowledged, snoozed), stateBy, stateAt and snoozedUntil. A Server before phase 4 sends none, so every issue is open.
+     A snooze whose time has passed counts as open, even before the page is refreshed. */
+  model.issueState = i => {
+    const s = i?.state;
+    if (s === 'snoozed' && !(u.ms(i.snoozedUntil) !== null && u.ms(i.snoozedUntil) <= u.now())) return { key: 'snoozed', by: text(i.stateBy), at: i.stateAt || null, until: i.snoozedUntil || null };
+    if (s === 'acknowledged') return { key: 'acknowledged', by: text(i.stateBy), at: i.stateAt || null, until: null };
+    return { key: 'open', by: null, at: null, until: null };
+  };
+  model.isOpen = i => model.issueState(i).key === 'open';
+  model.STATE_LABEL = { open: 'Open', acknowledged: 'Acknowledged', snoozed: 'Snoozed' };
+  /* The navigation badge counts open errors only. */
+  model.errorCount = items => (items || []).filter(i => i.severity === 'error' && model.isOpen(i)).length;
+  model.SNOOZE = [[1, '1 h', '1 hour'], [4, '4 h', '4 hours'], [24, '24 h', '24 hours'], [168, '7 d', '7 days']];
+  /* Replaces an issue by its updated copy in every list that holds it. */
+  model.patchIssue = (items, item) => (items || []).map(i => i.id === item.id ? item : i);
+
   /* ---------------------------------------------------------------- Navigation summary */
   const summary = model.summary = { errors: 0, modelsBad: false, at: 0, issues: null };
   model.refreshSummary = async (force = false) => {
@@ -192,7 +242,7 @@
         Fleet.api.get('issues').catch(e => { if (e.silent) throw e; return null; }),
         Fleet.api.get('cliproxy/status').catch(e => { if (e.silent) throw e; return null; }),
       ]);
-      if (issues) { summary.issues = issues.items || []; summary.errors = summary.issues.filter(i => i.severity === 'error').length; }
+      if (issues) { summary.issues = issues.items || []; summary.errors = model.errorCount(summary.issues); }
       if (status) summary.modelsBad = (status.catalogs || []).some(c => c.outcome === 'failed');
     } catch { /* signed out: the 401 handler already switched to the login view */ }
     if (Fleet.renderNav) Fleet.renderNav();

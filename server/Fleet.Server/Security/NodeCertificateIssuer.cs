@@ -82,9 +82,12 @@ public sealed class NodeCertificateIssuer : IDisposable
         chain.ChainPolicy.VerificationTime = now;
         if (allowExpired) chain.ChainPolicy.VerificationFlags = X509VerificationFlags.IgnoreNotTimeValid;
         chain.ChainPolicy.ApplicationPolicy.Add(new Oid("1.3.6.1.5.5.7.3.2"));
+        // Requests on one TLS connection can share a certificate. Decode into request-local extensions: the framework's
+        // lazy EKU cache publishes a mutable collection before it is populated and can appear empty to concurrent readers.
         return certificate.Extensions.OfType<X509EnhancedKeyUsageExtension>().Any(x =>
-                x.EnhancedKeyUsages.Cast<Oid>().Any(oid => oid.Value == "1.3.6.1.5.5.7.3.2"))
-            && !certificate.Extensions.OfType<X509BasicConstraintsExtension>().Any(x => x.CertificateAuthority)
+                new X509EnhancedKeyUsageExtension(x, x.Critical).EnhancedKeyUsages.Cast<Oid>().Any(oid => oid.Value == "1.3.6.1.5.5.7.3.2"))
+            && !certificate.Extensions.OfType<X509BasicConstraintsExtension>()
+                .Any(x => new X509BasicConstraintsExtension(x, x.Critical).CertificateAuthority)
             && chain.Build(certificate)
             // Ignore expiry only for the leaf, never future validity or an expired issuer.
             && chain.ChainElements.Cast<X509ChainElement>().Select((element, index) =>

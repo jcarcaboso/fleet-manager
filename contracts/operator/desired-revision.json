@@ -1,0 +1,32 @@
+{
+  "desiredRevisionId": "00000000-0000-0000-0000-0000000000d1",
+  "sourceRevision": "a3f9c21d0c5b4e8f9a1b2c3d4e5f60718293a4b5",
+  "acceptedAt": "2026-10-25T09:00:00Z",
+  "commit": {
+    "subject": "Add incident-runbook skill",
+    "author": "Joan",
+    "committedAt": "2026-10-25T08:58:12Z"
+  },
+  "previous": {
+    "desiredRevisionId": "00000000-0000-0000-0000-0000000000d0",
+    "sourceRevision": "51c0d8a7e2f14b6c8d9e0f1a2b3c4d5e6f708192"
+  },
+  "rolloutId": "00000000-0000-0000-0000-0000000000f1",
+  "skills": {
+    "added": [
+      "incident-runbook"
+    ],
+    "changed": [
+      "release-notes"
+    ],
+    "removed": [
+      "old-checklist"
+    ]
+  },
+  "targets": {
+    "added": 2,
+    "changed": 5,
+    "removed": 0,
+    "nodes": 4
+  }
+}

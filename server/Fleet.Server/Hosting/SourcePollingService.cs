@@ -57,7 +57,7 @@ public sealed class SourcePollingService(
                 ScanTimeoutSeconds = configuration.GetValue("Source:ScanTimeoutSeconds", defaults.ScanTimeoutSeconds),
                 GitCommandTimeoutSeconds = configuration.GetValue("Source:GitCommandTimeoutSeconds", defaults.GitCommandTimeoutSeconds),
             };
-            var scanner = new GitSourceScanner(remote, configuration["Source:MirrorPath"] ?? ".local/source.git", nodes, limits);
+            var scanner = new GitSourceScanner(remote, configuration["Source:MirrorPath"] ?? ".local/source.git", nodes, limits, logger);
             // Operator scans re-read the same commit because registry changes can make a
             // previously invalid Node alias valid without a new Git commit.
             var result = await scanner.ScanAsync(requestedBy is null ? _lastObserved : null, cancellationToken);
