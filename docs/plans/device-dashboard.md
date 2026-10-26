@@ -9,7 +9,7 @@ detailed Node information and what is being deployed. The work spans four parts:
 | Part | Code | Role |
 |---|---|---|
 | Server | `server/` | Owns all data and exposes one Operator API |
-| Dashboard | `server/Fleet.Server/Dashboard/Assets/` | Device Gallery UI, served by the Server |
+| Dashboard | `dashboard/` | Device Gallery UI, a Vue application served on its own address |
 | Agent | `clients/bins/fleet-agent` | Reports richer state from each Node |
 | Operator CLI | `clients/bins/fleet` | The same operations for people and LLM agents |
 
@@ -161,14 +161,13 @@ JSON output, response limits and safe error handling.
 
 ## Dashboard build rules
 
-- Keep it served by the Server at `/dashboard`, on the same origin. Session
-  cookies, the Origin check and CSRF all depend on it.
-- Plain JavaScript modules and CSS files with no npm build, matching today's
-  dashboard and the dependency policy. The CSP blocks inline scripts and
-  styles, so the prototype's inline code moves into files. The explicit
-  per-file asset routes become one route over the embedded asset folder.
-- Keep `data.js` as a development fixture so the UI can be built and
-  screenshot-tested without a Server.
+These rules described the first implementation, which the Server embedded and
+served at `/dashboard`. The dashboard is now its own Vue application served on
+its own address; see [Separate dashboard](separate-dashboard.md).
+
+- It was served by the Server on the same origin. Session cookies, the Origin
+  check and CSRF depended on it. They now work across two origins on one site.
+- The content security policy still forbids inline scripts and styles.
 
 ## Order
 

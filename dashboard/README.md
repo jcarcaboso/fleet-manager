@@ -7,11 +7,10 @@ Router and Vitest. No UI framework, no state library, no CSS framework. The only
 route and response shape is in [`docs/technical-design/operator-api.md`](../docs/technical-design/operator-api.md) and
 [`contracts/operator/*.json`](../contracts/operator).
 
-**Status.** This directory is the foundation: the app shell, sign-in, the typed API client, the session, the stale-response
-and polling protection, the shared components and helpers, the styles, the mock API and the test infrastructure are done and
-tested. Every page view (`src/views/**`, except Login, NotFound and ConfigError) is a placeholder that renders its title and
-"not ported yet"; the old dashboard (`server/Fleet.Server/Dashboard/Assets/*`) is the behavioural reference until the pages
-are ported.
+**Status.** Every page of the previous, Server-embedded dashboard is ported: Machines, the machine page with its six tabs,
+Problems, Deployments and revision pages, Repository, Models, Enrollment with the Add machine wizard, and Audit, with the shell,
+sign-in, the typed API client, the session, the stale-response and polling protection, the shared components, the styles, the
+mock API and the tests. The Server no longer serves a dashboard; it redirects `/dashboard` here.
 
 ## Run it
 
@@ -94,7 +93,7 @@ The old dashboard's `style.css` is ported verbatim (every class name and rule; o
 
 History mode, no `#`. The container serves `index.html` for these paths.
 
-| Path | Route name | View (placeholder to fill) |
+| Path | Route name | View |
 |---|---|---|
 | `/` | redirect to `machines` | |
 | `/login` | `login` (public) | `views/Login/LoginView.vue` **(done)** |
@@ -111,7 +110,7 @@ History mode, no `#`. The container serves `index.html` for these paths.
 
 - `:alias` is one percent-encoded path segment (`rack/A 100%` is `/machines/rack%2FA%20100%25`); the router decodes it once. Build
   links with `nodeRoute(aliasOrId, tab?)`, never by string concatenation. `:tab` is one of `NODE_TABS`; an unknown tab means Overview
-  (`normalizeTab`). The tab placeholders declare an optional `node?: NodeDetailView | null` prop for `NodeView` to pass once it loads the machine.
+  (`normalizeTab`). Each tab component takes the loaded machine as an optional `node` prop from `NodeView`.
 - `/deployments/:revisionId` is the revision page for a UUID. The old dashboard also accepted `/deployments/<short SHA>` as the
   list scrolled to that revision: the router redirects any non-UUID id to `/deployments?revision=<value>` (replace), and
   `DeploymentsView` scrolls to `route.query.revision` (`isRevisionId(id)` is the test).

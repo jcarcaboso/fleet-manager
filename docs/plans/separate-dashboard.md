@@ -8,6 +8,9 @@ served on its own, on its own address, and talks to the Server only through the
 existing `/dashboard/api` routes. The Server stops embedding and serving the
 dashboard.
 
+**Status:** implemented. The Server no longer carries the dashboard, and the
+sections "Behaviour parity" and "Cleanup" below describe work that is done.
+
 This is a breaking change for anyone who opens `https://SERVER/dashboard`:
 that address redirects to the new dashboard address, and the dashboard needs
 its own container.
