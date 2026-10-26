@@ -24,6 +24,77 @@ still checks database authorization, including on reused TLS connections.
 CA replacement requires a planned restart and trust rotation. Live CA reload
 is not implemented.
 
+## Dashboard container
+
+The dashboard is not part of the Server. `skorcius/fleet-manager-dashboard` is an
+unprivileged nginx image that serves the built Vue application over HTTPS on
+8443 (published as `FLEET_DASHBOARD_PORT`, 7444 by default). It reuses the
+Server's certificate and key from the generated runtime volume, mounted read-only,
+and allows TLS 1.2 and 1.3 with AEAD cipher suites only. Compose runs it as UID
+1654 on a read-only root file system with a 16 MiB `/tmp` tmpfs, no capabilities,
+`no-new-privileges`, the Server's memory and process limits, and a healthcheck
+against `/healthz`. It joins its own network, not the database or the Server's
+outbound network, because it never calls the Server: the browser does.
+
+At start-up the container writes `/config.json` and the Content-Security-Policy
+from `FLEET_API_ORIGIN`, the Server's public HTTPS origin. It refuses to start
+with a missing value or anything but a bare `https` origin (plain `http` only for
+`localhost` and `127.0.0.1`). Pages carry `default-src 'none'; script-src 'self';
+style-src 'self'; connect-src 'self' ORIGIN; frame-ancestors 'none'` and related
+headers, `Referrer-Policy: no-referrer`, `X-Content-Type-Options: nosniff`, a
+deny-all `Permissions-Policy` and `Cross-Origin-Opener-Policy: same-origin`.
+Only GET and HEAD are served, dotfiles are refused, and the access log leaves
+out query strings and `Referer`. Hashed files under `/assets/` are cached for a
+year; `index.html` and `config.json` are `no-store`.
+
+### Dashboard origin, CORS and CSRF
+
+The Server side of the pairing is `Fleet__DashboardOrigin` (`Fleet:DashboardOrigin`),
+the dashboard's own HTTPS origin, for example `https://fleet.home.arpa:7444`.
+It follows the rules of `Fleet__PublicUrl`: `https`, a host, no userinfo, path,
+query or fragment, and at most 200 characters. An invalid value stops the Server
+at startup. Compose sets it from `FLEET_DASHBOARD_URL`.
+
+- **Empty:** `/dashboard/api` is not mapped and sends no CORS headers. `GET /`
+  and `GET /dashboard/...` return `404 dashboard_not_configured`. With the value
+  set, the same addresses redirect (302) to the dashboard so old bookmarks keep
+  working. `/dashboard/api` also needs `Fleet__PublicUrl`, as before.
+- **CORS, `/dashboard/api` only.** The `Origin` header must equal the configured
+  origin exactly (scheme and host without case). Then every response, errors
+  included (401, 403, 404, 429), carries `Access-Control-Allow-Origin: <origin>`,
+  `Access-Control-Allow-Credentials: true` and `Vary: Origin`. A preflight
+  (`OPTIONS` with `Origin`) gets `204` with `Access-Control-Allow-Methods: GET,
+  POST, OPTIONS`, `Access-Control-Allow-Headers: Content-Type, X-Fleet-CSRF` and
+  `Access-Control-Max-Age: 600`, and needs neither a session nor a CSRF token.
+  A preflight from another origin gets `403 invalid_origin`. Any other origin, or
+  none, gets no CORS headers. There is no wildcard, reflection or suffix match,
+  and no CORS on `/operator/v1`, `/agent/v1`, `/enroll` or `/health`.
+  This is middleware ahead of the rate limiter, authentication and
+  authorization, because those answer 429 and 401 before any endpoint filter
+  runs, and a browser can only show the Operator why a request failed when the
+  failure carries the CORS headers.
+- **CSRF and Origin.** A non-GET request to `/dashboard/api` must carry
+  `Origin: <Fleet:DashboardOrigin>` (`400 invalid_origin` otherwise, including
+  the Server's own origin) and the `X-Fleet-CSRF` token from `GET csrf`
+  (`400 invalid_csrf`). `Origin` is checked first, after authentication.
+- **Host check.** `/enroll` and `/dashboard/api` must be reached at
+  `Fleet__PublicUrl`, otherwise `400 dashboard_origin_required`. The page that
+  calls the API is no longer on this host, but the cookie (`__Host-`, host only)
+  and every enrollment link still belong to the public origin, so a request that
+  arrives under another name (an IP address, a stray alias) could only produce a
+  session that does not work. The preflight is answered before this check, so
+  the browser can read the error. Redirects do not depend on the host.
+- **Headers on API responses:** `Referrer-Policy: no-referrer`,
+  `X-Content-Type-Options: nosniff`, `Cache-Control: no-store` and
+  `Content-Security-Policy: default-src 'none'; base-uri 'none'; frame-ancestors
+  'none'; form-action 'none'`. `/enroll` keeps its own policy.
+
+The dashboard and the Server must share a site because the session cookie is
+`SameSite=Strict`. The [separate dashboard plan](../plans/separate-dashboard.md)
+has the full contract. `scripts/smoke-dashboard.py` and
+`scripts/smoke-dashboard-image.sh` check both sides against a running stack and
+a local image.
+
 ## Multiple Operators
 
 Every Operator is a full administrator unless it has a scope. Configure distinct token digests:

@@ -27,6 +27,8 @@ public sealed class OperatorApiFixture : IAsyncLifetime
     public const string OperateToken = "test-only-operate-token-with-at-least-32-characters";
     public const string ReadToken = "test-only-read-token-with-at-least-32-characters";
     public const string Origin = "https://localhost";
+    // The dashboard is another origin. Nothing listens there; browsers only send it as the Origin header.
+    public const string DashboardOrigin = "https://localhost:7444";
 
     private readonly PostgreSqlContainer postgres = new PostgreSqlBuilder("postgres:17.5-alpine").Build();
     private readonly string directory = Path.Combine(Path.GetTempPath(), "fleet-operator-" + Guid.NewGuid().ToString("N"));
@@ -84,6 +86,7 @@ public sealed class OperatorApiFixture : IAsyncLifetime
             ["Fleet:IssuerCertificatePath"] = CertificatePath,
             ["Fleet:IssuerKeyPath"] = KeyPath,
             ["Fleet:PublicUrl"] = Origin,
+            ["Fleet:DashboardOrigin"] = DashboardOrigin,
             ["Source:Remote"] = "",
             ["urls"] = "https://localhost:7443"
         };
@@ -110,7 +113,7 @@ public sealed class OperatorApiFixture : IAsyncLifetime
     public async Task<HttpClient> BrowserAsync(string token)
     {
         var browser = NewClient(cookies: true);
-        browser.DefaultRequestHeaders.Add("Origin", Origin);
+        browser.DefaultRequestHeaders.Add("Origin", DashboardOrigin);
         await RefreshCsrfAsync(browser);
         (await browser.PostAsJsonAsync("/dashboard/api/login", new { token })).EnsureSuccessStatusCode();
         await RefreshCsrfAsync(browser);

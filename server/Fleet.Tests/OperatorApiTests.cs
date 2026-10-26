@@ -651,7 +651,7 @@ public sealed partial class OperatorApiTests(OperatorApiFixture fixture) : IClas
 
         // A rejected login explains itself too, for both the short-token and the unknown-token branch.
         using var login = fixture.Factory.CreateClient(new() { BaseAddress = new Uri(OperatorApiFixture.Origin) });
-        login.DefaultRequestHeaders.Add("Origin", OperatorApiFixture.Origin);
+        login.DefaultRequestHeaders.Add("Origin", OperatorApiFixture.DashboardOrigin);
         await OperatorApiFixture.RefreshCsrfAsync(login);
         foreach (var token in new[] { "short", new string('z', 40) })
         {
@@ -942,57 +942,6 @@ public sealed partial class OperatorApiTests(OperatorApiFixture fixture) : IClas
     }
 
     [Fact]
-    public async Task Dashboard_serves_any_named_asset_with_the_security_headers_and_nothing_else()
-    {
-        using var browser = fixture.Factory.CreateClient(new() { BaseAddress = new Uri(OperatorApiFixture.Origin) });
-        var page = await browser.GetAsync("/dashboard");
-        page.EnsureSuccessStatusCode();
-        Assert.StartsWith("text/html", page.Content.Headers.ContentType!.ToString());
-        var html = await page.Content.ReadAsStringAsync();
-        Assert.Contains("/dashboard/app.js", html);
-        Assert.Contains("/dashboard/style.css", html);
-        var script = await browser.GetAsync("/dashboard/app.js");
-        script.EnsureSuccessStatusCode();
-        Assert.StartsWith("text/javascript", script.Content.Headers.ContentType!.ToString());
-        Assert.NotEmpty(await script.Content.ReadAsStringAsync());
-        Assert.Equal("nosniff", script.Headers.GetValues("X-Content-Type-Options").Single());
-        Assert.Contains("script-src 'self'", script.Headers.GetValues("Content-Security-Policy").Single());
-        Assert.Equal("no-referrer", script.Headers.GetValues("Referrer-Policy").Single());
-        Assert.StartsWith("text/css", (await browser.GetAsync("/dashboard/style.css")).Content.Headers.ContentType!.ToString());
-        Assert.Equal(HttpStatusCode.OK, (await browser.GetAsync("/dashboard/enroll.js")).StatusCode);
-        Assert.StartsWith("text/html", (await browser.GetAsync("/enroll")).Content.Headers.ContentType!.ToString());
-
-        // Every embedded asset with an allowed name is served with a matching content type.
-        var prefix = "Fleet.Server.Dashboard.Assets.";
-        var embedded = typeof(Program).Assembly.GetManifestResourceNames().Where(x => x.StartsWith(prefix, StringComparison.Ordinal))
-            .Select(x => x[prefix.Length..]).ToArray();
-        Assert.Contains("app.js", embedded);
-        foreach (var name in embedded.Where(x => AssetName().IsMatch(x)))
-        {
-            var response = await browser.GetAsync("/dashboard/" + name);
-            Assert.True(response.StatusCode == HttpStatusCode.OK, name);
-            var expected = Path.GetExtension(name) switch
-            {
-                ".js" => "text/javascript",
-                ".css" => "text/css",
-                ".html" => "text/html",
-                _ => "image/svg+xml"
-            };
-            Assert.StartsWith(expected, response.Content.Headers.ContentType!.ToString());
-            Assert.Contains("frame-ancestors 'none'", response.Headers.GetValues("Content-Security-Policy").Single());
-        }
-
-        foreach (var denied in new[]
-        {
-            "/dashboard/missing.js", "/dashboard/App.js", "/dashboard/app.JS", "/dashboard/app.js.map", "/dashboard/app.json", "/dashboard/data.txt",
-            "/dashboard/_app.js", "/dashboard/-app.js", "/dashboard/.app.js", "/dashboard/api", "/dashboard/index", "/dashboard/%2e%2e%2fappsettings.json",
-            "/dashboard/sub/app.js"
-        })
-            Assert.Equal(HttpStatusCode.NotFound, (await browser.GetAsync(denied)).StatusCode);
-        Assert.Equal(HttpStatusCode.NotFound, (await browser.GetAsync("/enroll.js")).StatusCode);
-    }
-
-    [Fact]
     public async Task Every_read_route_returns_the_same_answer_under_the_bearer_and_dashboard_prefixes()
     {
         await fixture.EnrollAsync("parity-node");
@@ -1028,9 +977,6 @@ public sealed partial class OperatorApiTests(OperatorApiFixture fixture) : IClas
 
     [GeneratedRegex(@"=>\s*""([a-z_]+)""")]
     private static partial Regex RustCode();
-
-    [GeneratedRegex(@"^[a-z0-9][a-z0-9-]*\.(js|css|html|svg)\z")]
-    private static partial Regex AssetName();
 
     private sealed class BrowserHandle(HttpClient client) : IAsyncDisposable
     {

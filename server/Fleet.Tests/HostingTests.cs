@@ -22,6 +22,7 @@ namespace Fleet.Tests;
 public sealed class HostingTests : IAsyncLifetime
 {
     private const string Token = "test-only-operator-token-with-at-least-32-characters";
+    private const string DashboardOrigin = OperatorApiFixture.DashboardOrigin;
     private readonly PostgreSqlContainer _postgres = new PostgreSqlBuilder("postgres:17.5-alpine").Build();
     private readonly string _directory = Path.Combine(Path.GetTempPath(), "fleet-host-" + Guid.NewGuid().ToString("N"));
     private const string CliProxyKey = "test-cliproxy-key";
@@ -55,6 +56,7 @@ public sealed class HostingTests : IAsyncLifetime
                 ["Fleet:IssuerKeyPath"] = keyPath,
                 ["Fleet:CliProxyApiKey"] = CliProxyKey,
                 ["Fleet:PublicUrl"] = "https://localhost",
+                ["Fleet:DashboardOrigin"] = DashboardOrigin,
                 ["Source:Remote"] = "",
                 ["urls"] = "https://localhost:7443",
                 ["Fleet:Operators:second-admin"] = Convert.ToHexStringLower(SHA256.HashData(Encoding.UTF8.GetBytes(Token + "-second")))
@@ -105,7 +107,7 @@ public sealed class HostingTests : IAsyncLifetime
     {
         using var browser = _factory.CreateClient(new() { BaseAddress = new Uri("https://localhost") });
         Assert.Equal(HttpStatusCode.Unauthorized, (await browser.GetAsync("/dashboard/api/issues")).StatusCode);
-        browser.DefaultRequestHeaders.Add("Origin", "https://localhost");
+        browser.DefaultRequestHeaders.Add("Origin", DashboardOrigin);
         await DashboardCsrf(browser);
         (await browser.PostAsJsonAsync("/dashboard/api/login", new { token = Token })).EnsureSuccessStatusCode();
         using var scope = _factory.Services.CreateScope();
@@ -140,7 +142,7 @@ public sealed class HostingTests : IAsyncLifetime
     public async Task Dashboard_source_sync_requires_session_origin_and_csrf_and_matches_operator_rescan()
     {
         using var browser = _factory.CreateClient(new() { BaseAddress = new Uri("https://localhost") });
-        browser.DefaultRequestHeaders.Add("Origin", "https://localhost");
+        browser.DefaultRequestHeaders.Add("Origin", DashboardOrigin);
         await DashboardCsrf(browser);
         Assert.Equal(HttpStatusCode.Unauthorized, (await browser.PostAsJsonAsync("/dashboard/api/source/rescan", new { })).StatusCode);
         (await browser.PostAsJsonAsync("/dashboard/api/login", new { token = Token })).EnsureSuccessStatusCode();
@@ -151,7 +153,7 @@ public sealed class HostingTests : IAsyncLifetime
         browser.DefaultRequestHeaders.Add("Origin", "https://attacker.invalid");
         Assert.Equal(HttpStatusCode.BadRequest, (await browser.PostAsJsonAsync("/dashboard/api/source/rescan", new { })).StatusCode);
         browser.DefaultRequestHeaders.Remove("Origin");
-        browser.DefaultRequestHeaders.Add("Origin", "https://localhost");
+        browser.DefaultRequestHeaders.Add("Origin", DashboardOrigin);
         var response = await browser.PostAsJsonAsync("/dashboard/api/source/rescan", new { });
         response.EnsureSuccessStatusCode();
         var result = await response.Content.ReadFromJsonAsync<JsonElement>();
@@ -165,7 +167,7 @@ public sealed class HostingTests : IAsyncLifetime
     public async Task Dashboard_proxy_refresh_requires_session_and_csrf()
     {
         using var browser = _factory.CreateClient(new() { BaseAddress = new Uri("https://localhost") });
-        browser.DefaultRequestHeaders.Add("Origin", "https://localhost");
+        browser.DefaultRequestHeaders.Add("Origin", DashboardOrigin);
         await DashboardCsrf(browser);
         Assert.Equal(HttpStatusCode.Unauthorized, (await browser.PostAsync("/dashboard/api/cliproxy/refresh", null)).StatusCode);
         Assert.Equal(HttpStatusCode.Unauthorized, (await browser.GetAsync("/dashboard/api/cliproxy/status")).StatusCode);
@@ -183,8 +185,8 @@ public sealed class HostingTests : IAsyncLifetime
     public async Task Dashboard_sessions_require_csrf_and_cannot_authenticate_as_operators_or_nodes()
     {
         using var browser = _factory.CreateClient(new() { BaseAddress = new Uri("https://localhost") });
-        browser.DefaultRequestHeaders.Add("Origin", "https://localhost");
-        var page = await browser.GetAsync("/dashboard");
+        browser.DefaultRequestHeaders.Add("Origin", DashboardOrigin);
+        var page = await browser.GetAsync("/enroll");
         page.EnsureSuccessStatusCode();
         Assert.Contains("frame-ancestors 'none'", page.Headers.GetValues("Content-Security-Policy").Single());
         Assert.Equal("no-referrer", page.Headers.GetValues("Referrer-Policy").Single());
@@ -206,7 +208,7 @@ public sealed class HostingTests : IAsyncLifetime
         browser.DefaultRequestHeaders.Add("Origin", "https://attacker.invalid");
         Assert.Equal(HttpStatusCode.BadRequest, (await browser.PostAsJsonAsync("/dashboard/api/enrollment-links", new { alias = "blocked" })).StatusCode);
         browser.DefaultRequestHeaders.Remove("Origin");
-        browser.DefaultRequestHeaders.Add("Origin", "https://localhost");
+        browser.DefaultRequestHeaders.Add("Origin", DashboardOrigin);
         (await browser.PostAsJsonAsync("/dashboard/api/logout", new { })).EnsureSuccessStatusCode();
         Assert.Equal(HttpStatusCode.Unauthorized, (await browser.GetAsync("/dashboard/api/session")).StatusCode);
     }
@@ -215,7 +217,7 @@ public sealed class HostingTests : IAsyncLifetime
     public async Task Dashboard_links_embed_public_trust_bind_alias_and_support_revocation()
     {
         using var browser = _factory.CreateClient(new() { BaseAddress = new Uri("https://localhost") });
-        browser.DefaultRequestHeaders.Add("Origin", "https://localhost");
+        browser.DefaultRequestHeaders.Add("Origin", DashboardOrigin);
         await DashboardCsrf(browser);
         (await browser.PostAsJsonAsync("/dashboard/api/login", new { token = Token })).EnsureSuccessStatusCode();
         await DashboardCsrf(browser);
@@ -262,7 +264,7 @@ public sealed class HostingTests : IAsyncLifetime
     public async Task Dashboard_revoke_and_remove_block_access_delete_owned_records_and_free_alias()
     {
         using var browser = _factory.CreateClient(new() { BaseAddress = new Uri("https://localhost") });
-        browser.DefaultRequestHeaders.Add("Origin", "https://localhost");
+        browser.DefaultRequestHeaders.Add("Origin", DashboardOrigin);
         await DashboardCsrf(browser);
         (await browser.PostAsJsonAsync("/dashboard/api/login", new { token = Token })).EnsureSuccessStatusCode();
         await DashboardCsrf(browser);
@@ -444,7 +446,7 @@ public sealed class HostingTests : IAsyncLifetime
         if (resource == "models")
         {
             using var browser = _factory.CreateClient(new() { BaseAddress = new Uri("https://localhost") });
-            browser.DefaultRequestHeaders.Add("Origin", "https://localhost");
+            browser.DefaultRequestHeaders.Add("Origin", DashboardOrigin);
             Assert.Equal(HttpStatusCode.Unauthorized,
                 (await browser.GetAsync("/dashboard/api/cliproxy/selection")).StatusCode);
             await DashboardCsrf(browser);
