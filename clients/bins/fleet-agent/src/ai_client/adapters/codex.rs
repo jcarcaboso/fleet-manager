@@ -6,6 +6,19 @@ use anyhow::{Context, Result, bail};
 use std::{collections::BTreeMap, path::Path};
 use toml_edit::{DocumentMut, Item, Table, value};
 
+/// Parses a Codex config. The parser's own error prints the offending source
+/// line, so only the position is kept.
+pub(super) fn parse_document(text: &str) -> Result<DocumentMut> {
+    text.parse::<DocumentMut>()
+        .map_err(|error| match error.span() {
+            Some(span) => {
+                let (line, column) = crate::state::text_location(text, span.start);
+                anyhow::anyhow!("invalid Codex TOML at line {line} column {column}")
+            }
+            None => anyhow::anyhow!("invalid Codex TOML"),
+        })
+}
+
 pub(super) fn render_codex(
     old: Option<&[u8]>,
     previous: Option<&Receipt>,
@@ -18,7 +31,7 @@ pub(super) fn render_codex(
     let existed = old.is_some();
     let text = std::str::from_utf8(old.unwrap_or_default()).context("Codex config is not UTF-8")?;
     let mut document = if existed {
-        text.parse::<DocumentMut>().context("invalid Codex TOML")?
+        parse_document(text)?
     } else {
         DocumentMut::new()
     };
@@ -105,7 +118,7 @@ pub(super) fn restore_codex(old: Option<&[u8]>, receipt: &Receipt) -> Result<Vec
     validate_receipt(receipt, "codex")?;
     let text = std::str::from_utf8(old.context("managed Codex config is missing")?)
         .context("Codex config is not UTF-8")?;
-    let mut document = text.parse::<DocumentMut>().context("invalid Codex TOML")?;
+    let mut document = parse_document(text)?;
     let current_catalog = optional_toml_string(&document, "model_catalog_json")?;
     let provider = document
         .get("model_providers")

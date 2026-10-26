@@ -72,6 +72,15 @@ option for every command. `enroll --home /absolute/path` sets a different
 installation home, useful for isolated tests. Existing state cannot silently
 change its Server, trust certificate, or installation home.
 
+After a failed Attempt the Agent keeps a short, sanitized description of the
+failure in `pending-detail.json` in the state directory (owner-only, mode
+`0600`) until the Server accepts it. It holds the Attempt ID, a creation time, a
+diagnostic of at most 2048 characters, an optional path relative to your home
+directory and an optional step. It never holds file contents or credentials. The
+Agent deletes it once sent, when the Server rejects it, or after 24 hours, and
+`fleet-agent status` shows `"pendingDetail": true` while it exists. It is safe to
+delete.
+
 ## Publish and verify Skills
 
 Configure this Node's alias in the source repository:

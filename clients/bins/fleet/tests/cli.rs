@@ -135,6 +135,8 @@ fn doctor_reports_errors_with_explanations_and_exits_10() {
             (200, json!({"items": [
                 {"id": "assignment_failed:n:skills", "code": "assignment_failed", "severity": "error",
                  "errorCode": "lock_failed", "nodeName": "studio-mini", "target": "skills",
+                 "diagnostic": "lock is held by process 4121 since 2026-10-25T13:14:58Z",
+                 "path": ".agents/skills/incident-runbook/SKILL.md", "step": "lock",
                  "commands": ["fleet retry studio-mini skills"]},
                 {"id": "stale:n", "code": "node_not_contacting", "severity": "warning", "errorCode": null},
                 {"id": "x", "code": "unknown_issue", "severity": "warning", "errorCode": null}
@@ -160,6 +162,17 @@ fn doctor_reports_errors_with_explanations_and_exits_10() {
         doc["issues"][0]["commands"][0],
         "fleet retry studio-mini skills"
     );
+    // The attempt detail from GET issues is in the doctor output; an issue without it gets nothing added.
+    assert_eq!(
+        doc["issues"][0]["diagnostic"],
+        "lock is held by process 4121 since 2026-10-25T13:14:58Z"
+    );
+    assert_eq!(
+        doc["issues"][0]["path"],
+        ".agents/skills/incident-runbook/SKILL.md"
+    );
+    assert_eq!(doc["issues"][0]["step"], "lock");
+    assert!(doc["issues"][1].get("diagnostic").is_none());
     assert_eq!(doc["issues"][1]["explanation"]["title"], "Silent");
     assert_eq!(doc["issues"][2]["explanation"], Value::Null);
     // GET issues once, GET errors once, indexed locally.

@@ -52,7 +52,7 @@
   };
 
   const facts = list => `<dl class="facts-row">${list.map(([k, v, sub, mono]) => `<div><dt>${esc(k)}</dt><dd${mono ? ' class="mono"' : ''}>${esc(v)}</dd>${sub ? `<dd class="sub">${esc(sub)}</dd>` : ''}</div>`).join('')}</dl>`;
-  const attemptRows = list => `<div class="tbl-wrap"><table class="tbl tbl--compact"><thead><tr><th>Attempt</th><th>Revision</th><th>Result</th><th>Updated (UTC)</th><th>Error code</th></tr></thead><tbody>${list.map(a => `<tr><td class="mono">${esc(u.shortId(a.attemptId))}</td><td>${u.revChip(a.sourceRevision, a.sourceRevision)}</td><td>${u.stateTag(a.state)}</td><td>${esc(u.fmtFull(a.updatedAt))}</td><td>${a.errorCode ? `<code>${esc(a.errorCode)}</code>` : '<span class="muted">—</span>'}</td></tr>`).join('')}</tbody></table></div>`;
+  const attemptRows = list => `<div class="tbl-wrap"><table class="tbl tbl--compact"><thead><tr><th>Attempt</th><th>Revision</th><th>Result</th><th>Updated (UTC)</th><th>Error code</th><th>Step</th></tr></thead><tbody>${list.map(a => `<tr><td class="mono">${esc(u.shortId(a.attemptId))}</td><td>${u.revChip(a.sourceRevision, a.sourceRevision)}</td><td>${u.stateTag(a.state)}</td><td>${esc(u.fmtFull(a.updatedAt))}</td><td>${a.errorCode ? `<code>${esc(a.errorCode)}</code>` : '<span class="muted">—</span>'}</td><td>${a.step ? esc(u.stepLabel(a.step)) : '<span class="muted">—</span>'}</td></tr>`).join('')}</tbody></table></div>`;
 
   const problemCard = p => {
     const n = S.n, cat = p.cat, i = p.issue, t = p.target;
@@ -72,7 +72,10 @@
     } else if (i) {
       factList = [['Since', i.since ? u.fmtFull(i.since) + ' UTC' : '—', i.since ? u.rel(i.since) : ''], ['Severity', i.severity === 'error' ? 'Error' : 'Warning', ''], ...(i.errorCode ? [['Error code', i.errorCode, '', true]] : [])];
     }
-    const diag = t?.latestAttempt?.diagnostic;
+    /* Detail of the latest failed Attempt: a failed Target has it on latestAttempt, an Issue carries the same three fields. */
+    const la = t?.latestAttempt;
+    const det = t ? (u.hasDetail(la) || !i ? la : i) : null;
+    const detail = t || i?.code === 'assignment_failed' ? ui.failureDetail(t ? det : i, t) : '';
     const fix = cat?.fix?.length ? cat.fix.map(x => ({ t: x })) : (i?.action ? [{ t: i.action }] : []);
     const commands = i?.commands || [];
     const attempts = t ? S.tAttempts.get(t.name) : null;
@@ -86,7 +89,7 @@
     <div class="prob-body">
       ${explanation ? `<p class="prob-expl">${u.md(explanation)}${specific ? ` <strong>${u.md(specific)}</strong>` : ''}</p>` : '<p class="prob-expl muted">The Server has no catalog entry for this code yet.</p>'}
       ${factList.length ? facts(factList) : ''}
-      ${diag ? `<p class="kv-label">Diagnostic from the Agent</p><pre class="code code--diag">${esc(diag)}</pre>` : ''}
+      ${detail}
       <div class="prob-cols">
         <section class="fix" aria-label="How to fix"><h4>How to fix</h4>${fix.length ? ui.stepsList(fix) : '<p class="muted">No fix steps are published for this problem.</p>'}${t ? '<p class="muted small prob-note">The Agent applies a retry on its next poll.</p>' : ''}</section>
         <section class="why">
@@ -196,7 +199,7 @@
     for (const a of S.attempts) {
       const m = u.tstate(a.state);
       ev.push({ at: a.updatedAt, level: m.level, kind: m.kind, cat: 'attempt', title: `${u.targetLabel(targetByName(a.targetName))} ${u.attemptVerb(a.state)}`,
-        sub: [u.shortSha(a.sourceRevision), a.errorCode ? catalog.title(a.errorCode) : null, a.errorCode].filter(Boolean).join(' · '), text: a.diagnostic });
+        sub: [u.shortSha(a.sourceRevision), a.errorCode ? catalog.title(a.errorCode) : null, a.errorCode].filter(Boolean).join(' · '), text: a.diagnostic, step: a.step, key: a.attemptId });
     }
     for (const e of S.audit) {
       const sec = /credential/.test(e.action);

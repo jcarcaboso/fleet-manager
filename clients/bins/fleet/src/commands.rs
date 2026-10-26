@@ -80,7 +80,7 @@ pub(crate) enum Command {
     },
     /// Report every open issue with its explanation; exits 10 when error-severity issues exist.
     #[command(
-        after_help = "Prints {\"ok\": bool, \"issues\": [{...issue, \"explanation\": {title, explanation, fix} | null}], \"summary\": {\"errors\": n, \"warnings\": n}}.\nEach issue's `commands` array lists fleet commands that inspect or fix it.\nExit 0 when no issue has severity error (warnings alone are ok); exit 10 when at least one does.\n\nExamples:\n  fleet doctor\n  fleet doctor | jq '.issues[].commands[]'"
+        after_help = "Prints {\"ok\": bool, \"issues\": [{...issue, \"explanation\": {title, explanation, fix} | null}], \"summary\": {\"errors\": n, \"warnings\": n}}.\nEach issue's `commands` array lists fleet commands that inspect or fix it.\nA failed-Target issue also carries `diagnostic`, `path` and `step` from the latest failed attempt (null when the Agent sent none); read them before choosing a fix.\nExit 0 when no issue has severity error (warnings alone are ok); exit 10 when at least one does.\n\nExamples:\n  fleet doctor\n  fleet doctor | jq '.issues[].commands[]'"
     )]
     Doctor,
     /// List rollouts or inspect one rollout's attempts.

@@ -172,6 +172,14 @@ namespace Fleet.Server.Persistence.Migrations
                     b.Property<string>("ErrorCode")
                         .HasColumnType("text");
 
+                    b.Property<string>("FailurePath")
+                        .HasMaxLength(512)
+                        .HasColumnType("character varying(512)");
+
+                    b.Property<string>("FailureStep")
+                        .HasMaxLength(32)
+                        .HasColumnType("character varying(32)");
+
                     b.Property<Guid>("NodeId")
                         .HasColumnType("uuid");
 

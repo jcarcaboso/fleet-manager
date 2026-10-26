@@ -172,6 +172,18 @@
     return !t.base || t.base === 'home' ? `~/${t.path}` : `${t.base}:${t.path}`;
   };
 
+  /* Phase 2 attempt detail. step is one of the Agent's step names; an unknown step (a newer Agent) is shown as written, escaped. */
+  const STEP = { lock: 'Taking the lock', download: 'Downloading', verify: 'Verifying', stage: 'Staging', activate: 'Activating', recover: 'Recovering', receipt: 'Writing the receipt', configure: 'Configuring', validate: 'Validating' };
+  u.stepLabel = s => (Object.hasOwn(STEP, s) ? STEP[s] : '') || cap(String(s).replace(/_/g, ' '));
+  u.stepChip = s => s ? `<span class="stepchip" data-step="${u.esc(s)}"><span class="stepchip-k">Step</span>${u.esc(u.stepLabel(s))}</span>` : '';
+  /* The failing path is relative to the Target base. With the Target at hand it reads like the Target path (~/.claude/settings.json); otherwise it is shown as sent. */
+  u.failPath = (t, rel) => {
+    if (rel === undefined || rel === null || rel === '') return '';
+    if (!t || t.path === undefined || t.path === null) return String(rel);
+    return !t.base || t.base === 'home' ? `~/${rel}` : `${t.base}:${rel}`;
+  };
+  u.hasDetail = a => !!(a && (a.diagnostic || a.path || a.step));
+
   /* Assignment states from the API (snake_case) mapped to display. */
   const TSTATE = {
     succeeded: { level: 'good', kind: 'check', label: 'In sync' },

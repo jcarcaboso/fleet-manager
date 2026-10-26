@@ -96,7 +96,7 @@ public sealed partial class PostgresFleetCoordinator
                 db.Attempts.Count(x => x.AssignmentId == a.Id && x.State == failed),
                 db.Attempts.Where(x => x.AssignmentId == a.Id && x.State == failed).Min(x => (DateTimeOffset?)x.UpdatedAt),
                 db.Attempts.Where(x => x.AssignmentId == a.Id).OrderByDescending(x => x.UpdatedAt).ThenByDescending(x => x.Id)
-                    .Select(x => new LatestAttemptRow(x.Id, x.State, x.ErrorCode, x.Diagnostic, x.UpdatedAt)).FirstOrDefault()))
+                    .Select(x => new LatestAttemptRow(x.Id, x.State, x.ErrorCode, x.Diagnostic, x.FailurePath, x.FailureStep, x.UpdatedAt)).FirstOrDefault()))
             .ToListAsync(cancellationToken)).ToDictionary(x => x.AssignmentId);
         // The newest Assignment of this Target with a succeeded Attempt. A succeeded Assignment becomes superseded when
         // a newer revision replaces it, so its Attempts are the durable record of what the Node last applied.
@@ -121,7 +121,7 @@ public sealed partial class PostgresFleetCoordinator
             return new NodeTargetStatus(a.TargetName, a.TargetName.Split('/')[0], a.TargetBase, a.TargetPath, new(a.Id),
                 (ConvergenceState)a.State, a.CreatedAt, new(new(item.Revision.Id), item.Revision.SourceRevision, item.Revision.AcceptedAt),
                 lastRevision,
-                attempt is null ? null : new(new(attempt.Id), (ConvergenceState)attempt.State, attempt.ErrorCode, attempt.Diagnostic, attempt.UpdatedAt),
+                attempt is null ? null : new(new(attempt.Id), (ConvergenceState)attempt.State, attempt.ErrorCode, attempt.Diagnostic, attempt.FailurePath, attempt.FailureStep, attempt.UpdatedAt),
                 summary?.FailedCount ?? 0, summary?.FirstFailedAt,
                 skills[a.Id].Select(x => new SnapshotSkill(x.Name, x.BundleDigest)).ToList(),
                 file is null ? null : new SnapshotFile(file.Name, file.BundleDigest),
@@ -134,7 +134,8 @@ public sealed partial class PostgresFleetCoordinator
             targets, StateCounts(current.Select(x => (x.Assignment.State, 1))));
     }
 
-    private sealed record LatestAttemptRow(Guid Id, int State, string? ErrorCode, string? Diagnostic, DateTimeOffset UpdatedAt);
+    private sealed record LatestAttemptRow(Guid Id, int State, string? ErrorCode, string? Diagnostic, string? FailurePath, string? FailureStep,
+        DateTimeOffset UpdatedAt);
 
     private sealed record AssignmentAttempts(Guid AssignmentId, int FailedCount, DateTimeOffset? FirstFailedAt, LatestAttemptRow? Latest);
 
@@ -156,7 +157,7 @@ public sealed partial class PostgresFleetCoordinator
             .Take(limit + 1).ToListAsync(cancellationToken);
         return MakeTimePage(rows, limit, x => x.Attempt.UpdatedAt, x => x.Attempt.Id, x => new NodeAttemptStatus(new(x.Attempt.Id),
             new(x.Attempt.AssignmentId), new(x.Attempt.RolloutId), x.TargetName, x.SourceRevision, (ConvergenceState)x.Attempt.State,
-            x.Attempt.ErrorCode, x.Attempt.Diagnostic, x.Attempt.UpdatedAt));
+            x.Attempt.ErrorCode, x.Attempt.Diagnostic, x.Attempt.FailurePath, x.Attempt.FailureStep, x.Attempt.UpdatedAt));
     }
 
     public async Task<NodeCheckins> GetNodeCheckinsAsync(NodeId nodeId, int hours, CancellationToken cancellationToken = default)

@@ -70,6 +70,7 @@ public static class FleetServerHosting
                 context.Connection.RemoteIpAddress?.ToString() ?? "unknown",
                 _ => new FixedWindowRateLimiterOptions { PermitLimit = 20, Window = TimeSpan.FromMinutes(1), QueueLimit = 0 }));
         });
+        builder.Services.AddSingleton(AttemptDetailRateLimit.Create());
         builder.Services.AddOpenApi("agent", options => options.ShouldInclude = description => description.GroupName == "agent");
         builder.Services.AddOpenApi("operator", options => options.ShouldInclude = description => description.GroupName == "operator");
     }
@@ -114,7 +115,7 @@ public static class FleetServerHosting
                 {
                     "unauthorized" or "invalid_credential" or "node_unauthorized" or "bundle_not_authorized" or "cliproxy_credential_not_authorized" => 403,
                     "not_found" or "node_not_found" or "credential_not_found" or "attempt_not_found" or "target_not_found" or "enrollment_link_not_found" => 404,
-                    "node_alias_in_use" or "node_revoked" or "node_alias_changed" or "target_not_failed" => 409,
+                    "node_alias_in_use" or "node_revoked" or "node_alias_changed" or "target_not_failed" or "attempt_not_failed" => 409,
                     _ => 400
                 };
                 await WriteError(context, exception.Code, exception.Message);

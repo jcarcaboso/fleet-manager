@@ -1,6 +1,7 @@
 using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
+using System.Threading.RateLimiting;
 using Fleet.Core.Coordination;
 using Fleet.Server.Hosting;
 using Fleet.Server.Security;
@@ -80,6 +81,25 @@ public static class FleetEndpoints
             TimeProvider time, CancellationToken ct) =>
             await coordinator.ReportAttemptAsync(Node(context), new(new(request.AttemptId), request.State,
                 request.ErrorCode, null, time.GetUtcNow()), ct));
+        // The Agent sends why a failed Attempt failed after its report is accepted. One conditional UPDATE that skips unchanged values,
+        // limited per authenticated Node. The limiter runs as an endpoint filter because the global rate limiter runs before authentication.
+        agents.MapPost("/attempts/{attemptId:guid}/detail", async (Guid attemptId, AttemptDetailRequest request, HttpContext context,
+            IFleetCoordinator coordinator, CancellationToken ct) =>
+        {
+            await coordinator.RecordAttemptDetailAsync(Node(context), new(attemptId),
+                new(request.Diagnostic, request.Path, request.Step), ct);
+            return Results.NoContent();
+        }).AddEndpointFilter(async (invocation, next) =>
+        {
+            var context = invocation.HttpContext;
+            using var lease = await context.RequestServices.GetRequiredService<AttemptDetailRateLimit>()
+                .Limiter.AcquireAsync(Node(context).NodeId.Value, 1, context.RequestAborted);
+            if (lease.IsAcquired) return await next(invocation);
+            if (lease.TryGetMetadata(MetadataName.RetryAfter, out var retryAfter))
+                context.Response.Headers.RetryAfter = Math.Ceiling(retryAfter.TotalSeconds).ToString(System.Globalization.CultureInfo.InvariantCulture);
+            return Results.Json(new { code = "rate_limited", message = "Too many attempt detail requests from this Node. Retry later." },
+                statusCode: StatusCodes.Status429TooManyRequests);
+        }).WithMetadata(ErrorMessages.Instance);
         agents.MapPost("/credentials/renew", async (RenewalRequest request, HttpContext context, IFleetCoordinator coordinator,
             NodeCertificateIssuer issuer, TimeProvider time, CancellationToken ct) =>
         {
@@ -99,4 +119,27 @@ public static class FleetEndpoints
 
     private static NodeAuthentication Node(HttpContext context) =>
         (NodeAuthentication)context.Items[FleetAuthenticationHandler.NodeIdentityKey]!;
+}
+
+/// <summary>
+/// Per-Node limit for <c>POST /agent/v1/attempts/{attemptId}/detail</c>: a bucket of 30 that refills one request every 2 seconds
+/// (30 a minute sustained), with no queue. A healthy Agent sends one detail per failed Attempt plus retries, far below this.
+/// Partitions exist only for authenticated Nodes and the framework removes idle ones.
+/// </summary>
+public sealed class AttemptDetailRateLimit(PartitionedRateLimiter<Guid> limiter)
+{
+    public const int Burst = 30;
+    public static readonly TimeSpan RefillEvery = TimeSpan.FromSeconds(2);
+
+    public PartitionedRateLimiter<Guid> Limiter { get; } = limiter;
+
+    public static AttemptDetailRateLimit Create() => new(PartitionedRateLimiter.Create<Guid, Guid>(nodeId =>
+        RateLimitPartition.GetTokenBucketLimiter(nodeId, _ => new TokenBucketRateLimiterOptions
+        {
+            TokenLimit = Burst,
+            TokensPerPeriod = 1,
+            ReplenishmentPeriod = RefillEvery,
+            AutoReplenishment = true,
+            QueueLimit = 0
+        })));
 }

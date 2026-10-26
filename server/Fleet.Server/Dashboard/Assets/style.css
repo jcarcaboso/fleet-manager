@@ -510,6 +510,34 @@ input[disabled]{background:var(--surface-2);color:var(--muted)}
 .code--term{background:#1f1e1c;color:#e9e5dc}
 .code--term .prompt{color:#a5d88f}
 .code--diag{background:#faf8f4;border-radius:10px;box-shadow:inset 0 0 0 1px var(--line);white-space:pre-wrap;word-break:break-word}
+/* attempt detail (phase 2): step chip, failing path, diagnostic, one-line diagnostic with expand */
+.stepchip{display:inline-flex;align-items:center;gap:6px;height:22px;padding:0 9px 0 4px;border-radius:999px;background:var(--surface-2);box-shadow:inset 0 0 0 1px var(--line-2);font-size:12px;font-weight:620;color:var(--ink-2);white-space:nowrap;vertical-align:middle}
+.stepchip-k{display:inline-flex;align-items:center;height:16px;padding:0 6px;border-radius:999px;background:rgba(29,27,24,.08);font-size:10.5px;font-weight:720;text-transform:uppercase;letter-spacing:.06em;color:var(--muted)}
+.fdetail{margin:16px 0 0}
+.fdetail-meta{display:flex;flex-wrap:wrap;align-items:center;gap:8px 16px}
+.fdetail-path{display:inline-flex;align-items:center;gap:8px;min-width:0;max-width:100%}
+.fdetail-k{font-size:11.5px;font-weight:700;text-transform:uppercase;letter-spacing:.06em;color:var(--muted);flex:none}
+.fdetail-path code{font-size:12.5px;overflow-wrap:anywhere}
+.fdetail-diag{position:relative;max-width:860px}
+.fdetail-diag .kv-label{margin-top:12px}
+.fdetail-diag .code--diag{padding-right:84px}
+.fdetail-diag>.copy{position:absolute;right:8px;bottom:8px;top:auto;background:#fff;color:var(--ink-2);box-shadow:inset 0 0 0 1px var(--line-2)}
+.fdetail-diag>.copy:hover{background:var(--surface-2)}
+.fdetail-diag>.copy.is-copied{background:var(--good-bg);color:var(--good-ink)}
+.fdetail-none{margin:16px 0 0;font-size:13px;color:var(--muted)}
+.diag-line{margin:6px 0 0;font:12px/1.5 var(--mono);color:var(--ink-2);min-width:0}
+.diag-line summary{display:flex;align-items:baseline;gap:8px;cursor:pointer;list-style:none;min-width:0}
+.diag-line summary::-webkit-details-marker{display:none}
+.diag-line .diag-text{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.diag-line[open] .diag-text{white-space:pre-wrap;overflow-wrap:anywhere;overflow:visible}
+.diag-line[open] .sumchev{transform:rotate(180deg)}
+.diag-line--short{white-space:pre-wrap;overflow-wrap:anywhere}
+.tl-sub{display:flex;flex-wrap:wrap;align-items:center;gap:4px 10px}
+.attlist{list-style:none;margin:0;padding:0;display:grid;gap:6px}
+.attitem{padding:8px 12px;border-radius:10px;background:var(--surface-2);box-shadow:inset 0 0 0 1px var(--line);min-width:0}
+.attitem-top{display:flex;flex-wrap:wrap;align-items:center;gap:6px 12px;font-size:12.5px}
+.attitem-top time{margin-left:auto}
+.attitem-path{margin:4px 0 0}
 .prob-cols{display:grid;grid-template-columns:minmax(0,1.55fr) minmax(0,1fr);gap:30px;margin-top:20px}
 .prob-cols h4{font-size:11.5px;font-weight:750;text-transform:uppercase;letter-spacing:.07em;color:var(--muted);margin:0 0 10px}
 .why ul+h4,.why .mini-nodes+h4{margin-top:18px}

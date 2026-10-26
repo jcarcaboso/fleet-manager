@@ -11,6 +11,7 @@ public sealed record AliasRequest(string Alias);
 public sealed record EnrollmentTokenRequest(int ExpiresInSeconds = 900);
 public sealed record EnrollmentResponse(Guid WorkspaceId, Guid NodeId, Guid CredentialId, string CertificatePem,
     DateTimeOffset ExpiresAt, int PollIntervalSeconds);
+public sealed record AttemptDetailRequest(string? Diagnostic, string? Path, string? Step);
 public sealed record ReportRequest(Guid AttemptId, ConvergenceState State, string? ErrorCode = null);
 
 public sealed class IdentifierJsonConverter<T>(Func<Guid, T> create, Func<T, Guid> value) : JsonConverter<T>

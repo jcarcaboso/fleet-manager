@@ -640,6 +640,120 @@
       expect(F.audit.length === auditSel, 'saving a selection adds no audit event (the Server records none)');
       const auditScan = F.audit.length; await post('source/rescan'); expect(F.audit.length === auditScan, 'a rescan adds no audit event (the Server records none)');
     },
+    /* ---- Phase 2 attempt detail (diagnostic, path, step). */
+    /* Node Problems tab. Open: ?drive=detailNode#/nodes/studio-mini/problems */
+    async detailNode() {
+      const F = window.__FIXTURE;
+      await until(() => $('.prob .fdetail'), 'failure detail on the Problems tab');
+      const d = $('.prob .fdetail');
+      expect(d.querySelector('.stepchip')?.textContent.includes('Configuring'), 'the step is a labelled chip with human wording (' + d.querySelector('.stepchip')?.textContent + ')');
+      expect(d.querySelector('.fdetail-path code')?.textContent === '~/.claude/settings.json', 'the failing path is shown with the Target base (' + d.querySelector('.fdetail-path code')?.textContent + ')');
+      expect(/trailing comma/.test(d.querySelector('pre.code--diag')?.textContent || ''), 'the diagnostic is shown preformatted');
+      expect(!/excerpt|\|\s+\^/.test(d.textContent), 'no excerpt is shown');
+      expect(!/No detail reported/.test($('.prob').textContent), 'no "No detail reported" line when detail exists');
+      expect($('.prob .fix h4'), 'the catalog fix steps are still shown');
+      expect(/Configuration file|configuration/i.test($('.prob-expl').textContent), 'the catalog explanation is still shown');
+      const copy = d.querySelector('.fdetail-diag > [data-act=copy]');
+      expect(copy && copy.dataset.copy === d.querySelector('pre.code--diag').textContent, 'the diagnostic has a copy button holding the exact text');
+      click(copy); await until(() => copy.classList.contains('is-copied'), 'copy confirmation', 1500);
+      expect(copy.classList.contains('is-copied'), 'the copy button confirms');
+      expect(d.querySelector('.fdetail-path [data-act=copy]')?.dataset.copy === '~/.claude/settings.json', 'the path has a copy button');
+      const la = F.calls.find(c => /^nodes\/[^/]+$/.test(c.path));
+      expect(la, 'node detail was requested');
+    },
+    /* The same tab on a Node whose Agent sends no detail. Open: ?drive=detailOld#/nodes/kitchen-mini/problems */
+    async detailOld() {
+      await until(() => $('.prob'), 'problem card');
+      expect(!$('.prob .fdetail') && !$('.prob .stepchip'), 'no detail block and no step chip');
+      expect($('.prob .fdetail-none')?.textContent === 'No detail reported. Agents before 0.9.0 send only the error code.', 'one quiet line explains that nothing was reported');
+      expect($('.prob .fix h4') && $('.prob-expl')?.textContent.length > 20, 'the catalog explanation and fix steps are still shown');
+    },
+    /* A detail with a step but no path: lock failures are outside the Target base. Open: ?drive=detailLock#/nodes/design-imac/problems */
+    async detailLock() {
+      await until(() => $('.prob .fdetail'), 'failure detail');
+      const cards = [...document.querySelectorAll('.prob')];
+      const withPath = cards.filter(c => c.querySelector('.fdetail-path')), without = cards.filter(c => c.querySelector('.stepchip') && !c.querySelector('.fdetail-path'));
+      expect(cards.length === 2 && withPath.length === 1 && without.length === 1, 'one failure shows a path and a step, the other a step without a path');
+      expect(cards.every(c => /Taking the lock/.test(c.querySelector('.stepchip')?.textContent || '')), 'the lock step reads "Taking the lock"');
+      expect(withPath[0].querySelector('.fdetail-path code').textContent === '~/.claude/CLAUDE.md', 'the agent-file path is under the Target base');
+      expect(/held by pid 4127/.test(document.body.textContent), 'the diagnostics are shown');
+    },
+    /* Activity tab. Open: ?drive=detailActivity#/nodes/studio-mini/activity */
+    async detailActivity() {
+      await until(() => $('.tl-item .stepchip'), 'step chip on an attempt row');
+      const item = [...document.querySelectorAll('.tl-item')].find(i => i.querySelector('.stepchip'));
+      expect(/Configuring/.test(item.querySelector('.stepchip').textContent), 'the attempt row shows its step');
+      const line = item.querySelector('details.diag-line');
+      expect(line && !line.open, 'the diagnostic is one line that can expand');
+      const cs = getComputedStyle(line.querySelector('.diag-text'));
+      expect(cs.whiteSpace === 'nowrap' && cs.textOverflow === 'ellipsis' && line.querySelector('.diag-text').clientHeight < 24, 'the closed diagnostic is cut to one line (' + cs.whiteSpace + ', ' + cs.textOverflow + ')');
+      click(line.querySelector('summary')); await wait(100);
+      expect(line.open && line.querySelector('.diag-text').clientHeight > 0, 'expanding shows the diagnostic');
+      expect(getComputedStyle(line.querySelector('.diag-text')).whiteSpace === 'pre-wrap', 'the expanded diagnostic wraps');
+      expect(!document.querySelector('.tl-item .fdetail-none'), 'no "No detail reported" line in Activity');
+    },
+    /* Problems page. Open: ?drive=detailProblems#/problems */
+    async detailProblems() {
+      await until(() => $('.prow'), 'problem rows');
+      document.querySelectorAll('.prow').forEach(d => { d.open = true; });
+      await wait(100);
+      const cards = [...document.querySelectorAll('.prow')];
+      const studio = cards.find(c => /studio-mini/.test(c.querySelector('summary').textContent) && /claude/.test(c.querySelector('summary').textContent));
+      expect(studio?.querySelector('.stepchip')?.textContent.includes('Configuring'), 'the step chip is on the Problems page');
+      expect(studio?.querySelector('.fdetail-path code')?.textContent === '.claude/settings.json', 'the path is shown as sent here (no Target base on this page: ' + studio?.querySelector('.fdetail-path code')?.textContent + ')');
+      expect(/trailing comma/.test(studio?.querySelector('pre.code--diag')?.textContent || ''), 'the diagnostic is shown');
+      expect(studio?.querySelector('.fdetail-diag > [data-act=copy]'), 'the diagnostic has a copy button');
+      const old = cards.find(c => /kitchen-mini/.test(c.querySelector('summary').textContent));
+      expect(old?.querySelector('.fdetail-none')?.textContent.startsWith('No detail reported.'), 'an old Agent gets the quiet line');
+      expect(!old?.querySelector('.stepchip'), 'and no chip');
+      expect(studio?.querySelector('.prob-expl')?.textContent.length > 20 && studio.querySelector('.fix h4'), 'rows still render the catalog explanation and fix steps');
+    },
+    /* Deployments rollout attempts. Open: ?drive=detailDeployments#/deployments */
+    async detailDeployments() {
+      await until(() => $('.hist-item'), 'revisions');
+      document.querySelectorAll('.hist-item details').forEach(d => { d.open = true; });
+      for (const b of document.querySelectorAll('[data-act=load-attempts]')) click(b);
+      await until(() => $('.attlist'), 'failed attempt list');
+      const items = [...document.querySelectorAll('.attitem')];
+      expect(items.length >= 2, 'failed attempts are listed (' + items.length + ')');
+      expect(items.some(i => i.querySelector('.stepchip')), 'a failed attempt shows its step');
+      expect(items.some(i => i.querySelector('details.diag-line')) , 'a long diagnostic is one line with an expander');
+      expect(items.some(i => !i.querySelector('.stepchip') && !i.querySelector('.diag-line')), 'an attempt from an old Agent shows just its error code');
+      const line = items.map(i => i.querySelector('details.diag-line')).find(Boolean);
+      click(line.querySelector('summary')); await wait(100);
+      expect(line.open, 'the diagnostic expands');
+    },
+    /* No detail at all (a Server or Agents before phase 2). Open: ?drive=detailNone&diag=0#/nodes/studio-mini/problems */
+    async detailNone() {
+      await until(() => $('.prob'), 'problem card');
+      expect(!document.querySelector('.stepchip, .fdetail, pre.code--diag') && $('.fdetail-none'), 'only the quiet line is shown');
+      location.hash = '#/problems'; await until(() => $('.prow'), 'problems page');
+      expect(!document.querySelector('.stepchip, .fdetail') && document.querySelector('.fdetail-none'), 'same on the Problems page');
+      location.hash = '#/nodes/studio-mini/activity'; await until(() => $('.tl-item'), 'activity');
+      expect(!document.querySelector('.stepchip, .diag-line'), 'and in Activity');
+    },
+    /* Hostile text from the Agent renders as text everywhere. Open: ?drive=detailXss&xss=1#/nodes/studio-mini/problems */
+    async detailXss() {
+      let alerts = 0; window.alert = () => { alerts++; };
+      const bad = () => document.querySelectorAll('#root img, #root script, #root [onerror], #root [onclick], #root [onload]').length;
+      const hasText = () => document.body.textContent.includes('<img src=x onerror=alert(1)>') && document.body.textContent.includes('"><script>');
+      await until(() => $('.prob .fdetail'), 'failure detail');
+      expect(hasText(), 'node Problems tab: the hostile diagnostic is visible as text');
+      expect($('.fdetail-path code').textContent.includes('"><script>alert(3)</script>') && $('.fdetail-path code').textContent.includes('<img src=x onerror=alert(4)>'), 'the hostile path is visible as text');
+      expect(bad() === 0, 'no injected element on the Problems tab (' + bad() + ')');
+      expect($('.fdetail-diag > [data-act=copy]').dataset.copy.includes('"><script>'), 'the copy attribute holds the text and did not break out of the attribute');
+      for (const [hash, ready, label] of [['#/nodes/studio-mini/activity', '.tl-item .diag-line', 'Activity'], ['#/problems', '.prow', 'Problems page'], ['#/deployments', '.hist-item', 'Deployments']]) {
+        location.hash = hash; await until(() => $(ready), label);
+        if (label === 'Problems page') document.querySelectorAll('.prow').forEach(d => { d.open = true; });
+        if (label === 'Deployments') { document.querySelectorAll('.hist-item details').forEach(d => { d.open = true; }); for (const b of document.querySelectorAll('[data-act=load-attempts]')) click(b); await until(() => $('.attlist'), 'attempt list'); }
+        document.querySelectorAll('details.diag-line').forEach(d => { d.open = true; });
+        await wait(150);
+        expect(hasText(), label + ': hostile text is visible as text');
+        expect(bad() === 0, label + ': no injected element (' + bad() + ')');
+      }
+      await wait(300);
+      expect(alerts === 0, 'alert was never called');
+    },
     async none() {},
   };
   window.addEventListener('DOMContentLoaded', () => document.body.append(log));

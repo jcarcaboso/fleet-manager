@@ -83,6 +83,16 @@ public interface IFleetCoordinator
         AttemptReport report,
         CancellationToken cancellationToken = default);
 
+    /// <summary>
+    /// Stores the detail of the Node's own failed Attempt, replacing earlier detail. The detail is sanitized and validated
+    /// with <see cref="AttemptDetailRules"/>. Throws attempt_not_found (unknown or another Node's) or attempt_not_failed.
+    /// </summary>
+    Task RecordAttemptDetailAsync(
+        NodeAuthentication authentication,
+        AttemptId attemptId,
+        AttemptDetail detail,
+        CancellationToken cancellationToken = default);
+
     Task<Page<NodeStatus>> GetNodesAsync(
         PageRequest page,
         DateTimeOffset now,

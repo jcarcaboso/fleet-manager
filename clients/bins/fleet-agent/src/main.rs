@@ -1,6 +1,7 @@
 mod actions;
 mod ai_client;
 mod credentials;
+mod detail;
 mod protocol;
 mod service;
 mod state;
@@ -235,7 +236,8 @@ async fn main() -> Result<()> {
                 "{}",
                 serde_json::json!({"nodeId":identity.node_id,"workspaceId":identity.workspace_id,
                 "alias":config.node_alias,"expiresAt":identity.expires_at,"stateDirectory":directory,
-                "pendingReport":run.pending_report.is_some(),"activeAssignment":active_assignment,
+                "pendingReport":run.pending_report.is_some(),
+                "pendingDetail":detail::is_pending(&directory),"activeAssignment":active_assignment,
                 "activeAssignments":active_assignments})
             );
         }
@@ -265,7 +267,18 @@ async fn main() -> Result<()> {
             let path = directory.join("run.json");
             let mut run = state::read_json::<RunState>(&path)?.unwrap_or_default();
             loop {
-                let result = cycle(&config, &store, &mut identity, &mut run, &path, &actions).await;
+                let result = cycle(
+                    &config,
+                    &store,
+                    &mut identity,
+                    &mut run,
+                    &path,
+                    &directory,
+                    &actions,
+                )
+                .await;
+                // After the cycle, so the report and reconciliation never wait for it.
+                send_pending_detail(&config, &identity, &run, &directory).await;
                 let outcome = match result {
                     Ok(outcome) => outcome,
                     Err(error) if once => return Err(error),
@@ -401,15 +414,16 @@ fn decode_base64url(input: &str) -> Result<Vec<u8>> {
         bail!("invalid base64url length");
     }
     let mut decoded = Vec::with_capacity(bytes.len() * 3 / 4);
-    let mut chunks = bytes.chunks_exact(4);
-    for chunk in &mut chunks {
+    // `as_chunks` is stable since Rust 1.88; CI builds with 1.95.
+    let (chunks, remainder) = bytes.as_chunks::<4>();
+    for chunk in chunks {
         let a = value(chunk[0]).context("invalid base64url character")?;
         let b = value(chunk[1]).context("invalid base64url character")?;
         let c = value(chunk[2]).context("invalid base64url character")?;
         let d = value(chunk[3]).context("invalid base64url character")?;
         decoded.extend_from_slice(&[(a << 2) | (b >> 4), (b << 4) | (c >> 2), (c << 6) | d]);
     }
-    match chunks.remainder() {
+    match remainder {
         [] => {}
         [a, b] => {
             let a = value(*a).context("invalid base64url character")?;
@@ -486,12 +500,49 @@ async fn deliver_report(client: &Api, run: &mut RunState, path: &Path) -> Result
     Ok(())
 }
 
+/// Sends the saved failure detail once the failed report for its Attempt has
+/// been accepted. Detail is best effort: nothing here can fail a cycle.
+async fn send_pending_detail(
+    config: &state::Config,
+    identity: &StoredIdentity,
+    run: &RunState,
+    directory: &Path,
+) {
+    let Some(pending) = detail::load(directory) else {
+        return;
+    };
+    let unacknowledged = run.pending_report.as_ref().map(|report| report.attempt_id);
+    // Expiry is decided before the report gate: detail whose report is never
+    // accepted must not linger forever.
+    match detail::precheck(directory, &pending, unacknowledged, detail::now()) {
+        Some(detail::Delivery::Dropped(reason)) => {
+            eprintln!("dropped attempt detail: {reason}");
+            return;
+        }
+        Some(_) => return,
+        None => {}
+    }
+    let client = match api(config, identity) {
+        Ok(client) => client,
+        Err(error) => {
+            eprintln!("could not send attempt detail: {error}");
+            return;
+        }
+    };
+    match detail::deliver(&client, directory, &pending, unacknowledged, detail::now()).await {
+        detail::Delivery::Dropped(reason) => eprintln!("dropped attempt detail: {reason}"),
+        detail::Delivery::Retry => eprintln!("could not send attempt detail; will retry"),
+        detail::Delivery::Waiting | detail::Delivery::Sent => {}
+    }
+}
+
 async fn cycle(
     config: &state::Config,
     store: &CredentialStore,
     identity: &mut StoredIdentity,
     run: &mut RunState,
     path: &Path,
+    directory: &Path,
     actions: &actions::Registry<'_>,
 ) -> Result<CycleOutcome> {
     migrate_run_state(run);
@@ -570,7 +621,14 @@ async fn cycle(
             bail!("Server did not acknowledge applying state");
         }
         let outcome = actions.apply(&client, &assignment).await;
+        let attempt_id = assignment.attempt_id;
         let error_code = outcome.as_ref().err().map(|error| error.code().to_owned());
+        let failure_detail = outcome.as_ref().err().map(|error| {
+            detail::build(
+                error,
+                &detail::Redactor::new(&detail::home_prefixes(&config.home), directory),
+            )
+        });
         let target_state = run
             .targets
             .entry(assignment.target_name.clone())
@@ -585,6 +643,11 @@ async fn cycle(
             target_state.active = Some(assignment);
         }
         state::write_json(path, run)?;
+        if let Some(failure_detail) = failure_detail
+            && let Err(error) = detail::save(directory, attempt_id, &failure_detail, detail::now())
+        {
+            eprintln!("could not save attempt detail: {error}");
+        }
         deliver_report(&client, run, path).await?;
         actions.clean_cache(
             run.targets
@@ -762,5 +825,188 @@ mod tests {
         let error = parse_enrollment_link(&link).err().unwrap().to_string();
         assert_eq!(error, "invalid enrollment link payload");
         assert!(!error.contains(secret));
+    }
+
+    fn test_directory() -> PathBuf {
+        let path = std::env::temp_dir()
+            .canonicalize()
+            .unwrap()
+            .join(format!("fleet-main-{}", Uuid::new_v4()));
+        state::private_directory(&path).unwrap();
+        path
+    }
+
+    const OLD_RUN_STATE: &str = r#"{
+        "active": {"assignmentId":"00000000-0000-0000-0000-000000000003",
+            "attemptId":"00000000-0000-0000-0000-000000000004",
+            "rolloutId":"00000000-0000-0000-0000-000000000005",
+            "desiredRevisionId":"00000000-0000-0000-0000-000000000006",
+            "targetName":"skills","target":{"base":"home","path":".agents/skills"},"skills":[]},
+        "targets": {"agent-file/codex": {"active": null, "pending_assignment": null}},
+        "pending_report": {"attempt_id":"00000000-0000-0000-0000-000000000004",
+            "succeeded":false,"error_code":"lock_failed"}
+    }"#;
+
+    #[test]
+    fn run_state_written_before_attempt_detail_still_loads() {
+        let directory = test_directory();
+        let path = directory.join("run.json");
+        state::write_bytes(&path, OLD_RUN_STATE.as_bytes()).unwrap();
+        let mut run = state::read_json::<RunState>(&path).unwrap().unwrap();
+        migrate_run_state(&mut run);
+        assert!(run.targets.contains_key("skills"));
+        assert_eq!(
+            run.pending_report.as_ref().unwrap().error_code.as_deref(),
+            Some("lock_failed")
+        );
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn run_state_has_no_fields_for_attempt_detail() {
+        // Older Agents reject unknown fields, so a downgrade needs these exact shapes.
+        let run = RunState {
+            pending_report: Some(PendingReport {
+                attempt_id: Uuid::nil(),
+                succeeded: false,
+                error_code: Some("lock_failed".to_owned()),
+            }),
+            ..RunState::default()
+        };
+        assert_eq!(
+            serde_json::to_string(&run).unwrap(),
+            r#"{"targets":{},"pending_report":{"attempt_id":"00000000-0000-0000-0000-000000000000","succeeded":false,"error_code":"lock_failed"}}"#
+        );
+        assert_eq!(
+            serde_json::to_string(&TargetRunState::default()).unwrap(),
+            r#"{"active":null,"pending_assignment":null}"#
+        );
+    }
+
+    #[test]
+    fn saving_attempt_detail_leaves_the_run_state_file_untouched() {
+        let directory = test_directory();
+        let path = directory.join("run.json");
+        let run = RunState {
+            pending_report: Some(PendingReport {
+                attempt_id: Uuid::nil(),
+                succeeded: false,
+                error_code: Some("io".to_owned()),
+            }),
+            ..RunState::default()
+        };
+        state::write_json(&path, &run).unwrap();
+        let before = fs::read(&path).unwrap();
+        let detail = protocol::AttemptDetail {
+            diagnostic: "cannot write".to_owned(),
+            path: None,
+            step: None,
+        };
+        detail::save(&directory, Uuid::nil(), &detail, detail::now()).unwrap();
+        assert_eq!(fs::read(&path).unwrap(), before);
+        assert!(directory.join("pending-detail.json").is_file());
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[tokio::test]
+    async fn detail_is_sent_only_after_the_failed_report_is_accepted() {
+        let directory = test_directory();
+        let path = directory.join("run.json");
+        let attempt_id = Uuid::new_v4();
+        let mut run = RunState {
+            pending_report: Some(PendingReport {
+                attempt_id,
+                succeeded: false,
+                error_code: Some("ownership_conflict".to_owned()),
+            }),
+            ..RunState::default()
+        };
+        state::write_json(&path, &run).unwrap();
+        let detail = protocol::AttemptDetail {
+            diagnostic: "Skill alpha exists without Fleet ownership".to_owned(),
+            path: Some(".agents/skills/alpha".to_owned()),
+            step: Some(fleet_reconcile::Step::Validate),
+        };
+        detail::save(&directory, attempt_id, &detail, detail::now()).unwrap();
+        let server = detail::testing::MockServer::start(vec![
+            (500, ""),
+            (200, r#"{"outcome":"recorded","state":"failed"}"#),
+            (204, ""),
+        ]);
+        let client = Api::for_loopback_test(&server.url());
+        let pending = || detail::load(&directory).unwrap();
+        let unacknowledged = |run: &RunState| run.pending_report.as_ref().map(|r| r.attempt_id);
+
+        // The Server rejects the report: the detail must not be sent.
+        assert!(deliver_report(&client, &mut run, &path).await.is_err());
+        let outcome = detail::deliver(
+            &client,
+            &directory,
+            &pending(),
+            unacknowledged(&run),
+            detail::now(),
+        )
+        .await;
+        assert_eq!(outcome, detail::Delivery::Waiting);
+        assert_eq!(server.requests().len(), 1);
+
+        // The report is accepted, then the detail follows.
+        deliver_report(&client, &mut run, &path).await.unwrap();
+        assert!(run.pending_report.is_none());
+        let outcome = detail::deliver(
+            &client,
+            &directory,
+            &pending(),
+            unacknowledged(&run),
+            detail::now(),
+        )
+        .await;
+        assert_eq!(outcome, detail::Delivery::Sent);
+
+        let requests = server.requests();
+        let routes: Vec<_> = requests
+            .iter()
+            .map(|r| (r.method.as_str(), r.path.as_str()))
+            .collect();
+        let detail_route = format!("/agent/v1/attempts/{attempt_id}/detail");
+        assert_eq!(
+            routes,
+            [
+                ("POST", "/agent/v1/reports"),
+                ("POST", "/agent/v1/reports"),
+                ("POST", detail_route.as_str())
+            ]
+        );
+        assert!(!directory.join("pending-detail.json").exists());
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn unsent_detail_expires_while_its_report_is_still_pending() {
+        let directory = test_directory();
+        let attempt_id = Uuid::new_v4();
+        let detail = protocol::AttemptDetail {
+            diagnostic: "Skill alpha exists without Fleet ownership".to_owned(),
+            path: None,
+            step: None,
+        };
+        let created = detail::now() - 25 * 60 * 60;
+        detail::save(&directory, attempt_id, &detail, created).unwrap();
+        let run = RunState {
+            pending_report: Some(PendingReport {
+                attempt_id,
+                succeeded: false,
+                error_code: Some("ownership_conflict".to_owned()),
+            }),
+            ..RunState::default()
+        };
+        let unacknowledged = run.pending_report.as_ref().map(|r| r.attempt_id);
+        let pending = detail::load(&directory).unwrap();
+
+        let outcome = detail::precheck(&directory, &pending, unacknowledged, detail::now());
+
+        assert_eq!(outcome, Some(detail::Delivery::Dropped("expired")));
+        assert!(!directory.join("pending-detail.json").exists());
+        fs::remove_dir_all(directory).unwrap();
     }
 }

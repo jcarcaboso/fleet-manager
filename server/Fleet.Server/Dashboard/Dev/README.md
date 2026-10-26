@@ -31,7 +31,8 @@ Query switches go before the `#`:
 | `forbid=1` | Every non-GET request returns 403 `insufficient_scope`. |
 | `slow=<ms>` | Delay every response. Shows the loading skeletons. |
 | `pagesize=<n>` | Cap page size to exercise cursors and "load more". |
-| `diag=1` | Attempts carry a non-null `diagnostic`. |
+| `diag=0` | Attempts carry no phase 2 detail at all (`diagnostic`, `path` and `step` are `null`), like a Server or Agents before phase 2. |
+| `xss=1` | Every failed Attempt that has detail carries a hostile `diagnostic` and `path` (`<img src=x onerror=alert(1)>`, `"><script>`) so the escaping can be checked. |
 | `enroll=0` | The wizard's simulated enrollment never happens. |
 | `enroll=link` | The link is consumed and the Node exists, but the Agent never checks in. |
 | `expiry=<seconds>` | Links created in the wizard expire after this many seconds, whatever was requested. |
@@ -45,6 +46,27 @@ The fixture follows the contract's conventions: lists accept `limit` (1 to 100) 
 accept `order=newest` (the default is ID order, so a client that forgets `order` sees scrambled revisions), a cursor is valid only with the
 order it came from, `{node}` is one percent-encoded path segment decoded once (never the whole path), and every error is `{ code, message }`.
 `window.__FIXTURE.calls` records every API call (`method`, `path`, `query`, `at`, `settled`, `aborted`) so scenarios can assert on requests: `aborted` is set when the caller's `AbortController` fired, and `settled` when the response was delivered or the call was aborted (so the calls with `settled === false` are the requests in flight).
+
+## Attempt detail (phase 2)
+
+By default the fixture returns the phase 2 fields (`docs/technical-design/operator-api.md`, "Phase 2: attempt detail") on `latestAttempt`, node attempts, rollout attempts and `GET issues`:
+`diagnostic` (from `data.js`), `path` (relative to the Target base, never starting with `/`) and `step`, chosen by error code and Target.
+They are `null` for Attempts that did not fail and for the Nodes the fixture treats as old Agents (`kitchen-mini`, `fedora-ws`: their failures carry only the error code), and for the
+`lock_failed` failure of an `ai-client` Target, which has a step but no path (the lock file is outside the Target base). `data.js` predates phase 2, so its Agent versions say nothing about this.
+The excerpts in `data.js` are not part of the contract and are not served.
+
+| Scenario | Open |
+|---|---|
+| `detailNode` | `?drive=detailNode#/nodes/studio-mini/problems` (step chip, failing path with the Target base, diagnostic with a copy button, catalog text kept, no excerpt) |
+| `detailLock` | `?drive=detailLock#/nodes/design-imac/problems` (a step without a path) |
+| `detailOld` | `?drive=detailOld#/nodes/kitchen-mini/problems` (an old Agent: one quiet line, no chip) |
+| `detailActivity` | `?drive=detailActivity#/nodes/studio-mini/activity` (step on the attempt row, one-line diagnostic that expands) |
+| `detailProblems` | `?drive=detailProblems#/problems` (same detail on the Problems page; the path is shown as sent) |
+| `detailDeployments` | `?drive=detailDeployments#/deployments` (failed attempts of a rollout with step and expandable diagnostic) |
+| `detailNone` | `?drive=detailNone&diag=0#/nodes/studio-mini/problems` (no detail anywhere: only the quiet line) |
+| `detailXss` | `?drive=detailXss&xss=1#/nodes/studio-mini/problems` (hostile diagnostic and path render as text on all four screens; no injected element, no `alert`) |
+
+Run each on `harness.html` and `harness-csp.html`; the CSP harness must log no violation.
 
 ## Fixture and the Server
 
@@ -73,7 +95,7 @@ The `fixtureContract` scenario asserts these.
 Add `--enable-logging=stderr --v=0 --dump-dom` to see console messages and the DOM. With `?drive=scan#/route` the
 page appends a PASS/FAIL log (stray `undefined`/`NaN` text, `h1`, horizontal overflow) to the DOM dump.
 Other scenarios: `login`, `logout`, `retry`, `revoke`, `revokeConfirm`, `remove`, `removeConfirm`, `rename`, `wizard`,
-`wizardStep2`, `wizardStep3`, `revokeLink`, `scopeRead`, `models`, `sync`, `range`, `search`, `expire`, `forbid`, `fixtureContract`.
+`wizardStep2`, `wizardStep3`, `revokeLink`, `scopeRead`, `models`, `sync`, `range`, `search`, `expire`, `forbid`, `fixtureContract`, and the phase 2 `detail*` scenarios below.
 
 Scenarios that need switches and a route:
 

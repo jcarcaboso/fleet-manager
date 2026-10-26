@@ -4,7 +4,12 @@ use serde_json::{Map, Value};
 use std::{collections::BTreeMap, path::Path};
 
 fn settings(old: Option<&[u8]>) -> Result<Map<String, Value>> {
-    let value: Value = serde_json::from_slice(old.unwrap_or(b"{}"))?;
+    let value: Value = serde_json::from_slice(old.unwrap_or(b"{}")).map_err(|error| {
+        anyhow::anyhow!(
+            "invalid Claude settings JSON ({})",
+            crate::state::json_location(&error)
+        )
+    })?;
     value
         .as_object()
         .cloned()

@@ -44,6 +44,7 @@
     return `<article class="prob prob--${p.level}"><div class="prob-body">
       ${explanation ? `<p class="prob-expl">${u.md(explanation)}${specific ? ` <strong>${u.md(specific)}</strong>` : ''}</p>` : '<p class="prob-expl muted">The Server has no catalog entry for this problem yet.</p>'}
       <dl class="facts-row">${factList.map(([k, v, s, m]) => `<div><dt>${esc(k)}</dt><dd${m ? ' class="mono"' : ''}>${esc(v)}</dd>${s ? `<dd class="sub">${esc(s)}</dd>` : ''}</div>`).join('')}</dl>
+      ${i.code === 'assignment_failed' ? ui.failureDetail(i) : ''}
       <div class="prob-cols">
         <section class="fix" aria-label="How to fix"><h4>How to fix</h4>${fix.length ? ui.stepsList(fix) : '<p class="muted">No fix steps are published for this problem.</p>'}</section>
         <section class="why">${(i.commands || []).length ? `<h4>Run in a terminal</h4>${i.commands.map(c => u.cmdBlock(c)).join('')}` : '<h4>Run in a terminal</h4><p class="muted small">There is no CLI command for this problem.</p>'}</section>

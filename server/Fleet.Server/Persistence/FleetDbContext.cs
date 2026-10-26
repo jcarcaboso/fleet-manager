@@ -72,6 +72,8 @@ public sealed class FleetDbContext(DbContextOptions<FleetDbContext> options) : D
         model.Entity<AssignmentAiClientRow>().ToTable("assignment_ai_clients").HasKey(x => x.AssignmentId);
         model.Entity<AssignmentAiClientRow>().HasOne<AssignmentRow>().WithOne().HasForeignKey<AssignmentAiClientRow>(x => x.AssignmentId).OnDelete(DeleteBehavior.Cascade);
         model.Entity<AttemptRow>().ToTable("attempts").HasKey(x => x.Id);
+        model.Entity<AttemptRow>().Property(x => x.FailurePath).HasMaxLength(512);
+        model.Entity<AttemptRow>().Property(x => x.FailureStep).HasMaxLength(32);
         model.Entity<AttemptRow>().HasIndex(x => new { x.AssignmentId, x.Id });
         model.Entity<AttemptRow>().HasIndex(x => new { x.RolloutId, x.Id });
         // Latest Attempt of an Assignment, and the first/latest/count of its failed Attempts, without reading them all.
@@ -205,6 +207,8 @@ public sealed class AttemptRow
     public int State { get; set; }
     public string? ErrorCode { get; set; }
     public string? Diagnostic { get; set; }
+    public string? FailurePath { get; set; }
+    public string? FailureStep { get; set; }
     public DateTimeOffset UpdatedAt { get; set; }
 }
 public sealed class SourceScanRow

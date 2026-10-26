@@ -31,6 +31,9 @@ commands. The [Agent guide](../../deploy/agent/README.md) covers service command
    and restart the service. Verify the version and successful contact/sync.
 4. Update the remaining Nodes. Keep the previous executable available for
    rollback; state migrations must explicitly document rollback compatibility.
+   Attempt failure detail lives in its own file, `pending-detail.json`, and adds
+   nothing to `run.json`, so an older Agent reads the run state unchanged and
+   ignores the file.
 
 For the Operator CLI, replace the binary and check `fleet --version`. For a Cargo
 installation, rebuild with the chosen `--tag` plus `--locked --force`, then

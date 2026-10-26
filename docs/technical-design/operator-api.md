@@ -300,3 +300,65 @@ Bodies and responses are unchanged.
 the existing security headers. It replaces the per-file routes. `GET
 /dashboard` still serves `index.html`, and `/enroll` still serves
 `enroll.html`. Other names return 404.
+
+## Phase 2: attempt detail
+
+Phase 2 adds a bounded description of why an Attempt failed. The Agent sends
+it on a new route, so the existing `/agent/v1` shapes stay unchanged.
+
+### `POST /agent/v1/attempts/{attemptId}/detail` (Node mTLS)
+
+```json
+{ "diagnostic": "lock is held by process 4121 since 2026-10-25T13:14:58Z", "path": ".claude/settings.json", "step": "lock" }
+```
+
+- `diagnostic` is required: 1 to 2048 characters (UTF-16 code units, as .NET
+  counts) after the Agent removes control characters other than `\n` and `\t`,
+  replaces the user's home directory with `~` and its state directory with
+  `<state-dir>` (whole path components only), and replaces any other absolute
+  path with `<path>/<last component>`. It describes the failure,
+  never file contents, credentials, tokens, CLIProxy keys or environment values.
+- `path` is optional, at most 512 characters, relative to the Target base
+  (for example `.agents/skills/incident-runbook/SKILL.md`). It never starts
+  with `/` or contains `..` segments.
+- `step` is optional and is one of `lock`, `download`, `verify`, `stage`,
+  `activate`, `recover`, `receipt`, `configure`, `validate`.
+- The Attempt must belong to the authenticated Node and be `failed`.
+  Responses: 204 on success, including a repeat; 404 `attempt_not_found` if
+  the Attempt is unknown or belongs to another Node; 409 `attempt_not_failed`
+  if it is not failed; 400 `invalid_request` for invalid fields. The latest
+  accepted detail replaces earlier detail for that Attempt.
+- Each Node may send 30 detail requests in a burst and then one every 2
+  seconds; beyond that the Server returns 429 `rate_limited` with a
+  `Retry-After` header, and the Agent retries later. A repeat that carries the
+  stored values returns 204 without writing the row.
+- The Server strips control characters again and enforces the limits. It
+  stores `diagnostic` in the existing `attempts.Diagnostic` column, and `path`
+  and `step` in new nullable `FailurePath` and `FailureStep` columns.
+
+### Agent behaviour
+
+- After a failed Attempt's terminal report is accepted, the Agent sends its
+  detail. The report is never delayed or blocked by the detail.
+- Pending detail is kept in its own state file, `pending-detail.json`, not in
+  the run state, because the run state rejects unknown fields and an older
+  Agent must still be able to read it after a downgrade.
+- HTTP 404 with an empty or non-JSON body means the Server predates phase 2:
+  the Agent drops the detail and does not retry it. Other failures are retried
+  on later cycles, for at most 24 hours. Only the newest pending detail is
+  kept.
+- The Agent ignores the response body.
+
+### Operator API changes
+
+These fields are added; nothing is removed.
+
+| Response | New fields |
+|---|---|
+| `GET nodes/{node}`: `targets[].latestAttempt` | `path`, `step` (`diagnostic` already exists and is now filled) |
+| `GET nodes/{node}/attempts` items | `path`, `step` |
+| `GET rollouts/{id}/attempts` items | `path`, `step` |
+| `GET issues` items | `diagnostic`, `path`, `step`, from the latest failed Attempt of the Assignment; `null` otherwise |
+
+All three are `null` when the Agent did not send detail. Agents before phase 2
+never send it.

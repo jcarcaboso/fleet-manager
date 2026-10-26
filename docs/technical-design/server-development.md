@@ -112,6 +112,7 @@ The following defaults are implementation choices pending measured budgets:
 | HTTP request body | 16 KiB |
 | Concurrent HTTP requests | 128, no waiting queue |
 | Enrollment and renewal requests per source address | 20 per minute |
+| Attempt detail requests per Node | Burst of 30, then 1 every 2 seconds (30 per minute), no queue |
 | Database command timeout | 15 seconds |
 | Collection page size | 100, maximum 200 |
 

@@ -793,7 +793,9 @@ public sealed partial class OperatorApiTests(OperatorApiFixture fixture) : IClas
         if (reconcile is not null)
         {
             var source = File.ReadAllText(reconcile);
-            var asString = source[source.IndexOf("pub const fn as_str", StringComparison.Ordinal)..];
+            // The Agent also has a Step enum with its own as_str; only the error codes belong in the catalog.
+            var errors = source[source.IndexOf("impl ReconcileError", StringComparison.Ordinal)..];
+            var asString = errors[errors.IndexOf("pub const fn as_str", StringComparison.Ordinal)..];
             var codes = RustCode().Matches(asString[..asString.IndexOf("impl fmt::Display", StringComparison.Ordinal)]).Select(x => x.Groups[1].Value).ToArray();
             Assert.True(codes.Length >= 24, "Expected to find the reconciler error codes in the Agent source.");
             Assert.All(codes, code => Assert.NotNull(ErrorCatalog.Find(code)));

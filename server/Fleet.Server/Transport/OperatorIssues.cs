@@ -21,14 +21,19 @@ public sealed record OperatorIssue(
     string? NodeName,
     string? Target,
     DateTimeOffset? Since,
-    IReadOnlyList<string> Commands);
+    IReadOnlyList<string> Commands,
+    string? Diagnostic = null,
+    string? Path = null,
+    string? Step = null);
 
 /// <summary>Builds the open issues of the Workspace. <c>GET issues</c> returns them; the legacy diagnostics reuse the configuration part.</summary>
 public static partial class OperatorIssues
 {
     public const int MaximumItems = 200;
 
-    private sealed record FailedAssignment(Guid NodeId, string NodeName, string TargetName, DateTimeOffset? FirstFailedAt, string? ErrorCode);
+    private sealed record LatestFailure(string? ErrorCode, string? Diagnostic, string? Path, string? Step);
+
+    private sealed record FailedAssignment(Guid NodeId, string NodeName, string TargetName, DateTimeOffset? FirstFailedAt, LatestFailure? Latest);
 
     public static async Task<IReadOnlyList<OperatorIssue>> ReadAsync(FleetDbContext db, IFleetCoordinator coordinator,
         CliProxyCatalog catalog, IOptions<FleetOptions> options, IConfiguration configuration, TimeProvider clock, CancellationToken ct)
@@ -64,11 +69,12 @@ public static partial class OperatorIssues
             .Select(x => new FailedAssignment(x.NodeId, x.NodeName, x.TargetName,
                 db.Attempts.Where(a => a.AssignmentId == x.AssignmentId && a.State == failedState).Min(a => (DateTimeOffset?)a.UpdatedAt),
                 db.Attempts.Where(a => a.AssignmentId == x.AssignmentId && a.State == failedState)
-                    .OrderByDescending(a => a.UpdatedAt).ThenByDescending(a => a.Id).Select(a => a.ErrorCode).FirstOrDefault()))
+                    .OrderByDescending(a => a.UpdatedAt).ThenByDescending(a => a.Id)
+                    .Select(a => new LatestFailure(a.ErrorCode, a.Diagnostic, a.FailurePath, a.FailureStep)).FirstOrDefault()))
             .ToListAsync(ct);
         foreach (var row in failedRows)
         {
-            var attempt = (row.ErrorCode, Since: row.FirstFailedAt);
+            var attempt = (ErrorCode: row.Latest?.ErrorCode, Since: row.FirstFailedAt);
             var known = attempt.ErrorCode is null ? null : ErrorCatalog.Find(attempt.ErrorCode);
             var alias = Quote(row.NodeName);
             var commands = new List<string> { $"fleet nodes show {alias}" };
@@ -83,7 +89,7 @@ public static partial class OperatorIssues
                     ? "Resolve any model-sync issue, then check Agent logs for configuration or ownership conflicts. AI-client setup retries after one minute."
                     : "Check Agent logs for permissions, ownership conflicts or download failures."),
                 "nodes", attempt.ErrorCode, row.NodeId, row.NodeName, row.TargetName, attempt.Since,
-                commands));
+                commands, row.Latest?.Diagnostic, row.Latest?.Path, row.Latest?.Step));
         }
 
         var ordered = Order(issues);

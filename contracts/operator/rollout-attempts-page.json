@@ -1,0 +1,25 @@
+{
+  "items": [
+    {
+      "attemptId": "00000000-0000-0000-0000-0000000000b2",
+      "assignmentId": "00000000-0000-0000-0000-0000000000a2",
+      "state": "failed",
+      "errorCode": "ai_client_reconcile_failed",
+      "diagnostic": "AI client configuration could not be written: settings.json is not valid JSON at line 12",
+      "path": ".claude/settings.json",
+      "step": "configure",
+      "updatedAt": "2026-10-25T14:20:00Z"
+    },
+    {
+      "attemptId": "00000000-0000-0000-0000-0000000000b3",
+      "assignmentId": "00000000-0000-0000-0000-0000000000a3",
+      "state": "succeeded",
+      "errorCode": null,
+      "diagnostic": null,
+      "path": null,
+      "step": null,
+      "updatedAt": "2026-10-25T09:01:30Z"
+    }
+  ],
+  "nextCursor": null
+}

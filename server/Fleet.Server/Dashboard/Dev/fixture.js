@@ -3,7 +3,7 @@
    Replaces window.fetch for /dashboard/api/* with an in-memory fake of docs/technical-design/operator-api.md.
    Data comes from artifacts/dashboard-prototypes/data.js (window.FLEET), restricted to fields the contract defines.
    Query switches (harness.html?...): scope=read|operate|admin, signedout=1, empty=1, fail=<path prefix>,
-   forbid=1 (403 on every POST), slow=<ms>, pagesize=<n>, diag=1 (non-null diagnostics), enroll=0 (no simulated enrollment), enroll=link (the link is consumed but the machine never checks in),
+   forbid=1 (403 on every POST), slow=<ms>, pagesize=<n>, diag=0 (no attempt detail at all, like a Server or Agents before phase 2), xss=1 (hostile diagnostic and path on every failure that has detail), enroll=0 (no simulated enrollment), enroll=link (the link is consumed but the machine never checks in),
    weirdalias=1 (one machine is named "rack/A 100%" to exercise path-segment encoding),
    delay=<alias or id>:<ms>[,...] (delays responses for that machine's /nodes/{node} routes: used to reproduce overlapping loads),
    expiry=<seconds> (links created by the wizard expire after this many seconds instead of the requested time),
@@ -18,7 +18,7 @@
   const cfg = {
     scope: params.get('scope') || 'admin', signedOut: params.has('signedout'), empty: params.has('empty'),
     fail: params.get('fail'), forbid: params.has('forbid'), slow: +(params.get('slow') || 0), pageSize: +(params.get('pagesize') || 100),
-    diag: params.has('diag'), enroll: params.get('enroll') !== '0', consumeOnly: params.get('enroll') === 'link', weirdAlias: params.has('weirdalias'),
+    diag: params.get('diag') !== '0', xss: params.has('xss'), enroll: params.get('enroll') !== '0', consumeOnly: params.get('enroll') === 'link', weirdAlias: params.has('weirdalias'),
     delay: Object.fromEntries((params.get('delay') || '').split(',').filter(Boolean).map(x => { const i = x.lastIndexOf(':'); return [x.slice(0, i), +x.slice(i + 1)]; })),
     expiry: +(params.get('expiry') || 0), hang: params.get('hang'),
     lag: Object.fromEntries((params.get('lag') || '').split(',').filter(Boolean).map(x => { const i = x.lastIndexOf(':'); return [x.slice(0, i), +x.slice(i + 1)]; })),
@@ -72,8 +72,28 @@
   });
   const freshnessOfAbs = n => !n.lastContactAt ? 'never_contacted' : Date.now() - Date.parse(n.lastContactAt) > 300e3 ? 'stale' : 'fresh';
 
+  /* Phase 2 attempt detail (docs/technical-design/operator-api.md, "Phase 2: attempt detail"): diagnostic, path (relative to the Target base, never
+     starting with "/"), step. Only a failed Attempt reported by an Agent that sends detail has any; everything else is null. The diagnostics come from
+     data.js. data.js predates phase 2, so the fixture picks path and step by error code and Target, and treats the Nodes in OLD_AGENT as Agents
+     that send only the error code. */
+  const OLD_AGENT = new Set(['kitchen-mini', 'fedora-ws']);
+  const XSS = { diagnostic: 'bad <img src=x onerror=alert(1)> and "><script>alert(2)</script> \'x\' & done', path: '"><script>alert(3)</script>/<img src=x onerror=alert(4)>.md', step: 'verify' };
+  const detailOf = (n, t, a) => {
+    const none = { diagnostic: null, path: null, step: null };
+    if (!cfg.diag || a.state !== 'failed' || !a.diagnostic || OLD_AGENT.has(n.alias)) return none;
+    if (cfg.xss) return { ...XSS };
+    const dir = t.path || '';
+    const byCode = {
+      ai_client_reconcile_failed: { path: `${dir}/settings.json`, step: 'configure' },
+      ownership_conflict: { path: '.agents/skills/postgres-migrations', step: 'stage' },
+      bundle_digest_mismatch: { path: '.agents/skills/postgres-migrations', step: 'verify' },
+      /* The lock file is outside the Target base, so there is no path; the agent-file Target also reports the file it was about to write. */
+      lock_failed: { path: t.kind === 'agent-file' ? `${dir}/${t.file}` : null, step: 'lock' },
+    }[a.errorCode] || { path: null, step: null };
+    return { diagnostic: a.diagnostic, ...byCode };
+  };
   const attemptOf = (n, t, a) => ({ attemptId: a.id, assignmentId: guid(n.id + t.name), rolloutId: F.rollouts.find(r => r.shortSha === a.revision)?.id || F.rollouts[0].id, targetName: t.name,
-    sourceRevision: revBySha(a.revision)?.sourceRevision || a.revision, state: a.state, errorCode: a.errorCode, diagnostic: cfg.diag ? a.diagnostic : null, updatedAt: tm(n, a.finishedAt || a.startedAt) });
+    sourceRevision: revBySha(a.revision)?.sourceRevision || a.revision, state: a.state, errorCode: a.errorCode, ...detailOf(n, t, a), updatedAt: tm(n, a.finishedAt || a.startedAt) });
   const allAttempts = n => n.targets.flatMap(t => [...(targetAttempts.get(n.id + ':' + t.name) || []), ...t.attempts.map(a => attemptOf(n, t, a))]).sort((a, b) => Date.parse(b.updatedAt) - Date.parse(a.updatedAt));
 
   const targetDetail = (n, t) => {
@@ -83,7 +103,7 @@
     return {
       name: t.name, kind, base: t.base, path: t.path, assignmentId: guid(n.id + t.name), state: t.state, assignedAt: tm(n, t.updatedAt) || nowIso(),
       desiredRevision: desiredOf(n, t), lastSucceededRevision: applied ? applied.sourceRevision : null,
-      latestAttempt: latest && { attemptId: latest.attemptId, state: latest.state, errorCode: latest.errorCode, diagnostic: latest.diagnostic, updatedAt: latest.updatedAt },
+      latestAttempt: latest && { attemptId: latest.attemptId, state: latest.state, errorCode: latest.errorCode, diagnostic: latest.diagnostic ?? null, path: latest.path ?? null, step: latest.step ?? null, updatedAt: latest.updatedAt },
       failedAttempts: t.state === 'failed' ? (t.failure?.retries || 1) : 0, firstFailedAt: t.state === 'failed' && t.failure ? tm(n, t.failure.firstSeenAt) : null,
       skills: kind === 'skills' ? (t.skills || []).map(name => ({ name, bundleDigest: skillDigest(name) })) : [],
       file: kind === 'agent-file' ? { name: t.file, bundleDigest: 'sha256:' + hex('file:' + n.id + t.name, 64) } : null,
@@ -162,11 +182,13 @@
         section: 'nodes', errorCode: null, nodeId: n.id, nodeName: n.alias, target: null, since: last || enrolled, commands: [`fleet nodes show ${alias}`, `fleet nodes checkins ${alias}`] });
       for (const t of n.targets) if (t.state === 'failed') {
         const code = (allAttempts(n).find(a => a.targetName === t.name && a.errorCode) || {}).errorCode || t.failure?.code || null;
+        const failedAttempt = allAttempts(n).find(a => a.targetName === t.name && a.state === 'failed');
         const known = code && catalogItems().find(x => x.code === code);
         out.push({ id: `assignment_failed:${n.id}:${t.name}`, code: 'assignment_failed', severity: 'error', title: `${n.alias}: ${t.name} failed`,
           detail: code ? `The Agent reported ${code}${known ? ` (${known.title})` : ''} for this current assignment.` : 'The Agent reported a failure for this current assignment.',
           action: known ? known.fix[0] : 'Check Agent logs for permissions, ownership conflicts or download failures.',
           section: 'nodes', errorCode: code, nodeId: n.id, nodeName: n.alias, target: t.name, since: t.failure ? tm(n, t.failure.firstSeenAt) : null,
+          diagnostic: failedAttempt?.diagnostic ?? null, path: failedAttempt?.path ?? null, step: failedAttempt?.step ?? null,
           commands: [`fleet nodes show ${alias}`, ...(code ? [`fleet explain ${quote(code)}`] : []), `fleet retry ${alias} ${quote(t.name)}`] });
       }
     }
@@ -181,7 +203,7 @@
       detail: `The last scan at ${stamp(last.observedAt)} was ${last.outcome}. Existing assignments remain active.`, action: 'Check repository access and fleet.yml validation in the Server logs, then sync the repository again.',
       section: 'repository', errorCode: null, nodeId: null, nodeName: null, target: null, since: last.observedAt, commands: ['fleet source rescan'] });
     /* Errors first, then Node name (issues without a Node first), Target, code and ID. */
-    return out.sort((a, b) => (a.severity === 'error' ? 0 : 1) - (b.severity === 'error' ? 0 : 1) || cmpNull(a.nodeName, b.nodeName) || cmpNull(a.target, b.target) || cmpNull(a.code, b.code) || cmpNull(a.id, b.id)).slice(0, 200);
+    return out.map(i => ({ diagnostic: null, path: null, step: null, ...i })).sort((a, b) => (a.severity === 'error' ? 0 : 1) - (b.severity === 'error' ? 0 : 1) || cmpNull(a.nodeName, b.nodeName) || cmpNull(a.target, b.target) || cmpNull(a.code, b.code) || cmpNull(a.id, b.id)).slice(0, 200);
   };
 
   /* ---------------------------------------------------------------- CLIProxy */
@@ -308,9 +330,9 @@
       if (path === 'rollouts') return listOf(cfg.empty ? [] : F.rollouts.map(r => ({ rolloutId: r.id, desiredRevisionId: r.revisionId, createdAt: T(r.createdAt), ...pickCounts(r.assignments) })), q, 'rolloutId', 'createdAt');
       if ((m = /^rollouts\/([^/]+)\/attempts$/.exec(path))) {
         const r = F.rollouts.find(x => x.id === seg(m[1])); if (!r) return err(404, 'invalid_request', 'No rollout has that ID.');
-        /* AttemptStatus: exactly these six fields. */
+        /* AttemptStatus: exactly these eight fields. */
         return paged(nodes.flatMap(n => allAttempts(n)).filter(a => a.rolloutId === r.id)
-          .map(a => ({ attemptId: a.attemptId, assignmentId: a.assignmentId, state: a.state, errorCode: a.errorCode, diagnostic: a.diagnostic, updatedAt: a.updatedAt })), q);
+          .map(a => ({ attemptId: a.attemptId, assignmentId: a.assignmentId, state: a.state, errorCode: a.errorCode, diagnostic: a.diagnostic ?? null, path: a.path ?? null, step: a.step ?? null, updatedAt: a.updatedAt })), q);
       }
       if (path === 'warnings') return paged(cfg.empty ? [] : F.revisions.flatMap(r => r.warnings.map(w => ({ desiredRevisionId: r.id, code: w.code, message: w.message, sourceLocations: w.sourceLocations }))), q);
       if (path === 'audit') {
@@ -341,7 +363,7 @@
       const t = n.targets.find(x => x.name === body.target); if (!t) return err(404, 'target_not_found');
       if (t.state !== 'failed') return err(409, 'target_not_failed');
       t.state = 'pending'; t.failure = null;
-      const a = { attemptId: guid('retry' + Date.now()), state: 'pending', errorCode: null, diagnostic: null, updatedAt: nowIso() };
+      const a = { attemptId: guid('retry' + Date.now()), state: 'pending', errorCode: null, diagnostic: null, path: null, step: null, updatedAt: nowIso() };
       targetAttempts.set(n.id + ':' + t.name, [{ ...a, assignmentId: guid(n.id + t.name), rolloutId: F.rollouts[0].id, targetName: t.name, sourceRevision: F.revisions[0].sourceRevision }, ...(targetAttempts.get(n.id + ':' + t.name) || [])]);
       addAudit('assignment.retry_requested', { nodeId: n.id, subject: n.alias });
       return json({ assignmentId: guid(n.id + t.name), attemptId: a.attemptId, state: 'pending' });

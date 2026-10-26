@@ -99,13 +99,15 @@ errors` once. It prints one document:
 {
   "ok": false,
   "issues": [{"id": "...", "code": "assignment_failed", "severity": "error",
-              "errorCode": "lock_failed", "commands": ["fleet retry studio-mini skills"],
+              "errorCode": "lock_failed", "diagnostic": "lock is held by process 4121", "path": ".claude/settings.json", "step": "lock",
+              "commands": ["fleet retry studio-mini skills"],
               "explanation": {"title": "...", "explanation": "...", "fix": ["..."]}}],
   "summary": {"errors": 1, "warnings": 0}
 }
 ```
 
-Each issue is the Server's issue object plus `explanation`. The explanation comes
+Each issue is the Server's issue object plus `explanation`. A failed-Target issue carries `diagnostic`, `path` and `step` from the latest failed Attempt
+(phase 2; `null` when the Agent sent none, absent from a Server that predates phase 2); `fleet doctor` passes them through unchanged. The explanation comes
 from the catalog entry for the issue's `errorCode`, else for its `code`, and is
 `null` when neither is in the catalog. `ok` is true when no issue has severity
 `error`. The command exits 0 when `ok` is true and 10 when it is false; warnings

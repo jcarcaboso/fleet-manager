@@ -154,6 +154,9 @@ public sealed record AttemptReport(
     string? Diagnostic,
     DateTimeOffset ReportedAt);
 
+/// <summary>Bounded description of why an Attempt failed, sent by the Agent after its terminal report.</summary>
+public sealed record AttemptDetail(string? Diagnostic, string? Path, string? Step);
+
 public enum ReportOutcome
 {
     Recorded,
@@ -201,6 +204,8 @@ public sealed record NodeLatestAttempt(
     ConvergenceState State,
     string? ErrorCode,
     string? Diagnostic,
+    string? Path,
+    string? Step,
     DateTimeOffset UpdatedAt);
 
 public sealed record NodeAiClientStatus(string Client, string Mode, string? BaseUrl, string? Model);
@@ -244,6 +249,8 @@ public sealed record NodeAttemptStatus(
     ConvergenceState State,
     string? ErrorCode,
     string? Diagnostic,
+    string? Path,
+    string? Step,
     DateTimeOffset UpdatedAt);
 
 public sealed record CheckinBucket(DateTimeOffset Hour, int Polls);
@@ -281,6 +288,8 @@ public sealed record AttemptStatus(
     ConvergenceState State,
     string? ErrorCode,
     string? Diagnostic,
+    string? Path,
+    string? Step,
     DateTimeOffset UpdatedAt);
 
 public sealed record WarningStatus(

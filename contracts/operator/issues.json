@@ -17,7 +17,10 @@
         "fleet nodes show studio-mini",
         "fleet explain ai_client_reconcile_failed",
         "fleet retry studio-mini ai-client/claude"
-      ]
+      ],
+      "diagnostic": "AI client configuration could not be written: settings.json is not valid JSON at line 12",
+      "path": ".claude/settings.json",
+      "step": "configure"
     },
     {
       "id": "source_not_scanned",
@@ -34,7 +37,10 @@
       "since": null,
       "commands": [
         "fleet source rescan"
-      ]
+      ],
+      "diagnostic": null,
+      "path": null,
+      "step": null
     }
   ]
 }

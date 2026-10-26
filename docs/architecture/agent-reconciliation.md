@@ -95,6 +95,49 @@ failed. Every report binds the Node, Target, desired revision, Rollout,
 Assignment, and Attempt identities. Terminal failures use stable error codes and
 bounded diagnostics.
 
+The failed report carries only the stable error code. After the Server accepts
+it, the Agent sends a separate, best-effort failure detail for that Attempt: a
+diagnostic, the Target-relative path of the offending file or entry when the
+failure has one, and the step in which it failed (`lock`, `download`, `verify`,
+`stage`, `activate`, `recover`, `receipt`, `configure` or `validate`). The detail
+never delays the report or the next reconciliation, and a failed delivery never
+fails a cycle. The [Operator API](../technical-design/operator-api.md#phase-2-attempt-detail)
+defines the route.
+
+The error code decides the Attempt's identity; step and path only locate it, and
+each reconciliation error carries them as optional context. The diagnostic is
+the error message and its causes. Before it leaves the Node the Agent removes
+control characters other than newline and tab, replaces the user's home
+directory with `~`, and cuts it to 2048 UTF-16 code units. Error messages
+describe a failure and never quote file contents, credentials, tokens, CLIProxy
+keys or environment values. In particular, parser errors for AI-client
+configuration report a line and column, not the offending text. A path is
+omitted unless it is relative and free of `..`.
+
+Before sending, the Agent removes control characters other than newline and
+tab and hides where things live on the machine, then truncates to 2048 UTF-16
+code units (so truncation measures the redacted text). The home directory
+becomes `~` and the Agent state directory becomes `<state-dir>`, including
+their absolute and canonical spellings (such as `/private/var` on macOS). A
+home or state directory matches only a whole path component: it must start a
+path token and end at the end of the text, a `/` or `\`, whitespace, a quote or
+closing bracket, a comma or semicolon, a colon before whitespace, or a
+sentence-ending dot. So `/home/joan+backup/x` and `/private/Users/joan/x` are
+not under `/home/joan` and `/Users/joan`. Every other absolute path (`/x/y`,
+`\\server\share`, `C:\x`) becomes `<path>/<last component>`, or `<path>` when
+that component is `.` or `..`. Reconcile errors also describe locations
+relative to the Target (`~/.claude/link`) or by their last components
+(`.../state/targets`) at the source.
+
+The Agent keeps only the newest unsent detail, with its Attempt and creation
+time, in its own state file `pending-detail.json` and not in the run state.
+Older Agents reject unknown run-state fields, so this keeps downgrades safe. The
+detail is retried on later cycles until the Server accepts it, answers with a
+client error other than 408 or 429 (a 404 also covers a Server that predates
+the route), or 24 hours have passed. Expiry is checked before waiting for the
+terminal report to be accepted, so detail whose report is never accepted still
+expires. An unreadable file is discarded.
+
 ## Work loop
 
 For each Target, the Agent follows this order:

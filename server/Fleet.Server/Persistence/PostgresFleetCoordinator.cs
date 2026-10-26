@@ -641,7 +641,9 @@ public sealed partial class PostgresFleetCoordinator(
         var attempt = await db.Attempts.FromSqlInterpolated($"SELECT * FROM attempts WHERE \"Id\" = {attemptId} FOR UPDATE")
             .SingleAsync(cancellationToken);
         var currentState = (ConvergenceState)attempt.State;
-        if (currentState == report.State && attempt.ErrorCode == report.ErrorCode && attempt.Diagnostic == report.Diagnostic)
+        // Agents send no diagnostic with the report; the detail route may have stored one since, which must not turn a repeat into an error.
+        if (currentState == report.State && attempt.ErrorCode == report.ErrorCode &&
+            (report.Diagnostic is null && currentState == ConvergenceState.Failed || attempt.Diagnostic == report.Diagnostic))
             return new(ReportOutcome.Duplicate, currentState);
         if (currentState is ConvergenceState.Succeeded or ConvergenceState.Failed)
             throw Error("terminal_attempt", "A terminal Attempt cannot change result.");
@@ -663,7 +665,32 @@ public sealed partial class PostgresFleetCoordinator(
         var rows = await db.Attempts.AsNoTracking().Where(x => x.RolloutId == rolloutId.Value && x.Id.CompareTo(cursor) > 0)
             .OrderBy(x => x.Id).Take(limit + 1).ToListAsync(cancellationToken);
         return MakePage(rows, limit, x => x.Id, x => new AttemptStatus(new(x.Id), new(x.AssignmentId),
-            (ConvergenceState)x.State, x.ErrorCode, x.Diagnostic, x.UpdatedAt));
+            (ConvergenceState)x.State, x.ErrorCode, x.Diagnostic, x.FailurePath, x.FailureStep, x.UpdatedAt));
+    }
+
+    public async Task RecordAttemptDetailAsync(NodeAuthentication authentication, AttemptId attemptId, AttemptDetail detail,
+        CancellationToken cancellationToken = default)
+    {
+        var clean = AttemptDetailRules.Sanitize(detail);
+        await Authenticate(authentication, clock.GetUtcNow(), false, cancellationToken);
+        var id = attemptId.Value;
+        var nodeId = authentication.NodeId.Value;
+        var failed = (int)ConvergenceState.Failed;
+        // One conditional UPDATE by Attempt, Node and state: no read-modify-write, and the latest accepted detail wins.
+        // The IS DISTINCT FROM test skips the physical write (row version, WAL) when a repeat carries the stored values.
+        var updated = await db.Database.ExecuteSqlInterpolatedAsync($$"""
+            UPDATE attempts SET "Diagnostic" = {{clean.Diagnostic}}, "FailurePath" = {{clean.Path}}, "FailureStep" = {{clean.Step}}
+            WHERE "Id" = {{id}} AND "NodeId" = {{nodeId}} AND "State" = {{failed}}
+              AND ("Diagnostic" IS DISTINCT FROM {{clean.Diagnostic}} OR "FailurePath" IS DISTINCT FROM {{clean.Path}}
+                OR "FailureStep" IS DISTINCT FROM {{clean.Step}})
+            """, cancellationToken);
+        if (updated > 0) return;
+        // Zero rows is either a refusal or an unchanged repeat of an owned failed Attempt, which is still accepted.
+        var state = await db.Attempts.AsNoTracking().Where(x => x.Id == id && x.NodeId == nodeId)
+            .Select(x => (int?)x.State).SingleOrDefaultAsync(cancellationToken);
+        if (state == failed) return;
+        throw state is null ? Error("attempt_not_found", "Attempt was not found.")
+            : Error("attempt_not_failed", "Detail can only be added to a failed Attempt.");
     }
 
     public async Task<Page<WarningStatus>> GetWarningsAsync(PageRequest page, CancellationToken cancellationToken = default)

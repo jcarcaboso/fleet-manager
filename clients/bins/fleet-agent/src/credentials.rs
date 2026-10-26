@@ -78,7 +78,7 @@ impl CredentialStore {
         };
         serde_json::from_slice(&bytes)
             .map(Some)
-            .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))
+            .map_err(|e| invalid_credential_file("identity", &e))
     }
 
     pub fn load_or_generate_pending(&self) -> io::Result<PendingCredential> {
@@ -86,7 +86,7 @@ impl CredentialStore {
         match read_private_file(&pending_path) {
             Ok(bytes) => {
                 return serde_json::from_slice(&bytes)
-                    .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e));
+                    .map_err(|e| invalid_credential_file("pending credential", &e));
             }
             Err(error) if error.kind() == io::ErrorKind::NotFound => {}
             Err(error) => return Err(error),
@@ -158,6 +158,18 @@ impl CredentialStore {
         self.clear_pending()?;
         Ok(identity)
     }
+}
+
+/// Parse errors for credential files must not quote their content: serde's data
+/// errors include the rejected value, which can be key material.
+fn invalid_credential_file(kind: &str, error: &serde_json::Error) -> io::Error {
+    io::Error::new(
+        io::ErrorKind::InvalidData,
+        format!(
+            "invalid {kind} file ({})",
+            crate::state::json_location(error)
+        ),
+    )
 }
 
 fn atomic_write(path: &Path, contents: &[u8]) -> io::Result<()> {
@@ -388,5 +400,29 @@ mod tests {
             "new certificate"
         );
         assert!(!root.0.join(PENDING_FILE).exists());
+    }
+
+    #[test]
+    fn credential_parse_errors_do_not_quote_key_material() {
+        let secret = "-----BEGIN PRIVATE KEY-----SECRET-KEY-MATERIAL";
+        let dir = std::env::temp_dir()
+            .canonicalize()
+            .unwrap()
+            .join(format!("fleet-credentials-{}", Uuid::new_v4()));
+        let store = CredentialStore::open(&dir).unwrap();
+        // The wrong type makes serde quote the value; unknown fields quote the name.
+        for content in [
+            format!(r#"{{"workspaceId":"{secret}"}}"#),
+            format!(r#"{{"{secret}":1}}"#),
+        ] {
+            atomic_write(&dir.join(IDENTITY_FILE), content.as_bytes()).unwrap();
+            let message = store.load_identity().err().unwrap().to_string();
+            assert!(message.contains("invalid identity file"), "{message}");
+            assert!(!message.contains("SECRET-KEY-MATERIAL"), "{message}");
+            atomic_write(&dir.join(PENDING_FILE), content.as_bytes()).unwrap();
+            let message = store.load_or_generate_pending().err().unwrap().to_string();
+            assert!(!message.contains("SECRET-KEY-MATERIAL"), "{message}");
+        }
+        fs::remove_dir_all(dir).unwrap();
     }
 }

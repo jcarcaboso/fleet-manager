@@ -20,7 +20,7 @@ paths.
 | Assignment | ID, Node ID, Rollout/revision IDs, Target name, relative descriptor, current flag, convergence state, creation time, and optional AI-client mode, client, endpoint, and model describe intended Target state. The CLIProxyAPI key is absent. |
 | Assignment Skill | Assignment ID, Skill name, Bundle digest and ordering describe the complete resolved map. |
 | Assignment File | Assignment ID, destination filename, and optional content digest describe one Managed file or its removal. |
-| Attempt | ID, Assignment/Rollout/Node IDs, convergence state, error code, bounded diagnostic and update time retain accepted reports. Public report requests currently accept stable error codes only. |
+| Attempt | ID, Assignment/Rollout/Node IDs, convergence state, error code, bounded diagnostic and update time retain accepted reports. Report requests accept stable error codes only. A failed Attempt can also hold failure detail sent by its own Node on `POST /agent/v1/attempts/{attemptId}/detail`: a control-character-free diagnostic of at most 2048 characters (in `Diagnostic`), an optional relative path of at most 512 characters (`FailurePath`) and an optional step name of at most 32 characters from a fixed list (`FailureStep`). The Agent keeps file contents, credentials and environment values out of the detail and replaces its home directory with `~`; the Server only enforces the limits, so treat the diagnostic as Node-supplied text. The detail follows the Attempt's retention and backups, and a newer detail replaces the earlier one. |
 | Node check-in | Node ID, UTC hour and the number of successful polls in that hour. Maintenance deletes rows older than seven days; they feed the Node activity chart. |
 | Audit event | ID, Workspace ID, timestamp, action, actor and optional Node/credential IDs record security-relevant transitions without request bodies. |
 
@@ -41,8 +41,16 @@ The Server reads the CLIProxyAPI key from deployment configuration. It does not
 write the key to PostgreSQL, a Bundle, an audit event, or an Assignment. Each
 assigned Agent stores a private key copy and a model cache below its local state
 directory, plus ownership receipts and recovery journals for client
-configuration. These Node-local files are outside the Server backup tool. Treat
-an Agent-state backup as credential material.
+configuration. After a failed Attempt the Agent also keeps `pending-detail.json`:
+the newest unsent failure detail with its Attempt ID, creation time, a diagnostic
+of at most 2048 UTF-16 code units, an optional Target-relative path and an
+optional step. The diagnostic has control characters removed and the home
+directory replaced by `~`, and never contains file contents or credentials. The
+file is removed once the Server accepts the detail, rejects it with a client
+error other than 408 or 429, or 24 hours after creation, and it is kept outside
+the run state so that older Agents can still read the run state. These
+Node-local files are outside the Server backup tool. Treat an Agent-state backup
+as credential material.
 
 Before release, choose retention windows, measure database growth, repeat the
 backup drill on deployment hardware, and confirm that implemented fields still

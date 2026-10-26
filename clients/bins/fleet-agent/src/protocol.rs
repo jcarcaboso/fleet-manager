@@ -1,12 +1,16 @@
 use std::{error::Error, fmt, time::Duration};
 
-use reqwest::{Certificate, Client, Identity, Method, Response, StatusCode, Url, redirect::Policy};
+use reqwest::{
+    Certificate, Client, Identity, Method, Response, StatusCode, Url, header::CONTENT_TYPE,
+    redirect::Policy,
+};
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use uuid::Uuid;
 
 const MAX_JSON_BYTES: usize = 1024 * 1024;
 const MAX_BUNDLE_BYTES: usize = 16 * 1024 * 1024;
 const MAX_CLIPROXY_CREDENTIAL_BYTES: usize = 4096;
+const MAX_DETAIL_REQUEST_BYTES: usize = 16 * 1024;
 
 #[derive(Debug)]
 pub enum ProtocolError {
@@ -14,6 +18,7 @@ pub enum ProtocolError {
     Transport(reqwest::Error),
     Http(StatusCode),
     ResponseTooLarge { limit: usize },
+    RequestTooLarge { limit: usize },
     InvalidResponse(&'static str),
     Json,
 }
@@ -37,6 +42,9 @@ impl fmt::Display for ProtocolError {
             Self::Http(status) => write!(f, "Fleet server returned HTTP {status}"),
             Self::ResponseTooLarge { limit } => {
                 write!(f, "Fleet server response exceeded {limit} bytes")
+            }
+            Self::RequestTooLarge { limit } => {
+                write!(f, "Fleet server request exceeded {limit} bytes")
             }
             Self::InvalidResponse(message) => write!(f, "invalid Fleet server response: {message}"),
             Self::Json => write!(f, "invalid Fleet server JSON"),
@@ -258,6 +266,47 @@ impl Api {
         .await
     }
 
+    /// Sends the failure detail of an Attempt whose failed report the Server has
+    /// accepted. The response body is never read.
+    pub async fn attempt_detail(
+        &self,
+        attempt_id: Uuid,
+        detail: &AttemptDetail,
+    ) -> Result<(), ProtocolError> {
+        let body = serde_json::to_vec(detail).map_err(|_| ProtocolError::Json)?;
+        if body.len() > MAX_DETAIL_REQUEST_BYTES {
+            return Err(ProtocolError::RequestTooLarge {
+                limit: MAX_DETAIL_REQUEST_BYTES,
+            });
+        }
+        let response = self
+            .authenticated()?
+            .post(self.endpoint(&format!("agent/v1/attempts/{attempt_id}/detail"))?)
+            .header(CONTENT_TYPE, "application/json")
+            .body(body)
+            .send()
+            .await
+            .map_err(ProtocolError::Transport)?;
+        success(response)?;
+        Ok(())
+    }
+
+    /// A client for loopback tests that speaks plain HTTP to a mock Server.
+    #[cfg(test)]
+    pub fn for_loopback_test(base: &str) -> Self {
+        let client = Client::builder()
+            .no_proxy()
+            .redirect(Policy::none())
+            .timeout(Duration::from_secs(5))
+            .build()
+            .unwrap();
+        Self {
+            base: Url::parse(base).unwrap(),
+            anonymous: client.clone(),
+            authenticated: Some(client),
+        }
+    }
+
     pub async fn renew(&self, csr: &str) -> Result<RenewalResponse, ProtocolError> {
         self.json(
             self.authenticated()?,
@@ -454,6 +503,18 @@ pub enum ReportOutcome {
 pub struct RenameResponse {
     pub node_id: Uuid,
     pub alias: String,
+}
+
+/// Failure detail for one Attempt, as the Server's attempt-detail route
+/// expects it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AttemptDetail {
+    pub diagnostic: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub path: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub step: Option<fleet_reconcile::Step>,
 }
 
 #[derive(Serialize)]
