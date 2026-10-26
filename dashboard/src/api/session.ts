@@ -113,7 +113,18 @@ export function createSession(client: ApiClient): Session {
       await session.ensure();
     },
     async login(token) {
-      await client.post('login', { token }, { login: true });
+      try {
+        await client.post('login', { token }, { login: true });
+      } catch (error) {
+        /* The client already fetched a fresh token and retried once. A second `invalid_csrf` means the browser did not send the
+           antiforgery cookie back, which is what a page on another site gets (SameSite=Strict), so say that instead of
+           asking for a refresh that cannot help. */
+        if (error instanceof ApiError && error.code === 'invalid_csrf') {
+          client.clearCsrf();
+          throw new ApiError(SESSION_COOKIE_NOT_SENT, 400, 'session_cookie_not_sent');
+        }
+        throw error;
+      }
       client.clearCsrf();
       try {
         return signIn(await client.get<SessionInfo>('session'));

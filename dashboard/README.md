@@ -367,6 +367,7 @@ In `dev:mock` the switches are query parameters of the page you open (read once 
 | `states=1` | `states` | An acknowledged and a snoozed issue exist from the start. |
 | `offline=1` | `offline` | Every request fails like a network error. |
 | `cookie=0` | `cookie: false` | The browser never sends the session cookie: login succeeds, `GET session` after it is 401 (the "same site" message). |
+| `csrfcookie=0` | `csrfCookie: false` | The browser also drops the antiforgery cookie, as on another site: every mutation, login included, is 400 `invalid_csrf` and the client shows the "same site" message. |
 | `origin=<url>`, `dashboardorigin=<url>` | `origin`, `dashboardOrigin` | The Origin the browser sends, and the origin the Server allows: a mismatch makes non-GET requests 400 `invalid_origin`. |
 
 The mock's dataset is anchored at a fixed "now" and shifted to the real clock at start, so "5 min ago" holds. With fake timers

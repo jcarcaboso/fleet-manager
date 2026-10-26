@@ -57,6 +57,8 @@ export interface MockOptions {
   offline: boolean;
   /** `false`: the browser never sends the session cookie, so `GET session` after a login is 401 (`?cookie=0`): the "same site" message. */
   cookie: boolean;
+  /** `false`: the browser drops the antiforgery cookie too (a cross-site page), so every mutation, login included, is 400 `invalid_csrf` (`?csrfcookie=0`). */
+  csrfCookie: boolean;
   /** The Origin the browser sends with non-GET requests. */
   origin: string;
   /** `Fleet:DashboardOrigin`: the Origin that non-GET requests must carry, else 400 `invalid_origin` (`?dashboardorigin=https://other.example`). */
@@ -69,7 +71,7 @@ export function defaultMockOptions(): MockOptions {
   return {
     scope: 'admin', actor: 'joan', signedOut: false, empty: false, fail: null, forbid: false, slow: 0, pageSize: 100, diag: true, xss: false, agent: true,
     enroll: true, enrollLinkOnly: false, weirdAlias: false, delay: {}, lag: {}, hang: null, diskDelay: 7000, expiry: 0, commit: true, rollout: true, drift: true,
-    states: false, platform: 'macos', offline: false, cookie: true, origin: DEFAULT_ORIGIN, dashboardOrigin: '',
+    states: false, platform: 'macos', offline: false, cookie: true, csrfCookie: true, origin: DEFAULT_ORIGIN, dashboardOrigin: '',
   };
 }
 
@@ -92,7 +94,7 @@ export function parseMockOptions(search: string): MockOptions {
     diskDelay: +(p.get('diskdelay') || 7000), expiry: +(p.get('expiry') || 0),
     commit: p.get('commit') !== '0', rollout: !p.has('norollout'), drift: p.get('drift') !== '0', states: p.has('states'),
     platform: p.get('platform') === 'linux' ? 'linux' : 'macos',
-    offline: p.has('offline'), cookie: p.get('cookie') !== '0',
+    offline: p.has('offline'), cookie: p.get('cookie') !== '0', csrfCookie: p.get('csrfcookie') !== '0',
     origin: p.get('origin') || base.origin, dashboardOrigin: p.get('dashboardorigin') || '',
   };
 }

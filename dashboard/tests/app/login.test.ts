@@ -99,6 +99,14 @@ describe('login page', () => {
     expect(app.ctx.session.signedIn).toBe(false);
   });
 
+  it('shows the same-site explanation, not a refresh hint, when the antiforgery cookie is dropped', async () => {
+    app = await mountApp({ mock: { signedOut: true, csrfCookie: false } });
+    await submit(app, TOKEN);
+    expect(app.wrapper.find('#login-msg').text()).toBe('Your browser did not send the session cookie. The dashboard and the Server must be on the same site.');
+    expect(app.wrapper.find('#login-msg').text()).not.toContain('Refresh');
+    expect(app.router.currentRoute.value.name).toBe('login');
+  });
+
   it('names the Server address when it cannot be reached', async () => {
     app = await mountApp({ mock: { signedOut: true } });
     app.mock.options.offline = true;

@@ -687,7 +687,7 @@ export function createMockServer(overrides: Partial<MockOptions> = {}): MockServ
     const originOk = (): boolean => (headers.origin ?? '').toLowerCase() === (cfg.dashboardOrigin || cfg.origin).toLowerCase();
     if (path === 'login' && method === 'POST') {
       if (!originOk()) return err(400, 'invalid_origin');
-      if (headers['x-fleet-csrf'] !== state.csrf) return err(400, 'invalid_csrf');
+      if (!cfg.csrfCookie || headers['x-fleet-csrf'] !== state.csrf) return err(400, 'invalid_csrf');
       /* The Server rejects tokens shorter than 32 characters before it compares them. */
       if (!body || typeof body.token !== 'string' || body.token.length < 32 || body.token.length > 1024 || body.token.startsWith('bad')) return err(401, 'unauthorized', 'The Operator token was not accepted.');
       state.signedIn = true;
@@ -698,7 +698,7 @@ export function createMockServer(overrides: Partial<MockOptions> = {}): MockServ
     if (path === 'session') return json({ actor: state.actor, scope: state.scope });
     if (method !== 'GET') {
       if (!originOk()) return err(400, 'invalid_origin');
-      if (headers['x-fleet-csrf'] !== state.csrf) return err(400, 'invalid_csrf');
+      if (!cfg.csrfCookie || headers['x-fleet-csrf'] !== state.csrf) return err(400, 'invalid_csrf');
       if (path === 'logout') { state.signedIn = false; return json({ signedOut: true }); }
       if (cfg.forbid) return err(403, 'insufficient_scope', 'This credential cannot do that.');
     }

@@ -96,6 +96,15 @@ describe('login and logout', () => {
     expect(session.signedIn).toBe(false);
     expect(mock.state.signedIn).toBe(true);
   });
+  it('says the same thing when even the antiforgery cookie is dropped, as on another site', async () => {
+    const { mock, session } = mockApi({ signedOut: true, csrfCookie: false });
+    const error = await session.login(TOKEN).then(() => { throw new Error('expected a rejection'); }, (e: ApiError) => e);
+    expect(error).toMatchObject({ code: 'session_cookie_not_sent', silent: false });
+    expect(error.message).toBe('Your browser did not send the session cookie. The dashboard and the Server must be on the same site.');
+    expect(session.signedIn).toBe(false);
+    expect(mock.state.signedIn).toBe(false);
+    expect(mock.calls.filter(c => c.path === 'login')).toHaveLength(2);
+  });
   it('an unreachable Server during login is a network error that names the address', async () => {
     const { session } = mockApi({ signedOut: true, offline: true });
     await expect(session.login(TOKEN)).rejects.toMatchObject({ code: 'network_error', message: expect.stringContaining('https://mock.fleet.invalid') });
