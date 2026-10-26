@@ -40,12 +40,16 @@ public sealed record SourceWarning(
     string Message,
     IReadOnlyList<string> SourceLocations);
 
+/// <summary>The tip commit of an accepted source revision: first message line, author name (never the email) and committer date.</summary>
+public sealed record CommitMetadata(string? Subject, string? Author, DateTimeOffset? CommittedAt);
+
 public sealed record AcceptedSourceSnapshot(
     string SourceRevision,
     IReadOnlyList<SnapshotBundle> Bundles,
     IReadOnlyList<SnapshotTarget> Targets,
     IReadOnlyList<SourceWarning> Warnings,
-    DateTimeOffset ObservedAt);
+    DateTimeOffset ObservedAt,
+    CommitMetadata? Commit = null);
 
 public enum PublicationOutcome
 {
@@ -246,7 +250,8 @@ public sealed record NodeDetail(
     IReadOnlyList<NodeTargetStatus> Targets,
     TargetStateCounts Summary,
     NodeDisk? Disk = null,
-    NodeAgent? Agent = null);
+    NodeAgent? Agent = null,
+    IReadOnlyList<NodeDriftEvent>? Drift = null);
 
 public sealed record NodeAttemptStatus(
     AttemptId AttemptId,
@@ -291,6 +296,12 @@ public sealed record NodeAgentSummary(string Version, bool Outdated, NodeAgentOs
 /// <summary>The latest telemetry report of a Node. <c>ReportedAt</c> is when the Server received it; <c>LatestVersion</c> is the Server's own version.</summary>
 public sealed record NodeAgent(string Version, string LatestVersion, bool Outdated, NodeAgentOsDetail Os, string? Arch, string? Hostname,
     string? User, string? InstallMethod, string? ServiceManager, string? StateDirectory, DateTimeOffset ReportedAt);
+
+/// <summary>Files an Agent repaired in one Target because they were changed outside Fleet. <c>DetectedAt</c> is when the Server received the report.</summary>
+public sealed record NodeDriftEvent(string Target, IReadOnlyList<string> Files, DateTimeOffset DetectedAt);
+
+/// <summary>What an Agent reports after repairing drift: the assigned Target and its Target-relative file paths.</summary>
+public sealed record DriftReport(string Target, IReadOnlyList<string> Files);
 
 public sealed record CheckinBucket(DateTimeOffset Hour, int Polls);
 
@@ -341,6 +352,72 @@ public sealed record DesiredRevisionStatus(
     DesiredRevisionId DesiredRevisionId,
     string SourceRevision,
     DateTimeOffset AcceptedAt);
+
+/// <summary>An item of <c>GET desired-revisions</c>: a revision with the commit it was read from, or <c>null</c> for revisions accepted before commit metadata.</summary>
+public sealed record DesiredRevisionSummary(
+    DesiredRevisionId DesiredRevisionId,
+    string SourceRevision,
+    DateTimeOffset AcceptedAt,
+    CommitMetadata? Commit);
+
+public sealed record DesiredRevisionRef(DesiredRevisionId DesiredRevisionId, string SourceRevision);
+
+public sealed record SkillChanges(IReadOnlyList<string> Added, IReadOnlyList<string> Changed, IReadOnlyList<string> Removed);
+
+public sealed record TargetChanges(int Added, int Changed, int Removed, int Nodes);
+
+public sealed record DesiredRevisionDetail(
+    DesiredRevisionId DesiredRevisionId,
+    string SourceRevision,
+    DateTimeOffset AcceptedAt,
+    CommitMetadata? Commit,
+    DesiredRevisionRef? Previous,
+    RolloutId? RolloutId,
+    SkillChanges Skills,
+    TargetChanges Targets);
+
+public sealed record RolloutTargetProgress(string Name, ConvergenceState State, string? ErrorCode, DateTimeOffset UpdatedAt);
+
+public sealed record RolloutNodeProgress(
+    NodeId NodeId,
+    string NodeName,
+    ConvergenceState State,
+    DateTimeOffset? FirstAttemptAt,
+    DateTimeOffset? LastAttemptAt,
+    IReadOnlyList<RolloutTargetProgress> Targets);
+
+public sealed record RolloutDetail(
+    RolloutId RolloutId,
+    DesiredRevisionId DesiredRevisionId,
+    string SourceRevision,
+    DateTimeOffset CreatedAt,
+    TargetStateCounts Summary,
+    IReadOnlyList<RolloutNodeProgress> Nodes);
+
+public enum IssueStateAction { Acknowledge, Snooze, Reopen }
+
+public static class IssueStateNames
+{
+    public const string Open = "open";
+    public const string Acknowledged = "acknowledged";
+    public const string Snoozed = "snoozed";
+}
+
+/// <summary>The stored state of one issue. <c>Since</c> is the issue's <c>since</c> when it was acknowledged or snoozed.</summary>
+public sealed record IssueStateEntry(string IssueId, string State, DateTimeOffset? Since, DateTimeOffset? SnoozedUntil, string Actor, DateTimeOffset At);
+
+/// <summary>
+/// An Operator's change of an issue's state. <paramref name="Since"/> and <paramref name="NodeId"/> come from the current issue.
+/// <paramref name="CurrentIssueIds"/> lets the write drop stored states of issues that are gone.
+/// </summary>
+public sealed record ChangeIssueState(
+    string IssueId,
+    IssueStateAction Action,
+    int? Hours,
+    DateTimeOffset? Since,
+    Guid? NodeId,
+    string Actor,
+    IReadOnlyCollection<string> CurrentIssueIds);
 
 public sealed record RolloutStatus(
     RolloutId RolloutId,

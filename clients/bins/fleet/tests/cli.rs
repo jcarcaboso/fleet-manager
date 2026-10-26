@@ -198,7 +198,8 @@ fn doctor_exits_zero_for_warnings_and_for_a_clean_fleet() {
     assert_eq!(run.code, 0);
     assert_eq!(
         run.out(),
-        json!({"ok": true, "issues": [], "summary": {"errors": 0, "warnings": 0}})
+        json!({"ok": true, "counted": "open", "issues": [], "summary": {"errors": 0, "warnings": 0},
+               "states": {"open": 0, "acknowledged": 0, "snoozed": 0}})
     );
     assert_eq!(clean.lines().len(), 1);
 }
@@ -874,4 +875,352 @@ fn nodes_disk_refresh_reports_a_low_scope_and_a_revoked_node_with_their_exit_cod
     let run = fleet_at(&missing.url, &["nodes", "disk", "nobody"]);
     assert_eq!(run.code, 4);
     assert_eq!(run.err()["error"]["code"], "node_not_found");
+}
+
+const REVISION_ID: &str = "556066cd-079a-4216-a04a-2fe826b46463";
+const ROLLOUT_ID: &str = "48a13949-0f56-4250-a5cb-ca5686dd98fd";
+/// An issue ID has ':' in it, and the ID of a repository issue can hold a URL.
+const ISSUE_ID: &str = "cliproxy_refresh_failed:https://proxy.lab.internal/v1?a=b&c=d#frag";
+
+fn state_server(state: &'static str) -> Mock {
+    mock(move |line| {
+        if line.starts_with("POST /operator/v1/issues/state") {
+            (
+                200,
+                json!({"id": ISSUE_ID, "code": "cliproxy_refresh_failed", "severity": "error", "state": state}).to_string(),
+            )
+        } else {
+            (404, "{}".to_owned())
+        }
+    })
+}
+
+#[test]
+fn revisions_show_reads_one_desired_revision() {
+    let body = json!({
+        "desiredRevisionId": REVISION_ID, "sourceRevision": "a3f9c21", "acceptedAt": "2026-10-26T11:51:00Z",
+        "commit": {"subject": "Add incident-runbook skill", "author": "Joan", "committedAt": "2026-10-26T11:47:00Z"},
+        "previous": {"desiredRevisionId": ROLLOUT_ID, "sourceRevision": "9b14e07"}, "rolloutId": ROLLOUT_ID,
+        "skills": {"added": ["incident-runbook"], "changed": ["release-notes"], "removed": []},
+        "targets": {"added": 2, "changed": 5, "removed": 0, "nodes": 4}
+    });
+    let reply = body.to_string();
+    let server = mock(move |line| {
+        if line.starts_with(&format!(
+            "GET /operator/v1/desired-revisions/{REVISION_ID} "
+        )) {
+            (200, reply.clone())
+        } else {
+            (404, "{}".to_owned())
+        }
+    });
+    let run = fleet_at(&server.url, &["revisions", "show", REVISION_ID]);
+    assert_eq!(run.code, 0, "{}", run.stderr);
+    assert_eq!(run.out(), body);
+    assert_eq!(
+        server.lines(),
+        [format!(
+            "GET /operator/v1/desired-revisions/{REVISION_ID} HTTP/1.1"
+        )]
+    );
+}
+
+#[test]
+fn rollouts_show_reads_per_node_progress() {
+    let body = json!({
+        "rolloutId": ROLLOUT_ID, "desiredRevisionId": REVISION_ID, "sourceRevision": "a3f9c21", "createdAt": "2026-10-26T11:51:00Z",
+        "summary": {"pending": 0, "applying": 1, "succeeded": 30, "failed": 2, "superseded": 0},
+        "nodes": [{"nodeId": NODE_ID, "nodeName": "studio-mini", "state": "failed",
+                   "firstAttemptAt": "2026-10-26T11:52:00Z", "lastAttemptAt": "2026-10-26T11:55:00Z",
+                   "targets": [{"name": "skills", "state": "failed", "errorCode": "lock_failed", "updatedAt": "2026-10-26T11:55:00Z"}]}]
+    });
+    let reply = body.to_string();
+    let server = mock(move |line| {
+        if line.starts_with(&format!("GET /operator/v1/rollouts/{ROLLOUT_ID} ")) {
+            (200, reply.clone())
+        } else {
+            (404, "{}".to_owned())
+        }
+    });
+    let run = fleet_at(&server.url, &["rollouts", "show", ROLLOUT_ID]);
+    assert_eq!(run.code, 0, "{}", run.stderr);
+    assert_eq!(run.out(), body);
+    assert_eq!(
+        server.lines(),
+        [format!("GET /operator/v1/rollouts/{ROLLOUT_ID} HTTP/1.1")]
+    );
+    // The attempts listing is still its own command and path.
+    let attempts = mock(|_| (200, r#"{"items":[],"nextCursor":null}"#.to_owned()));
+    let run = fleet_at(&attempts.url, &["rollouts", "attempts", ROLLOUT_ID]);
+    assert_eq!(run.code, 0, "{}", run.stderr);
+    assert!(attempts.lines()[0].starts_with(&format!(
+        "GET /operator/v1/rollouts/{ROLLOUT_ID}/attempts?limit=100"
+    )));
+}
+
+#[test]
+fn revisions_and_rollouts_show_map_a_missing_id_to_exit_4() {
+    for (args, code) in [
+        (["revisions", "show", REVISION_ID], "revision_not_found"),
+        (["rollouts", "show", ROLLOUT_ID], "rollout_not_found"),
+    ] {
+        let server = mock(move |_| (404, json!({"code": code, "message": "x"}).to_string()));
+        let run = fleet_at(&server.url, &args);
+        assert_eq!(run.stdout, "");
+        assert_eq!(run.code, 4, "{args:?}");
+        assert_eq!(run.err()["error"]["code"], code);
+    }
+    // Not a UUID: refused before any request.
+    let server = mock(|_| (200, "{}".to_owned()));
+    for args in [
+        ["revisions", "show", "a3f9c21"],
+        ["rollouts", "show", "../nodes"],
+    ] {
+        let run = fleet_at(&server.url, &args);
+        assert_eq!(run.code, 2, "{args:?}");
+    }
+    assert!(server.lines().is_empty());
+}
+
+#[test]
+fn issues_ack_snooze_and_reopen_send_the_id_in_the_body() {
+    let server = state_server("acknowledged");
+    let run = fleet_at(&server.url, &["issues", "ack", ISSUE_ID]);
+    assert_eq!(run.code, 0, "{}", run.stderr);
+    assert_eq!(run.out()["state"], "acknowledged");
+    assert_eq!(run.out()["id"], ISSUE_ID);
+    let seen = server.requests();
+    assert_eq!(seen.len(), 1);
+    // The ID is never part of the URL.
+    assert_eq!(seen[0].line, "POST /operator/v1/issues/state HTTP/1.1");
+    assert_eq!(
+        serde_json::from_str::<Value>(&seen[0].body).unwrap(),
+        json!({"id": ISSUE_ID, "action": "acknowledge"})
+    );
+
+    let server = state_server("snoozed");
+    let run = fleet_at(
+        &server.url,
+        &["issues", "snooze", ISSUE_ID, "--hours", "168"],
+    );
+    assert_eq!(run.code, 0, "{}", run.stderr);
+    assert_eq!(server.lines(), ["POST /operator/v1/issues/state HTTP/1.1"]);
+    assert_eq!(
+        serde_json::from_str::<Value>(&server.requests()[0].body).unwrap(),
+        json!({"id": ISSUE_ID, "action": "snooze", "hours": 168})
+    );
+
+    let server = state_server("open");
+    let run = fleet_at(&server.url, &["issues", "reopen", ISSUE_ID]);
+    assert_eq!(run.code, 0, "{}", run.stderr);
+    assert_eq!(run.out()["state"], "open");
+    let body: Value = serde_json::from_str(&server.requests()[0].body).unwrap();
+    assert_eq!(body, json!({"id": ISSUE_ID, "action": "reopen"}));
+    assert!(body.get("hours").is_none(), "hours is only for snooze");
+}
+
+#[test]
+fn issue_state_commands_refuse_bad_input_before_any_request() {
+    let server = state_server("open");
+    for args in [
+        vec!["issues", "snooze", ISSUE_ID],
+        vec!["issues", "snooze", ISSUE_ID, "--hours", "0"],
+        vec!["issues", "snooze", ISSUE_ID, "--hours", "169"],
+        vec!["issues", "snooze", ISSUE_ID, "--hours", "1.5"],
+        vec!["issues", "snooze", ISSUE_ID, "--hours", "-1"],
+        vec!["issues", "ack"],
+        vec!["issues", "ack", ISSUE_ID, "--hours", "4"],
+        vec!["issues", "reopen", ISSUE_ID, "--hours", "4"],
+        vec!["issues", "reopen"],
+    ] {
+        let run = fleet_at(&server.url, &args);
+        assert_eq!(run.code, 2, "{args:?}: {}", run.stderr);
+        assert_eq!(run.stdout, "");
+    }
+    let blank = fleet_at(&server.url, &["issues", "ack", "  "]);
+    assert_eq!(blank.code, 2);
+    assert_eq!(blank.err()["error"]["code"], "invalid_argument");
+    assert!(server.lines().is_empty(), "{:?}", server.lines());
+}
+
+#[test]
+fn issue_state_errors_use_the_servers_codes_and_exit_codes() {
+    let denied = mock(|_| {
+        (
+            403,
+            json!({"code": "insufficient_scope", "message": "Server wording"}).to_string(),
+        )
+    });
+    let run = fleet_at(&denied.url, &["issues", "ack", ISSUE_ID]);
+    assert_eq!(run.code, 3);
+    assert_eq!(run.err()["error"]["code"], "insufficient_scope");
+    assert!(!run.stderr.contains("Server wording"));
+    let gone = mock(|_| {
+        (
+            404,
+            json!({"code": "issue_not_found", "message": "x"}).to_string(),
+        )
+    });
+    let run = fleet_at(&gone.url, &["issues", "snooze", ISSUE_ID, "--hours", "4"]);
+    assert_eq!(run.code, 4);
+    assert_eq!(run.err()["error"]["code"], "issue_not_found");
+    let invalid = mock(|_| {
+        (
+            400,
+            json!({"code": "invalid_request", "message": "x"}).to_string(),
+        )
+    });
+    let run = fleet_at(&invalid.url, &["issues", "reopen", ISSUE_ID]);
+    assert_eq!(run.code, 6);
+    assert_eq!(run.err()["error"]["code"], "invalid_request");
+}
+
+fn issues_with_states() -> Mock {
+    mock(|line| {
+        if line.starts_with("GET /operator/v1/issues") {
+            (200, json!({"items": [
+                {"id": "assignment_failed:n:skills", "code": "assignment_failed", "severity": "error", "errorCode": "lock_failed",
+                 "nodeName": "studio-mini", "target": "skills", "state": "open", "stateBy": null, "stateAt": null, "snoozedUntil": null},
+                {"id": "cliproxy_refresh_failed:https://p", "code": "cliproxy_refresh_failed", "severity": "error", "errorCode": null,
+                 "state": "acknowledged", "stateBy": "joan", "stateAt": "2026-10-26T10:00:00Z", "snoozedUntil": null},
+                {"id": "node_not_contacting:n", "code": "node_not_contacting", "severity": "warning", "errorCode": null,
+                 "nodeName": "kitchen-mini", "state": "snoozed", "stateBy": "ana", "stateAt": "2026-10-26T10:05:00Z",
+                 "snoozedUntil": "2026-10-26T14:05:00Z"},
+                {"id": "agent_outdated:n", "code": "agent_outdated", "severity": "warning", "errorCode": null, "state": "open",
+                 "stateBy": null, "stateAt": null, "snoozedUntil": null}
+            ]}).to_string())
+        } else if line.starts_with("GET /operator/v1/errors") {
+            (200, json!({"items": [
+                {"code": "lock_failed", "source": "agent", "title": "Locked", "explanation": "e", "fix": ["wait"]}
+            ]}).to_string())
+        } else {
+            (404, "{}".to_owned())
+        }
+    })
+}
+
+#[test]
+fn doctor_counts_only_open_issues_unless_all_and_shows_every_state() {
+    let server = issues_with_states();
+    let run = fleet_at(&server.url, &["doctor"]);
+    assert_eq!(run.code, 10, "{}", run.stderr);
+    let doc = run.out();
+    assert_eq!(doc["counted"], "open");
+    assert_eq!(doc["summary"], json!({"errors": 1, "warnings": 1}));
+    assert_eq!(
+        doc["states"],
+        json!({"open": 2, "acknowledged": 1, "snoozed": 1})
+    );
+    let states: Vec<&str> = doc["issues"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|issue| issue["state"].as_str().unwrap())
+        .collect();
+    assert_eq!(states, ["open", "acknowledged", "snoozed", "open"]);
+    assert_eq!(doc["issues"][1]["stateBy"], "joan");
+    assert_eq!(doc["issues"][2]["snoozedUntil"], "2026-10-26T14:05:00Z");
+
+    let run = fleet_at(&server.url, &["doctor", "--all"]);
+    assert_eq!(run.code, 10, "{}", run.stderr);
+    let doc = run.out();
+    assert_eq!(doc["counted"], "all");
+    assert_eq!(doc["summary"], json!({"errors": 2, "warnings": 2}));
+}
+
+#[test]
+fn doctor_exits_zero_when_every_error_is_acknowledged_or_snoozed() {
+    let server = mock(|line| {
+        if line.starts_with("GET /operator/v1/issues") {
+            (200, json!({"items": [
+                {"id": "a", "code": "assignment_failed", "severity": "error", "errorCode": null, "state": "acknowledged",
+                 "stateBy": "joan", "stateAt": "2026-10-26T10:00:00Z", "snoozedUntil": null},
+                {"id": "b", "code": "disk_space_critical", "severity": "error", "errorCode": null, "state": "snoozed",
+                 "stateBy": "ana", "stateAt": "2026-10-26T10:05:00Z", "snoozedUntil": "2026-10-26T14:05:00Z"}
+            ]}).to_string())
+        } else {
+            (200, json!({"items": []}).to_string())
+        }
+    });
+    let run = fleet_at(&server.url, &["doctor"]);
+    assert_eq!(run.code, 0, "{}", run.stderr);
+    assert_eq!(run.out()["ok"], true);
+    assert_eq!(run.out()["summary"], json!({"errors": 0, "warnings": 0}));
+    assert_eq!(run.out()["issues"].as_array().unwrap().len(), 2);
+    // --all counts them again.
+    let run = fleet_at(&server.url, &["doctor", "--all"]);
+    assert_eq!(run.code, 10);
+    assert_eq!(run.out()["ok"], false);
+}
+
+#[test]
+fn doctor_treats_a_server_without_issue_state_as_all_open() {
+    let server = mock(|line| {
+        if line.starts_with("GET /operator/v1/issues") {
+            (200, json!({"items": [{"id": "a", "code": "assignment_failed", "severity": "error", "errorCode": null}]}).to_string())
+        } else {
+            (200, json!({"items": []}).to_string())
+        }
+    });
+    let run = fleet_at(&server.url, &["doctor"]);
+    assert_eq!(run.code, 10, "{}", run.stderr);
+    assert_eq!(run.out()["issues"][0]["state"], "open");
+    assert_eq!(run.out()["summary"], json!({"errors": 1, "warnings": 0}));
+}
+
+#[test]
+fn issues_list_passes_the_state_fields_through() {
+    let server = issues_with_states();
+    let run = fleet_at(&server.url, &["issues", "list"]);
+    assert_eq!(run.code, 0, "{}", run.stderr);
+    assert_eq!(run.out()["items"][1]["state"], "acknowledged");
+    assert_eq!(
+        run.out()["items"][2]["snoozedUntil"],
+        "2026-10-26T14:05:00Z"
+    );
+}
+
+#[test]
+fn help_for_the_new_commands_has_examples_and_names_the_scope() {
+    for (args, needles) in [
+        (
+            vec!["revisions", "show", "--help"],
+            vec!["fleet revisions show", "previous", "targets", "null"],
+        ),
+        (
+            vec!["rollouts", "show", "--help"],
+            vec!["fleet rollouts show", "firstAttemptAt", "errorCode"],
+        ),
+        (
+            vec!["issues", "ack", "--help"],
+            vec![
+                "fleet issues ack",
+                "scope operate",
+                "human operator's agreement",
+                "since",
+            ],
+        ),
+        (
+            vec!["issues", "snooze", "--help"],
+            vec!["fleet issues snooze", "--hours 4", "1 to 168", "temporary"],
+        ),
+        (
+            vec!["issues", "reopen", "--help"],
+            vec!["fleet issues reopen", "scope operate"],
+        ),
+        (
+            vec!["doctor", "--help"],
+            vec!["fleet doctor --all", "acknowledged", "exit code"],
+        ),
+    ] {
+        let run = fleet_at("http://127.0.0.1:9", &args);
+        assert_eq!(run.code, 0, "{args:?}: {}", run.stderr);
+        for needle in needles {
+            assert!(
+                run.stdout.contains(needle),
+                "{args:?} lacks {needle:?}:\n{}",
+                run.stdout
+            );
+        }
+    }
 }

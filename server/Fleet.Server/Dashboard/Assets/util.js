@@ -103,6 +103,8 @@
     activity: '<path d="M3 12h4l3-8 4 16 3-8h4"/>',
     server: '<rect x="3" y="4" width="18" height="7" rx="2"/><rect x="3" y="13" width="18" height="7" rx="2"/><path d="M7 7.5h.01M7 16.5h.01"/>',
     spark: '<path d="M12 3l1.8 5.2L19 10l-5.2 1.8L12 17l-1.8-5.2L5 10l5.2-1.8z"/><path d="M18.5 15.5l.7 1.8 1.8.7-1.8.7-.7 1.8-.7-1.8-1.8-.7 1.8-.7z"/>',
+    snooze: '<circle cx="12" cy="13" r="8"/><path d="M9.5 10h5l-5 6h5M5 3L2 6M19 3l3 3"/>',
+    ack: '<path d="M20 6L9 17l-5-5"/>',
     arrowR: '<path d="M5 12h14M13 6l6 6-6 6"/>',
     rocket: '<path d="M12 15l-3-3c1.5-5 5-8.5 11-9-0.5 6-4 9.5-8 12z"/><path d="M9 12H5l2.5-3.5H11M12 15v4l3.5-2.5V13"/><path d="M6.5 16.5c-1.5.5-2.5 2-2.5 3.5 1.5 0 3-1 3.5-2.5"/>',
     retry: '<path d="M4 12a8 8 0 1 0 2.3-5.7L4 8.5"/><path d="M4 3.5v5h5"/>',

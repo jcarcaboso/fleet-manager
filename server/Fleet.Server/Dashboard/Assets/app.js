@@ -36,11 +36,11 @@
     const active = Fleet.nav.current?.name === 'add' ? 'nodes' : Fleet.nav.current?.name;
     const errs = model.summary.errors;
     nav.innerHTML = NAV.map(([k, l]) => {
-      const badge = k === 'problems' && errs ? `<span class="nav-badge" aria-label="${errs} errors">${errs}</span>` : k === 'models' && model.summary.modelsBad ? `<span class="nav-g" aria-label="A catalog is failing">${glyph('warning', 'bang')}</span>` : '';
+      const badge = k === 'problems' && errs ? `<span class="nav-badge" aria-label="${errs} open errors">${errs}</span>` : k === 'models' && model.summary.modelsBad ? `<span class="nav-g" aria-label="A catalog is failing">${glyph('warning', 'bang')}</span>` : '';
       return `<a href="#/${k}" ${k === active ? 'aria-current="page"' : ''}>${l}${badge}</a>`;
     }).join('');
     const scope = api.scopeLabel();
-    me.innerHTML = `<span class="scope-chip" data-tip="${esc(`Scope: ${scope}|${scope === 'admin' ? 'Can change anything.' : scope === 'operate' ? 'Can retry, sync and refresh. Cannot enroll or revoke.' : 'Can view everything. Cannot change anything.'}`)}">${ic(scope === 'read' ? 'lock' : 'shield')}${esc(scope)}</span>
+    me.innerHTML = `<span class="scope-chip" data-tip="${esc(`Scope: ${scope}|${scope === 'admin' ? 'Can change anything.' : scope === 'operate' ? 'Can retry, sync, refresh and acknowledge or snooze problems. Cannot enroll or revoke.' : 'Can view everything. Cannot change anything.'}`)}">${ic(scope === 'read' ? 'lock' : 'shield')}${esc(scope)}</span>
       ${u.avatar(api.session.actor, 'av-me')}<span class="me-name">${esc(api.session.actor)}</span>
       <button type="button" class="btn btn-ghost btn-sm" data-act="logout">${ic('logout')}Sign out</button>`;
   };
@@ -97,7 +97,8 @@
     nodes: p => p[1] ? { view: Fleet.views.node, params: p.slice(1) } : { view: Fleet.views.gallery, params: [] },
     add: () => ({ view: Fleet.views.gallery, params: [] }),
     problems: () => ({ view: Fleet.views.problems, params: [] }),
-    deployments: p => ({ view: Fleet.views.deployments, params: p.slice(1) }),
+    /* #/deployments/<revisionId> opens one revision; #/deployments/<short SHA> still scrolls the list to that revision. */
+    deployments: p => ({ view: u.isUuid(p[1]) ? Fleet.views.revision : Fleet.views.deployments, params: p.slice(1) }),
     repository: () => ({ view: Fleet.views.repository, params: [] }),
     models: () => ({ view: Fleet.views.models, params: [] }),
     enrollment: () => ({ view: Fleet.views.enrollment, params: [] }),
@@ -112,7 +113,7 @@
     const a = document.activeElement, view = el('view');
     if (!a || a === document.body || !view.contains(a)) return null;
     if (a.id) return '#' + CSS.escape(a.id);
-    const keys = ['data-act', 'data-v', 'data-i', 'data-flag', 'data-fam', 'data-sel-model', 'data-id', 'data-target'].filter(k => a.hasAttribute(k));
+    const keys = ['data-act', 'data-v', 'data-i', 'data-flag', 'data-fam', 'data-sel-model', 'data-id', 'data-op', 'data-hours', 'data-target'].filter(k => a.hasAttribute(k));
     return keys.length ? keys.map(k => `[${k}="${CSS.escape(a.getAttribute(k))}"]`).join('') : null;
   };
   const place = (html, keepPosition) => {

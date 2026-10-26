@@ -15,7 +15,7 @@ public sealed class CliProxyCatalog(IHttpClientFactory clients, IOptions<FleetOp
     private const int MaximumBytes = 4 * 1024 * 1024;
     private readonly SemaphoreSlim gate = new(1);
     private sealed record Entry(IReadOnlyList<CliProxyModel>? Models, DateTimeOffset? LastSuccess,
-        DateTimeOffset NextRefresh, string Outcome, string? ErrorCode);
+        DateTimeOffset NextRefresh, string Outcome, string? ErrorCode, DateTimeOffset? FailureSince = null);
     private readonly ConcurrentDictionary<string, Entry> entries = new(StringComparer.Ordinal);
 
     // Agent reads never contact the upstream API or wait for an in-progress refresh.
@@ -27,6 +27,9 @@ public sealed class CliProxyCatalog(IHttpClientFactory clients, IOptions<FleetOp
     }
 
     public IReadOnlyList<string> BaseUrls() => entries.Keys.Order(StringComparer.Ordinal).ToArray();
+
+    // Stable throughout one outage, cleared by recovery. A later outage must not inherit its acknowledgement.
+    public DateTimeOffset? FailureSince(string baseUrl) => entries.TryGetValue(baseUrl, out var entry) ? entry.FailureSince : null;
 
     public object Status() => new
     {
@@ -87,6 +90,7 @@ public sealed class CliProxyCatalog(IHttpClientFactory clients, IOptions<FleetOp
                     // Keep the last valid catalog during an upstream outage; never expose credentials or bodies.
                     next = next with
                     {
+                        FailureSince = previous?.FailureSince ?? clock.GetUtcNow(),
                         ErrorCode = error switch
                         {
                             HttpRequestException { StatusCode: { } status } => $"upstream_http_{(int)status}",

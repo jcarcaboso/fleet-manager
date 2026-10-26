@@ -1042,6 +1042,60 @@ body.app h1[tabindex="-1"]:focus,body.app h2[tabindex="-1"]:focus,body.app #main
   .toasts{bottom:12px}
 }
 
+/* ===== phase 4: deployments, drift and issue state ===== */
+.tile-txt>.tile-commit{color:var(--ink-2);font-weight:600}
+.dep-more{margin-top:12px}
+.dep-prev{display:flex;align-items:center;gap:8px;color:var(--ink-2);margin-top:14px}
+.dep-prev .ic{color:var(--muted);flex:none}
+.changes-block{display:flex;flex-direction:column;gap:10px}
+.chg-targets b{font-variant-numeric:tabular-nums}
+.chg .chg-s{flex:none}
+.hist-open{margin:0}
+.hist-meta .av{vertical-align:middle}
+.dep-meta .av{flex:none}
+h1.dep-title{margin-top:8px}
+/* acknowledged and snoozed problems */
+.tag--state{background:var(--neutral-bg);color:var(--ink-2)}
+.prob-state .ic{color:var(--muted);flex:none}
+.prob-state--snoozed{background:var(--info-bg);box-shadow:inset 0 0 0 1px rgba(53,119,230,.28)}
+.toolbar--states{gap:10px 22px}
+.snooze{display:inline-flex;align-items:center;gap:2px;padding:2px 4px 2px 11px;border-radius:999px;background:var(--surface-2);box-shadow:inset 0 0 0 1px var(--line)}
+.snooze-l{display:inline-flex;align-items:center;gap:6px;font-size:12.5px;font-weight:650;color:var(--muted);margin-right:2px}
+.snooze-l .ic{width:15px;height:15px}
+.snooze .btn{height:26px;padding:0 9px;font-size:12.5px;border-radius:999px}
+/* drift in the activity timeline */
+.tl-files{margin-top:6px}
+.tl-files>summary{display:inline-flex;align-items:center;gap:6px;cursor:pointer;list-style:none;font-size:12.5px;font-weight:650;color:var(--accent-ink)}
+.tl-files>summary::-webkit-details-marker{display:none}
+.tl-files>summary .ic{width:14px;height:14px}
+.tl-files[open]>summary .sumchev{transform:rotate(180deg)}
+.tl-filelist{list-style:none;margin:6px 0 0;padding:0;display:flex;flex-direction:column;gap:4px}
+.tl-filelist li{font-size:12px}
+.tl-filelist code{word-break:break-all}
+/* per-machine rollout progress */
+.rv-legend,.rv-row{display:grid;grid-template-columns:200px 130px 190px minmax(0,1fr);gap:16px;align-items:center}
+.rv-legend{padding:0 12px 8px;font-size:11px;color:var(--muted);font-weight:700;text-transform:uppercase;letter-spacing:.06em}
+.rv-list{list-style:none;margin:0;padding:0}
+.rv-row{padding:10px 12px;border-top:1px solid var(--line);border-radius:12px}
+.rv-row:hover{background:var(--surface-2)}
+.rv-node{color:var(--ink);min-width:0;overflow-wrap:anywhere}
+.rv-node b{font-weight:680}
+.rv-state{display:inline-flex;align-items:center;gap:7px;font-size:13px;font-weight:650}
+.rv-row--failed .rv-state{color:var(--critical-ink,var(--ink))}
+.rv-times{display:flex;flex-direction:column;gap:2px;font-size:12.5px}
+.rv-t{white-space:nowrap}
+.rv-targets{list-style:none;margin:0;padding:0;display:flex;flex-wrap:wrap;gap:6px}
+.tchip{display:inline-flex;align-items:center;gap:6px;min-height:26px;padding:2px 10px 2px 6px;border-radius:8px;background:#fff;box-shadow:inset 0 0 0 1px var(--line);font-size:12.5px;color:var(--ink)}
+.tchip .g{width:15px;height:15px;flex:none}
+.tchip code{font-size:11.5px;overflow-wrap:anywhere}
+a.tchip--error{background:var(--critical-bg);box-shadow:inset 0 0 0 1px rgba(208,59,59,.35);font-weight:600}
+a.tchip--error:hover{text-decoration:none;box-shadow:inset 0 0 0 1px var(--critical)}
+@media (max-width:1000px){
+  .rv-legend{display:none}
+  .rv-row{grid-template-columns:minmax(0,1fr) auto;gap:8px 14px}
+  .rv-times,.rv-targets{grid-column:1/-1}
+}
+
 /* ===== enroll page (enroll.html), unchanged markup; scoped so it never touches the dashboard ===== */
 body:not(.app){margin:0;font-family:system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;color:#172c30;background:#f4f6f3;line-height:1.55;font-synthesis:none}
 body:not(.app) header{display:flex;align-items:center;gap:1.3rem;padding:1.2rem max(5vw,1rem);background:#163c3a;color:#fff;font-weight:700}

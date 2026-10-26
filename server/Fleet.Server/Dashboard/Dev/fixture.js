@@ -10,9 +10,11 @@
    lag=<text>:<ms>[,...] (a POST whose path contains <text> does its work at once but answers <ms> later: used to complete a mutation after the user has moved on),
    hang=<path prefix> (GET routes under the prefix never answer; only the caller's abort ends them),
    agent=0 (no Node carries the agent property, like a Server before phase 3),
-   diskdelay=<ms> (a refreshed Agent answers this long after POST nodes/{node}/disk-usage/refresh; default 7000; agents before 0.9.0 and offline machines never answer).
+   diskdelay=<ms> (a refreshed Agent answers this long after POST nodes/{node}/disk-usage/refresh; default 7000; agents before 0.9.0 and offline machines never answer),
+   commit=0 (no revision carries commit metadata, like a Server before phase 4; otherwise only the oldest revision has commit: null), norollout=1 (desired-revisions/{id}.rolloutId is null),
+   drift=0 (GET nodes/{node} has no drift property), states=1 (two issues start acknowledged and snoozed, so the Problems tabs have content; with xss=1 the acknowledging Operator is hostile).
    Mutations follow the Server: PostgresFleetCoordinator and Transport/OperatorApi.cs, including their order of checks and their error codes.
-   window.__FIXTURE.calls records every call with settled (the response was delivered or the call was aborted) and aborted (the caller's signal fired). */
+   window.__FIXTURE.calls records every call (with its JSON body) with settled (the response was delivered or the call was aborted) and aborted (the caller's signal fired). */
 (function () {
   const F = window.FLEET;
   if (!F) throw new Error('fixture.js needs artifacts/dashboard-prototypes/data.js loaded first');
@@ -22,6 +24,7 @@
     fail: params.get('fail'), forbid: params.has('forbid'), slow: +(params.get('slow') || 0), pageSize: +(params.get('pagesize') || 100),
     diag: params.get('diag') !== '0', xss: params.has('xss'), noAgent: params.get('agent') === '0', enroll: params.get('enroll') !== '0', consumeOnly: params.get('enroll') === 'link', weirdAlias: params.has('weirdalias'),
     delay: Object.fromEntries((params.get('delay') || '').split(',').filter(Boolean).map(x => { const i = x.lastIndexOf(':'); return [x.slice(0, i), +x.slice(i + 1)]; })),
+    commit: params.get('commit') !== '0', noRollout: params.has('norollout'), noDrift: params.get('drift') === '0', states: params.has('states'),
     expiry: +(params.get('expiry') || 0), hang: params.get('hang'), diskDelay: +(params.get('diskdelay') || 7000),
     lag: Object.fromEntries((params.get('lag') || '').split(',').filter(Boolean).map(x => { const i = x.lastIndexOf(':'); return [x.slice(0, i), +x.slice(i + 1)]; })),
   };
@@ -44,6 +47,7 @@
   const audit = cfg.empty ? [] : JSON.parse(JSON.stringify(F.audit)).map(e => ({ ...e }));
   const scans = JSON.parse(JSON.stringify(F.source.scans));
   const catalogs = JSON.parse(JSON.stringify(F.cliproxy.catalogs));
+  catalogs.forEach(c => { c._failureSince = c.errorCode ? T(c.lastAttemptAt) : null; });
   const policies = new Map();
   const targetAttempts = new Map(); // `${nodeId}:${target}` -> extra attempts created by retry
 
@@ -208,10 +212,96 @@
     return {
       nodeId: n.id, name: n.alias, platform: n.platform, enrolledAt: tm(n, n.enrolledAt), lastContactAt: tm(n, n.lastContactAt), freshness: listItem(n).freshness, revoked: !!n.revokedAt, revokedAt: tm(n, n.revokedAt),
       credential: { credentialId: guid('cred:' + n.id), notBefore: tm(n, n.credential.notBefore), notAfter: tm(n, n.credential.notAfter), revokedAt: tm(n, n.credential.revokedAt), revokedBy: n.revokedAt ? n.revokedBy : null, renewals: n.credential.renewals },
-      targets, summary: counts(n), disk: detailDisk(n), ...(cfg.noAgent ? {} : { agent: detailAgent(n) }),
+      targets, summary: counts(n), disk: detailDisk(n), ...(cfg.noAgent ? {} : { agent: detailAgent(n) }), ...(cfg.noDrift ? {} : { drift: (n._drift || []).map(d => ({ target: d.target, files: d.files.slice(), detectedAt: d.detectedAt })) }),
     };
   };
   const findNode = key => nodes.find(n => n.id === key) || nodes.find(n => n.alias === key);
+
+  /* ---------------------------------------------------------------- Phase 4: deployments, drift and issue state (docs/technical-design/operator-api.md, "Phase 4")
+     Commit metadata comes from data.js (message, author); committedAt is a few minutes before acceptance. The oldest revision predates phase 4 and has commit: null.
+     The revision diffs and drift events are the fixture's own: data.js has no contract-shaped equivalent. */
+  const revsNewest = () => F.revisions.slice().sort((a, b) => Date.parse(b.acceptedAt) - Date.parse(a.acceptedAt));
+  const XSS_COMMIT = { subject: '<img src=x onerror=alert(1)> "quoted" & <script>alert(9)</script>', author: '"><svg onload=alert(10)>' };
+  const commitOf = r => {
+    if (!cfg.commit || r === revsNewest().at(-1)) return null;
+    const c = cfg.xss && r === revsNewest()[0] ? XSS_COMMIT : { subject: r.message, author: r.author };
+    return { subject: c.subject, author: c.author, committedAt: new Date(Date.parse(T(r.acceptedAt)) - 4 * 60e3).toISOString() };
+  };
+  /* sha -> what the revision changed against the one before it. The oldest has no predecessor, so it only adds. */
+  const DIFFS = {
+    a3f9c21: { skills: { added: ['postgres-migrations'], changed: ['code-review'], removed: [] }, targets: { added: 2, changed: 5, removed: 0, nodes: 4 } },
+    '9b14e07': { skills: { added: [], changed: [], removed: [] }, targets: { added: 0, changed: 3, removed: 0, nodes: 3 } },
+    '51c0d8a': { skills: { added: ['browser-smoke', 'release-notes'], changed: [], removed: [] }, targets: { added: 0, changed: 12, removed: 0, nodes: 12 } },
+    e2277fb: { skills: { added: [], changed: ['commit-message'], removed: ['jira-triage'] }, targets: { added: 0, changed: 6, removed: 0, nodes: 6 } },
+    c08d4be: { skills: { added: ['api-design', 'code-review', 'commit-message', 'dotnet-testing', 'writing-docs'], changed: [], removed: [] }, targets: { added: 6, changed: 0, removed: 0, nodes: 3 } },
+  };
+  const rolloutOf = r => F.rollouts.find(x => x.revisionId === r.id);
+  const revisionOut = r => {
+    const sorted = revsNewest(), i = sorted.indexOf(r), prev = sorted[i + 1], d = DIFFS[r.shortSha] || { skills: { added: [], changed: [], removed: [] }, targets: { added: 0, changed: 0, removed: 0, nodes: 0 } };
+    const skills = { added: d.skills.added.slice(), changed: d.skills.changed.slice(), removed: d.skills.removed.slice() };
+    if (cfg.xss && i === 0) skills.changed.push('<img src=x onerror=alert(11)>');
+    return { desiredRevisionId: r.id, sourceRevision: r.sourceRevision, acceptedAt: T(r.acceptedAt), commit: commitOf(r),
+      previous: prev ? { desiredRevisionId: prev.id, sourceRevision: prev.sourceRevision } : null, rolloutId: cfg.noRollout ? null : rolloutOf(r)?.id || null,
+      skills: { added: skills.added.sort(), changed: skills.changed.sort(), removed: skills.removed.sort() }, targets: { ...d.targets } };
+  };
+  /* The per-machine view of a rollout. The newest rollout covers every live Node and Target in its current state. The second is derived from the Attempts
+     each Target made for it (a succeeded Attempt of a revision that is no longer desired reads as superseded). The older ones have no Attempts in data.js, so their
+     Assignments are spread over the Nodes from the rollout's counts. */
+  const STATE_ORDER = ['failed', 'applying', 'pending', 'succeeded', 'superseded'];
+  const worstState = states => STATE_ORDER.find(x => states.includes(x)) || 'succeeded';
+  const TARGET_POOL = ['skills', 'agent-file/claude', 'agent-file/codex', 'ai-client/claude', 'ai-client/codex', 'agent-file/opencode', 'ai-client/opencode'];
+  const rolloutOut = (r, idx) => {
+    const rev = F.revisions.find(x => x.id === r.revisionId), live = nodes.filter(n => !n.revokedAt);
+    let rows;
+    if (idx < 2) {
+      rows = live.map(n => {
+        const mine = allAttempts(n).filter(a => a.rolloutId === r.id);
+        const targets = n.targets.map(t => {
+          const ta = allAttempts(n).filter(a => a.targetName === t.name), last = mine.find(a => a.targetName === t.name);
+          if (idx === 0) return { name: t.name, state: t.state, errorCode: t.state === 'failed' ? (ta.find(a => a.errorCode) || {}).errorCode ?? null : null, updatedAt: ta[0]?.updatedAt || tm(n, t.updatedAt) || nowIso() };
+          if (!last) return null;
+          const state = last.state === 'succeeded' && t.desiredRevision !== rev.shortSha ? 'superseded' : last.state;
+          return { name: t.name, state, errorCode: last.errorCode || null, updatedAt: last.updatedAt };
+        }).filter(Boolean);
+        return { n, targets, times: mine.map(a => Date.parse(a.updatedAt)).filter(Number.isFinite) };
+      }).filter(x => x.targets.length);
+    } else {
+      const names = r.nodeCount === 3 ? ['build-runner-01', 'build-runner-02', 'build-runner-03'] : live.map(n => n.alias).sort().slice(0, r.nodeCount);
+      const list = names.map(name => ({ n: nodes.find(x => x.alias === name), targets: [], times: [] }));
+      STATE_ORDER.flatMap(k => Array(r.assignments[k] || 0).fill(k)).forEach((state, i) => {
+        const row = list[i % list.length];
+        row.targets.push({ name: TARGET_POOL[Math.floor(i / list.length) % TARGET_POOL.length], state, errorCode: null, updatedAt: T(r.createdAt) });
+      });
+      list.forEach((row, k) => { if (row.targets.some(t => t.state !== 'pending')) row.times = [Date.parse(T(r.createdAt)) + (k + 1) * 60e3, Date.parse(T(r.createdAt)) + (k + 6) * 120e3]; });
+      rows = list.filter(x => x.n && x.targets.length);
+    }
+    rows.sort((a, b) => a.n.alias.localeCompare(b.n.alias));
+    const summary = { pending: 0, applying: 0, succeeded: 0, failed: 0, superseded: 0 };
+    rows.forEach(x => x.targets.forEach(t => { summary[t.state]++; }));
+    return { rolloutId: r.id, desiredRevisionId: r.revisionId, sourceRevision: rev.sourceRevision, createdAt: T(r.createdAt), summary,
+      nodes: rows.slice(0, 500).map(x => ({ nodeId: x.n.id, nodeName: x.n.alias, state: worstState(x.targets.map(t => t.state)),
+        firstAttemptAt: x.times.length ? new Date(Math.min(...x.times)).toISOString() : null, lastAttemptAt: x.times.length ? new Date(Math.max(...x.times)).toISOString() : null, targets: x.targets })) };
+  };
+
+  /* Drift: the Agent repaired files changed outside Fleet. node alias -> [[minutes ago, target, files]], newest first. The Server keeps the 20 newest per Node. */
+  const XSS_DRIFT_FILE = '"><script>alert(12)</script>/<img src=x onerror=alert(13)>.md';
+  const DRIFT = {
+    'homelab-nuc': [[47, 'skills', ['.agents/skills/incident-runbook/SKILL.md']], [30 * 60, 'skills', ['.agents/skills/incident-runbook/SKILL.md', '.agents/skills/homelab-ops/compose.md']]],
+    'studio-mini': [[6 * 60, 'skills', ['.agents/skills/code-review/checklist.md']]],
+  };
+  nodes.forEach(n => {
+    const d = !cfg.empty && !n.revokedAt && DRIFT[n.alias];
+    n._drift = d ? d.map(([ago, target, files], i) => ({ target, files: cfg.xss && n.alias === 'homelab-nuc' && i === 0 ? [XSS_DRIFT_FILE] : files.slice(), detectedAt: new Date(Date.now() - ago * 60e3).toISOString() })) : [];
+  });
+
+  /* Issue state: Operators acknowledge or snooze an issue. An acknowledgement stores the issue's since and stops applying once since differs; a snooze applies until its time passes. */
+  const issueStates = new Map(); // issue id -> { kind: acknowledged | snoozed, since, by, at, until }
+  const applyState = i => {
+    const st = issueStates.get(i.id), out = { ...i, state: 'open', stateBy: null, stateAt: null, snoozedUntil: null };
+    if (st && st.kind === 'acknowledged' && st.since === (i.since ?? null)) return { ...out, state: 'acknowledged', stateBy: st.by, stateAt: st.at };
+    if (st && st.kind === 'snoozed' && Date.parse(st.until) > Date.now()) return { ...out, state: 'snoozed', stateBy: st.by, stateAt: st.at, snoozedUntil: st.until };
+    return out;
+  };
 
   /* ---------------------------------------------------------------- check-ins */
   const ASLEEP = new Set(['mbp-joan', 'laptop-ana']);
@@ -270,7 +360,7 @@
   const quote = v => /^[A-Za-z0-9_@%+=:,./-]+$/.test(v) ? v : "'" + String(v).replace(/'/g, "'\\''") + "'";
   const stamp = iso => new Date(iso).toISOString().replace('T', ' ').replace(/\.\d+Z$/, 'Z');
   const cmpNull = (a, b) => (a === null ? (b === null ? 0 : -1) : b === null ? 1 : a < b ? -1 : a > b ? 1 : 0);
-  const issues = () => {
+  const rawIssues = () => {
     const out = [];
     for (const n of nodes) {
       if (n.revokedAt) continue;
@@ -309,7 +399,7 @@
       const cached = c.models.length > 0;
       out.push({ id: 'cliproxy_refresh_failed:' + c.baseUrl, code: 'cliproxy_refresh_failed', severity: cached ? 'warning' : 'error', title: 'CLIProxy model refresh failed',
         detail: `${c.baseUrl}: ${c.errorCode}. ` + (cached ? 'Agents can use the last valid catalog.' : 'No model catalog is available.'),
-        action: 'Check that CLIProxy accepts the dedicated Fleet key, then refresh models.', section: 'models', errorCode: null, nodeId: null, nodeName: null, target: null, since: null, commands: ['fleet models refresh'] });
+        action: 'Check that CLIProxy accepts the dedicated Fleet key, then refresh models.', section: 'models', errorCode: null, nodeId: null, nodeName: null, target: null, since: c._failureSince, commands: ['fleet models refresh'] });
     }
     const last = cfg.empty ? null : scans[0];
     if (last && (last.outcome === 'failed' || last.outcome === 'invalid')) out.push({ id: 'source_sync_failed', code: 'source_sync_failed', severity: 'error', title: 'Repository sync failed',
@@ -318,6 +408,8 @@
     /* Errors first, then Node name (issues without a Node first), Target, code and ID. */
     return out.map(i => ({ diagnostic: null, path: null, step: null, ...i })).sort((a, b) => (a.severity === 'error' ? 0 : 1) - (b.severity === 'error' ? 0 : 1) || cmpNull(a.nodeName, b.nodeName) || cmpNull(a.target, b.target) || cmpNull(a.code, b.code) || cmpNull(a.id, b.id)).slice(0, 200);
   };
+
+  const issues = () => rawIssues().map(applyState);
 
   /* ---------------------------------------------------------------- CLIProxy */
   const fam = m => ({ key: m.family.toLowerCase().replace(/[^a-z0-9]+/g, '-'), label: m.family });
@@ -338,7 +430,8 @@
   /* Every error is { code, message }. */
   const MESSAGES = { unauthorized: 'Sign in with a valid Operator token.', invalid_csrf: 'The CSRF token is missing or wrong.', invalid_request: 'The request is not valid.', node_not_found: 'No Node matches that ID or alias.',
     insufficient_scope: 'This credential does not have the scope required for this action.', target_not_found: 'The Node has no such Target.', target_not_failed: 'The current Assignment for that Target is not failed.',
-    node_revoked: 'The Node is revoked.', enrollment_link_not_found: 'No enrollment link has that ID.' };
+    node_revoked: 'The Node is revoked.', enrollment_link_not_found: 'No enrollment link has that ID.', issue_not_found: 'No current issue has that ID.',
+    revision_not_found: 'No desired revision has that ID.', rollout_not_found: 'No rollout has that ID.' };
   const err = (status, code, message) => json({ code, message: message || MESSAGES[code] || code }, status);
   const seg = value => decodeURIComponent(value); // one path segment, decoded once
   /* Lists: limit is 1 to 100 (else 400). Cursors are only valid with the order they came from. */
@@ -441,7 +534,9 @@
       if ((m = /^errors\/([^/]+)$/.exec(path))) { const e = catalogItems().find(x => x.code === seg(m[1])); return e ? json(e) : err(404, 'invalid_request', 'No error catalog entry exists for that code.'); }
       if (path === 'source/status') return json(cfg.empty ? null : { sourceRevision: scans[0].sourceRevision, outcome: scans[0].outcome, code: scans[0].code, diagnostic: scans[0].diagnostic, observedAt: scans[0].observedAt, requestedBy: scans[0].requestedBy });
       if (path === 'source/scans') return paged(cfg.empty ? [] : scans.map(s => ({ scanId: s.id, sourceRevision: s.sourceRevision, outcome: s.outcome, code: s.code, diagnostic: s.diagnostic, observedAt: s.observedAt, requestedBy: s.requestedBy })), q);
-      if (path === 'desired-revisions') return listOf(cfg.empty ? [] : F.revisions.map(r => ({ desiredRevisionId: r.id, sourceRevision: r.sourceRevision, acceptedAt: T(r.acceptedAt) })), q, 'desiredRevisionId', 'acceptedAt');
+      if (path === 'desired-revisions') return listOf(cfg.empty ? [] : F.revisions.map(r => ({ desiredRevisionId: r.id, sourceRevision: r.sourceRevision, acceptedAt: T(r.acceptedAt), commit: commitOf(r) })), q, 'desiredRevisionId', 'acceptedAt');
+      if ((m = /^desired-revisions\/([^/]+)$/.exec(path))) { const r = cfg.empty ? null : F.revisions.find(x => x.id === seg(m[1])); return r ? json(revisionOut(r)) : err(404, 'revision_not_found'); }
+      if ((m = /^rollouts\/([^/]+)$/.exec(path))) { const i = cfg.empty ? -1 : F.rollouts.findIndex(x => x.id === seg(m[1])); return i >= 0 ? json(rolloutOut(F.rollouts[i], i)) : err(404, 'rollout_not_found'); }
       if (path === 'rollouts') return listOf(cfg.empty ? [] : F.rollouts.map(r => ({ rolloutId: r.id, desiredRevisionId: r.revisionId, createdAt: T(r.createdAt), ...pickCounts(r.assignments) })), q, 'rolloutId', 'createdAt');
       if ((m = /^rollouts\/([^/]+)\/attempts$/.exec(path))) {
         const r = F.rollouts.find(x => x.id === seg(m[1])); if (!r) return err(404, 'invalid_request', 'No rollout has that ID.');
@@ -466,9 +561,21 @@
       return err(404, 'invalid_request', 'Unknown route ' + path);
     }
     /* POST routes and their scopes */
-    const scopeFor = { 'nodes/rename': 'admin', 'enrollment-links': 'admin', 'source/rescan': 'operate', 'cliproxy/refresh': 'operate', 'cliproxy/selection': 'operate' };
+    const scopeFor = { 'issues/state': 'operate', 'nodes/rename': 'admin', 'enrollment-links': 'admin', 'source/rescan': 'operate', 'cliproxy/refresh': 'operate', 'cliproxy/selection': 'operate' };
     let level = scopeFor[path] || (/^nodes\/[^/]+\/(retry|disk-usage\/refresh)$/.test(path) ? 'operate' : /^(nodes\/[^/]+\/(revoke|remove)|enrollment-links\/[^/]+\/revoke)$/.test(path) ? 'admin' : 'admin');
     if (!need(level)) return err(403, 'insufficient_scope', `This operation needs the ${level} scope.`);
+    if (path === 'issues/state') {
+      /* scope operate, then the request (400 invalid_request), then the issue (404 issue_not_found). Each change is audited as issue.acknowledged, issue.snoozed or issue.reopened. */
+      const action = body?.action;
+      if (typeof body?.id !== 'string' || !body.id.length || body.id.length > 300 || !['acknowledge', 'snooze', 'reopen'].includes(action)) return err(400, 'invalid_request', 'id and an action (acknowledge, snooze or reopen) are required.');
+      if (action === 'snooze' ? !Number.isInteger(body.hours) || body.hours < 1 || body.hours > 168 : body.hours != null) return err(400, 'invalid_request', 'hours is required for snooze (1 to 168) and not allowed otherwise.');
+      const cur = rawIssues().find(x => x.id === body.id); if (!cur) return err(404, 'issue_not_found');
+      const at = nowIso(), base = { since: cur.since ?? null, by: state.actor, at };
+      if (action === 'reopen') issueStates.delete(cur.id);
+      else issueStates.set(cur.id, action === 'acknowledge' ? { kind: 'acknowledged', ...base } : { kind: 'snoozed', ...base, until: new Date(Date.now() + body.hours * HOUR).toISOString() });
+      addAudit({ acknowledge: 'issue.acknowledged', snooze: 'issue.snoozed', reopen: 'issue.reopened' }[action], { nodeId: cur.nodeId, subject: cur.id });
+      return json(applyState(cur));
+    }
     if ((m = /^nodes\/([^/]+)\/retry$/.exec(path))) {
       /* OperatorApi rejects a blank target before it looks for the Node; the coordinator bounds it at 100 characters. */
       if (typeof body?.target !== 'string' || !body.target.trim()) return err(400, 'invalid_request', 'target is required.');
@@ -558,7 +665,7 @@
       scans.unshift({ id: guid('scan' + Date.now()), outcome: 'unchanged', sourceRevision: F.revisions[0].sourceRevision, code: null, diagnostic: null, observedAt: nowIso(), requestedBy: state.actor, _abs: true });
       return json({ outcome: 'unchanged', sourceRevision: F.revisions[0].sourceRevision });
     }
-    if (path === 'cliproxy/refresh') { const now = nowIso(); catalogs.forEach(c => { c.lastAttemptAt = now; if (c.status === 'ok') c.lastSuccessAt = now; }); await new Promise(r => setTimeout(r, 300)); return json(proxyStatus()); }
+    if (path === 'cliproxy/refresh') { const now = nowIso(); catalogs.forEach(c => { c.lastAttemptAt = now; if (c.status === 'ok') { c.lastSuccessAt = now; c._failureSince = null; } else if (!c._failureSince) c._failureSince = now; }); await new Promise(r => setTimeout(r, 300)); return json(proxyStatus()); }
     if (path === 'cliproxy/selection') {
       /* CliProxySelectionStore.SaveAsync checks, in this order: the shape (400 invalid_selection), the catalog (404 catalog_unavailable),
          pinned models (409 pinned_model_excluded), an empty selection (400 invalid_selection) and, last, the version (409 stale_selection).
@@ -585,6 +692,14 @@
     return err(404, 'invalid_request', 'Unknown route ' + path);
   }
 
+  /* states=1: an acknowledged and a snoozed issue, so the Problems tabs have content. */
+  if (cfg.states && !cfg.empty) {
+    const find = (code, alias) => rawIssues().find(i => i.code === code && i.nodeName === alias);
+    const ack = find('agent_outdated', 'laptop-ana'), snooze = find('disk_space_low', 'fedora-ws');
+    if (ack) issueStates.set(ack.id, { kind: 'acknowledged', since: ack.since ?? null, by: cfg.xss ? XSS_COMMIT.author : 'ana', at: new Date(Date.now() - 2 * HOUR).toISOString() });
+    if (snooze) issueStates.set(snooze.id, { kind: 'snoozed', since: snooze.since ?? null, by: 'joan', at: new Date(Date.now() - 20 * 60e3).toISOString(), until: new Date(Date.now() + 190 * 60e3).toISOString() });
+  }
+
   const calls = [];
   window.fetch = async (input, init = {}) => {
     const url = String(typeof input === 'string' ? input : input.url);
@@ -594,7 +709,7 @@
     const headers = Object.fromEntries(Object.entries(init.headers || {}).map(([k, v]) => [k.toLowerCase(), v]));
     let body = null; try { body = init.body ? JSON.parse(init.body) : null; } catch { body = null; }
     const method = (init.method || 'GET').toUpperCase();
-    const call = { method, path, query: Object.fromEntries(u.searchParams), at: Date.now(), settled: false, aborted: false };
+    const call = { method, path, query: Object.fromEntries(u.searchParams), body, at: Date.now(), settled: false, aborted: false };
     calls.push(call);
     let run = cfg.hang && method === 'GET' && path.startsWith(cfg.hang) ? new Promise(() => {}) : handle(method, path, u.searchParams, body, headers).catch(e => {
       if (e instanceof URIError) return err(400, 'invalid_request', 'The path is not correctly percent-encoded.');
@@ -610,5 +725,5 @@
       run.then(resolve, reject).finally(() => { call.settled = true; });
     });
   };
-  window.__FIXTURE = { cfg, state, nodes, links, audit, calls };
+  window.__FIXTURE = { cfg, state, nodes, links, audit, calls, issueStates };
 })();

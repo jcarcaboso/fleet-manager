@@ -120,6 +120,16 @@ public interface IFleetCoordinator
         AgentTelemetryReport report,
         CancellationToken cancellationToken = default);
 
+    /// <summary>
+    /// Stores a drift report of the Node in one transaction under the Node row lock and keeps only the newest
+    /// <see cref="DriftRules.MaximumEvents"/> events of the Node. Invalid reports, and Targets that are not a current Assignment
+    /// of the Node, throw invalid_request.
+    /// </summary>
+    Task RecordDriftAsync(
+        NodeAuthentication authentication,
+        DriftReport report,
+        CancellationToken cancellationToken = default);
+
     Task<Page<NodeStatus>> GetNodesAsync(
         PageRequest page,
         DateTimeOffset now,
@@ -135,12 +145,35 @@ public interface IFleetCoordinator
         PageRequest page,
         CancellationToken cancellationToken = default);
 
-    Task<Page<DesiredRevisionStatus>> GetDesiredRevisionsAsync(
+    Task<Page<DesiredRevisionSummary>> GetDesiredRevisionsAsync(
         PageRequest page,
         CancellationToken cancellationToken = default);
 
     Task<Page<RolloutStatus>> GetRolloutsAsync(
         PageRequest page,
+        CancellationToken cancellationToken = default);
+
+    /// <summary>One desired revision with what changed since the previous one; <c>revision_not_found</c> if there is none.</summary>
+    Task<DesiredRevisionDetail> GetDesiredRevisionAsync(
+        DesiredRevisionId id,
+        CancellationToken cancellationToken = default);
+
+    /// <summary>Per-Node progress of one rollout (at most 500 Nodes, by name); <c>rollout_not_found</c> if there is none.</summary>
+    Task<RolloutDetail> GetRolloutAsync(
+        RolloutId id,
+        CancellationToken cancellationToken = default);
+
+    /// <summary>The stored states of the given issues. Whether a state still applies is up to the caller.</summary>
+    Task<IReadOnlyDictionary<string, IssueStateEntry>> GetIssueStatesAsync(
+        IReadOnlyCollection<string> issueIds,
+        CancellationToken cancellationToken = default);
+
+    /// <summary>
+    /// Acknowledges, snoozes or reopens an issue and writes the audit event, in one transaction. Returns the stored state, or null
+    /// after a reopen. Also deletes expired snoozes and acknowledgements of issues that are no longer current.
+    /// </summary>
+    Task<IssueStateEntry?> ChangeIssueStateAsync(
+        ChangeIssueState command,
         CancellationToken cancellationToken = default);
 
     Task<Page<AuditEventStatus>> GetAuditEventsAsync(

@@ -367,7 +367,7 @@
       const F = window.__FIXTURE;
       await until(() => $('.dep-hero'), 'deployments');
       const newest = window.FLEET.revisions[0].shortSha;
-      expect($('.dep-title').textContent.includes(newest), 'hero shows the newest revision ' + newest);
+      expect($('.dep-hero').textContent.includes(newest) && $('.dep-title').textContent === window.FLEET.revisions[0].message, 'hero shows the newest revision ' + newest + ' and its commit subject');
       expect(F.calls.filter(c => c.path === 'desired-revisions').every(c => c.query.order === 'newest') && F.calls.some(c => c.path === 'desired-revisions'), 'desired-revisions is requested with order=newest');
       expect(F.calls.filter(c => c.path === 'rollouts').every(c => c.query.order === 'newest') && F.calls.some(c => c.path === 'rollouts'), 'rollouts is requested with order=newest');
       expect(document.querySelectorAll('.hist-item').length === 2, 'only the first page of revisions is shown');
@@ -1187,6 +1187,448 @@
       location.hash = '#/nodes/homelab-nuc'; await until(() => $('#machine-panel .kv'), 'node page');
       expect(bad() === 0 && kv('Hostname') === '<img src=x onerror=alert(1)>.lab' && kv('User').includes('<script>') && kv('Operating system').startsWith('<svg onload=alert(7)> Linux') && kv('State directory').includes('<img'), 'Machine panel shows every hostile value as text (' + bad() + ')');
       expect($('.nhero-sub').textContent.includes('<img src=x onerror=alert(1)>.lab') && bad() === 0, 'header line is text');
+      await wait(300);
+      expect(alerts === 0, 'alert was never called');
+    },
+    /* ---------------------------------------------------------------- phase 4: deployments, drift and issue state */
+    /* Commit subject, author and time on the list; the hero; the link to the revision page. Open: ?drive=depCommit#/deployments */
+    async depCommit() {
+      const F = window.__FIXTURE, revs = window.FLEET.revisions;
+      await until(() => $('.dep-hero') && $('.hist-item'), 'deployments');
+      expect($('.dep-title').textContent === revs[0].message, 'the hero title is the commit subject: ' + $('.dep-title').textContent);
+      expect($('.dep-hero .dep-meta').textContent.includes('joan') && $('.dep-hero .dep-meta').textContent.includes('a3f9c21') && $('.dep-hero .dep-meta .av'), 'the hero shows the author and the short SHA');
+      expect(F.calls.some(c => c.path === 'desired-revisions/' + revs[0].id), 'the newest revision is read for what changed');
+      expect($('.dep-hero .changes .chg--add')?.textContent.includes('postgres-migrations') && $('.dep-hero .changes .chg--mod')?.textContent.includes('code-review'), 'the hero shows the skills it added and changed');
+      const items = $$('.hist-item');
+      expect(items.length === 5, 'every revision is listed: ' + items.length);
+      items.slice(0, 4).forEach((it, i) => {
+        const top = it.querySelector('.hist-top b').textContent, meta = it.querySelector('.hist-meta').textContent;
+        expect(top === revs[i].message && meta.includes(revs[i].author) && /ago/.test(meta), `revision ${i + 1}: subject, author and time (${top} / ${meta.slice(0, 60)})`);
+      });
+      const last = items[4];
+      expect(/^Published /.test(last.querySelector('.hist-top b').textContent) && !last.querySelector('.hist-meta .av'), 'the oldest revision has no commit: it shows when it was published, no author');
+      expect(last.querySelector('.hist-top .rev')?.textContent.includes('c08d4be'), 'and its short SHA');
+      const link = items[1].querySelector('a[href^="#/deployments/"]');
+      expect(link && link.getAttribute('href') === '#/deployments/' + revs[1].id, 'each revision links to its own page by revision ID');
+      expect(items[0].id === 'rev-a3f9c21', 'the SHA anchor is kept');
+    },
+    /* The gallery's deployment tile shows the current revision's commit subject. Open: ?drive=depGallery#/nodes */
+    async depGallery() {
+      const revs = window.FLEET.revisions;
+      await until(() => $('.tile-commit'), 'tile');
+      expect($('.tile-commit').textContent === revs[0].message, 'the deployment tile shows the commit subject: ' + $('.tile-commit').textContent);
+      expect(/Deploying a3f9c21|Latest revision a3f9c21/.test($('.tile-txt b').textContent), 'next to the short SHA');
+      expect($('.tile-commit').dataset.tip.includes('by joan'), 'the tooltip names the author');
+      expect(document.body.textContent.includes('“' + revs[0].message + '”'), 'the Up to date section names it too');
+    },
+    /* No commit metadata at all (a Server before phase 4, or an old revision). Open: ?drive=depNull&commit=0#/deployments */
+    async depNull() {
+      const revs = window.FLEET.revisions;
+      await until(() => $('.dep-hero') && $('.hist-item'), 'deployments');
+      expect($('.dep-title').textContent === 'Revision a3f9c21', 'the hero falls back to the short SHA: ' + $('.dep-title').textContent);
+      expect(!$('.dep-hero .dep-meta .av') && /Published/.test($('.dep-hero .dep-meta').textContent), 'no author, just when it was published');
+      expect($$('.hist-item').every(i => /^Published /.test(i.querySelector('.hist-top b').textContent) && !i.querySelector('.hist-meta .av')), 'every revision falls back to its publication time');
+      expect(!document.body.textContent.includes(revs[0].message), 'no commit text anywhere');
+      location.hash = '#/deployments/' + revs[0].id; await until(() => $('.dep-title') && $('.rv-row'), 'revision page');
+      expect($('h1.dep-title').textContent === 'Revision a3f9c21' && !$('.dep-hero .dep-meta .av'), 'the revision page falls back too');
+      expect($('.crumbs').textContent.includes('a3f9c21'), 'the breadcrumb names the short SHA');
+      location.hash = '#/nodes'; await until(() => $('.tile'), 'gallery');
+      expect(!$('.tile-commit'), 'the gallery tile has no commit line');
+    },
+    /* A revision page: what changed, the previous revision, the title. Open: ?drive=depDetail#/deployments (the scenario opens the revision pages itself). */
+    async depDetail() {
+      const F = window.__FIXTURE, revs = window.FLEET.revisions;
+      location.hash = '#/deployments/' + revs[0].id;
+      await until(() => $('h1.dep-title') && $('.rv-row'), 'revision page');
+      expect($('h1.dep-title').textContent === revs[0].message, 'the title is the commit subject');
+      expect(F.calls.some(c => c.path === 'desired-revisions/' + revs[0].id) && F.calls.some(c => /^rollouts\/[^/]+$/.test(c.path)), 'GET desired-revisions/{id}, then GET rollouts/{id}');
+      const chips = $$('.dep-hero-main .changes .chg').map(c => c.textContent);
+      expect(chips.join() === '+postgres-migrations,~code-review', 'skills added (+) and changed (~): ' + chips);
+      expect($('.chg-targets').textContent.replace(/\s+/g, ' ').includes('2 added · 5 changed · 0 removed, on 4 machines'), 'Target counts: ' + $('.chg-targets').textContent);
+      const prev = $('.dep-prev a');
+      expect(prev && prev.getAttribute('href') === '#/deployments/' + revs[1].id && prev.textContent === '9b14e07', 'a link to the previous revision');
+      expect($('.dep-hero-main .dep-meta').textContent.includes('joan'), 'the author');
+      expect($('.crumbs a').getAttribute('href') === '#/deployments', 'a way back to all deployments');
+      expect(/Assignments succeeded/.test($('.dep-hero-side').textContent) && /31\s*of 43/.test($('.dep-hero-side .hero-fig').textContent), 'the summary bar: ' + $('.hero-fig').textContent);
+      expect($('.dep-hero-side .segbar') && $$('.dep-hero-side .legend li').length === 5, 'a segmented bar and its legend');
+      click(prev); await until(() => $('h1.dep-title')?.textContent === revs[1].message, 'previous revision');
+      expect($('.dep-hero-main .changes') === null && /No Skill changes/.test($('.dep-hero-main').textContent), 'a revision without Skill changes says so');
+      expect(/0 added · 3 changed · 0 removed, on 3 machines/.test($('.chg-targets').textContent.replace(/\s+/g, ' ')), 'but still counts Targets: ' + $('.chg-targets').textContent);
+      expect($('.dep-prev a')?.textContent === '51c0d8a', 'its previous revision is the next one down');
+      const rm = revs[3];
+      location.hash = '#/deployments/' + rm.id; await until(() => $('h1.dep-title')?.textContent === rm.message, 'revision with a removed Skill');
+      expect($$('.chg--rm').map(c => c.textContent).join() === '−jira-triage' && $('.chg--rm .chg-s').getAttribute('aria-label') === 'removed', 'a removed Skill is a chip with a minus sign and a label');
+      const first = revs[4];
+      location.hash = '#/deployments/' + first.id; await until(() => $('h1.dep-title')?.textContent === 'Revision c08d4be', 'first revision');
+      expect(!$('.dep-prev a') && /first revision/.test($('.dep-prev').textContent), 'the first revision says there is nothing to compare with');
+      expect($$('.chg--add').length === 5, 'and everything it holds is added');
+    },
+    /* Per-machine progress: summary, filter, sort, links to the Problems tab. Open: ?drive=depRollout#/deployments (the scenario opens the revision page itself) */
+    async depRollout() {
+      const F = window.__FIXTURE, revs = window.FLEET.revisions;
+      location.hash = '#/deployments/' + revs[0].id;
+      await until(() => $('.rv-row'), 'rollout rows');
+      const names = () => $$('.rv-row .rv-node').map(a => a.textContent);
+      const chip = k => $(`[data-act=rv-filter][data-v=${k}]`);
+      expect(names().length === 13 && /Machines\s*13/.test($('.panel-head h2').textContent), 'one row per machine: ' + names().length);
+      expect(['all', 'succeeded', 'applying', 'pending', 'failed'].every(k => chip(k)) && !chip('superseded'), 'filter chips for the states that occur');
+      expect(['all', 'failed', 'applying', 'pending', 'succeeded'].map(k => chip(k).querySelector('span').textContent).join() === '13,4,2,4,3', 'with counts: ' + ['all', 'failed', 'applying', 'pending', 'succeeded'].map(k => chip(k).querySelector('span').textContent));
+      expect(names().slice(0, 4).join() === 'design-imac,fedora-ws,kitchen-mini,studio-mini' && names().at(-1) === 'laptop-ana', 'sorted by state, worst first, then name: ' + names().join());
+      const rowOf = n => $$('.rv-row').find(r => r.querySelector('.rv-node').textContent === n);
+      const state = n => rowOf(n).querySelector('.rv-state').textContent.trim();
+      expect(state('fedora-ws') === 'Failed' && state('gpu-box') === 'Applying' && state('mba-travel') === 'Pending' && state('homelab-nuc') === 'Succeeded', 'each state has a word');
+      expect(rowOf('fedora-ws').querySelector('.rv-state .g') && rowOf('fedora-ws').querySelector('.rv-state .g').closest('.rv-state'), 'and an icon');
+      expect(/First attempt.*ago/.test(rowOf('fedora-ws').querySelector('.rv-times').textContent) && /Last attempt/.test(rowOf('fedora-ws').querySelector('.rv-times').textContent), 'first and last attempt times');
+      expect(/No attempt yet/.test(rowOf('build-runner-02').textContent), 'a machine without attempts says so');
+      const chipsOf = n => [...rowOf(n).querySelectorAll('.tchip')].map(c => [c.querySelector('span:not(.sr)').textContent, c.querySelector('code')?.textContent, c.querySelector('.sr').textContent.trim()].filter(Boolean).join(' '));
+      expect(chipsOf('studio-mini').includes('Claude ai_client_reconcile_failed Failed:') && chipsOf('studio-mini').includes('Skills Succeeded:'), 'per-Target state (icon and word) with the error code: ' + chipsOf('studio-mini'));
+      const link = rowOf('studio-mini').querySelector('a.tchip--error');
+      expect(link && link.getAttribute('href') === '#/nodes/studio-mini/problems', 'the error code links to the machine\'s Problems tab');
+      expect(!rowOf('homelab-nuc').querySelector('a.tchip'), 'a Target without an error code is not a link');
+      click(chip('failed')); await until(() => names().length === 4, 'failed filter');
+      expect(names().join() === 'design-imac,fedora-ws,kitchen-mini,studio-mini' && chip('failed').getAttribute('aria-pressed') === 'true', 'filter by state: ' + names());
+      click(chip('pending')); await until(() => names().length === 4 && names()[0] === 'build-runner-02', 'pending filter');
+      expect(names().join() === 'build-runner-02,build-runner-03,lab-vm-07,mba-travel', 'pending machines: ' + names());
+      click(chip('all')); await until(() => names().length === 13, 'all');
+      const sort = $('#rv-sort'); type(sort, 'name'); await until(() => names()[0] === 'build-runner-01', 'sort by name');
+      expect(names().join() === [...names()].sort((a, b) => a.localeCompare(b)).join(), 'sort by name');
+      type($('#rv-sort'), 'recent'); await until(() => names()[0] === 'gpu-box', 'sort by latest attempt');
+      expect(names()[0] === 'gpu-box' && ['build-runner-02', 'build-runner-03', 'lab-vm-07', 'mba-travel'].includes(names().at(-1)), 'sort by latest attempt: newest first, machines without attempts last: ' + names());
+      expect(F.calls.filter(c => /^rollouts\/[^/]+$/.test(c.path)).length === 1, 'filtering and sorting do not read the rollout again');
+      click(chip('failed')); await until(() => names().length === 4, 'failed again');
+      click($('a.tchip--error[href$="/design-imac/problems"]'));
+      await until(() => $('.nhero h1')?.textContent === 'design-imac' && $('.prob'), 'machine Problems tab');
+      expect(location.hash === '#/nodes/design-imac/problems', 'the link opens design-imac on its Problems tab');
+      /* An older rollout, which has a superseded state. */
+      location.hash = '#/deployments/' + revs[1].id; await until(() => $('.rv-row'), 'older rollout');
+      expect(chip('failed').querySelector('span').textContent === '3' && !chip('succeeded') && $$('.rv-row').length === 3, 'an older rollout lists its own machines: ' + $$('.rv-row').length);
+      expect($$('.rv-row .tchip').some(c => /Superseded/.test(c.textContent)), 'with Targets that were superseded');
+    },
+    /* A revision without a rollout. Open: ?drive=depNoRollout&norollout=1#/deployments */
+    async depNoRollout() {
+      const revs = window.FLEET.revisions;
+      location.hash = '#/deployments/' + revs[0].id; await until(() => $('h1.dep-title'), 'revision page');
+      expect(/No rollout was created for this revision/.test(document.body.textContent) && !$('.rv-row') && !$('.dep-hero-side .segbar'), 'no rollout: no per-machine list and a clear sentence');
+      expect($('.chg--add') && $('.chg-targets'), 'the diff is still shown');
+    },
+    /* An unknown revision ID. Open: ?drive=depMissing#/deployments */
+    async depMissing() {
+      location.hash = '#/deployments/00000000-0000-4000-a000-000000000000'; await until(() => $('.empty h1'), 'not found');
+      expect(/could not find that revision/.test($('.empty h1').textContent) && $('.empty a[href="#/deployments"]'), 'an unknown revision explains itself and links back');
+      expect($('#nav a[aria-current=page]')?.textContent.startsWith('Deployments'), 'Deployments stays the current section');
+    },
+    /* A rollout that cannot be read: the diff stays, the machine list says why. Open: ?drive=depRolloutFail&fail=rollouts/#/deployments */
+    async depRolloutFail() {
+      const revs = window.FLEET.revisions;
+      location.hash = '#/deployments/' + revs[0].id; await until(() => $('h1.dep-title'), 'revision page');
+      await until(() => $('.callout--critical'), 'rollout error');
+      expect(/Could not load the rollout/.test($('.callout--critical').textContent) && $('.chg--add') && !$('.rv-row'), 'the diff is shown and the rollout failure is local to the machine list');
+      expect($('.panel [data-act=reload]'), 'with a Try again button');
+    },
+    /* Leaving the page cancels the reads and a stale load never paints. Open: ?drive=depAbort&slow=400#/deployments */
+    async depAbort() {
+      const F = window.__FIXTURE, revs = window.FLEET.revisions;
+      location.hash = '#/deployments/' + revs[0].id;
+      await until(() => F.calls.some(c => c.path === 'desired-revisions/' + revs[0].id), 'first read started');
+      location.hash = '#/deployments/' + revs[1].id;
+      await until(() => $('h1.dep-title')?.textContent === revs[1].message && $('.rv-row'), 'second revision', 6000);
+      await wait(1500);
+      expect($('h1.dep-title').textContent === revs[1].message, 'the newer revision is the one on screen: ' + $('h1.dep-title').textContent);
+      const first = F.calls.filter(c => c.path === 'desired-revisions/' + revs[0].id);
+      expect(first.length >= 1 && first.every(c => c.settled) && first.some(c => c.aborted), 'the first revision read was aborted when the user moved on');
+      location.hash = '#/nodes'; await until(() => $('.health'), 'gallery');
+      await wait(1500);
+      expect(F.calls.filter(c => !c.settled).length === 0, 'nothing is left in flight');
+      expect(!$('.rv-row') && !$('h1.dep-title'), 'the revision page is gone');
+    },
+
+    /* Drift in the Activity timeline and the Overview health checks. Open: ?drive=driftActivity#/nodes/homelab-nuc/activity */
+    async driftActivity() {
+      await until(() => $('.tl-item'), 'activity');
+      const items = $$('.tl-item').filter(i => /Repaired local changes/.test(i.textContent));
+      expect(items.length === 2, 'both drift events are in the timeline: ' + items.length);
+      const titles = items.map(i => i.querySelector('.tl-top b').textContent);
+      expect(titles[0] === 'Repaired local changes in skills: 1 file' && titles[1] === 'Repaired local changes in skills: 2 files', 'titles name the Target and the file count, newest first: ' + titles);
+      const all = $$('.tl-item'), pos = i => all.indexOf(i);
+      const attempt = all.find(i => /applied/.test(i.querySelector('.tl-top b').textContent)), cert = all.find(i => /Certificate renewed/.test(i.textContent));
+      expect(pos(items[0]) > pos(attempt) && pos(items[0]) < pos(cert), 'merged by time with attempts and audit events');
+      const two = items[1].querySelector('details.tl-files');
+      expect(two && !two.open && /2 files/.test(two.textContent), 'the file list starts collapsed');
+      click(two.querySelector('summary')); await wait(100);
+      expect(two.open && [...two.querySelectorAll('li code')].map(c => c.textContent).join() === '.agents/skills/incident-runbook/SKILL.md,.agents/skills/homelab-ops/compose.md', 'it expands to the file paths');
+      expect(items[0].querySelector('time').getAttribute('datetime'), 'each event has a time');
+      const chip = $$('[data-act=act-filter]').find(b => b.dataset.v === 'drift');
+      expect(chip && chip.querySelector('span').textContent === '2', 'a filter for local changes, with a count');
+      click(chip); await wait(100);
+      expect($$('.tl-item').length === 2 && $$('.tl-item').every(i => /Repaired local changes/.test(i.textContent)), 'filtering keeps only drift');
+      expect($$('details.tl-files')[1].open, 'an expanded list stays open across repaints');
+      location.hash = '#/nodes/homelab-nuc'; await until(() => $('.hchecks'), 'overview');
+      const checks = $$('.hchecks li').map(l => l.textContent);
+      const drift = $$('.hchecks li').find(l => /Local changes were repaired/.test(l.textContent));
+      expect(drift && /Once in the last 24 hours/.test(drift.textContent) && /skills, 1 file/.test(drift.textContent), 'Overview mentions drift from the last 24 hours only (the 30 h old one is left out): ' + (drift?.textContent || checks.join(' | ')));
+      expect(drift.querySelector('.g') && drift.querySelector('svg'), 'as an info check with an icon');
+      location.hash = '#/nodes/mbp-joan'; await until(() => $('.nhero h1')?.textContent === 'mbp-joan' && $('.hchecks'), 'other overview');
+      expect(!/Local changes were repaired/.test($('.hchecks').textContent), 'a machine without drift has no such check');
+      location.hash = '#/nodes/mbp-joan/activity'; await until(() => $('.tl-item') && $('.tabs a[aria-current]')?.textContent.startsWith('Activity') && $('.nhero h1')?.textContent === 'mbp-joan', 'other activity'); await wait(200);
+      expect(!$$('[data-act=act-filter]').find(b => b.dataset.v === 'drift').querySelector('span').textContent.replace('0', '') && !/Repaired local changes/.test($('#tabpanel').textContent), 'and no drift events');
+    },
+    /* A machine whose only drift is older than a day: not on Overview, still in Activity. Open: ?drive=driftOld#/nodes/studio-mini */
+    async driftOld() {
+      await until(() => $('.hchecks'), 'overview');
+      const drift = $$('.hchecks li').find(l => /Local changes were repaired/.test(l.textContent));
+      expect(drift && /Once/.test(drift.textContent), 'a drift event from 6 h ago is on Overview');
+      const F = window.__FIXTURE; F.nodes.find(n => n.alias === 'studio-mini')._drift[0].detectedAt = new Date(Date.now() - 30 * 3600e3).toISOString();
+      Fleet.reload(); await wait(500); await until(() => $('.hchecks'), 'reloaded');
+      expect(!$$('.hchecks li').some(l => /Local changes were repaired/.test(l.textContent)), 'at 30 h it is gone from Overview');
+      location.hash = '#/nodes/studio-mini/activity'; await until(() => $('.tl-item'), 'activity');
+      expect($$('.tl-item').some(i => /Repaired local changes in skills: 1 file/.test(i.textContent)), 'but it is still in Activity');
+    },
+    /* A Server before phase 4: no drift property. Open: ?drive=driftNone&drift=0#/nodes/homelab-nuc/activity */
+    async driftNone() {
+      await until(() => $('.tl-item'), 'activity');
+      expect(!/Repaired local changes/.test($('#tabpanel').textContent), 'no drift events');
+      location.hash = '#/nodes/homelab-nuc'; await until(() => $('.hchecks'), 'overview');
+      expect(!/Local changes/.test($('.hchecks').textContent), 'no drift check');
+    },
+
+    /* Acknowledge, snooze and reopen on the Problems page. Open: ?drive=issueFlow#/problems (also with &scope=operate) */
+    async issueFlow() {
+      const F = window.__FIXTURE;
+      await until(() => $('.prow'), 'problems');
+      const chip = k => +$(`[data-act=prob-state][data-v=${k}]`).querySelector('span').textContent;
+      const badge = () => +($('.nav-badge')?.textContent || 0);
+      const openAll = () => $$('.prow').forEach(d => { d.open = true; });
+      const rowOf = t => $$('.prow').find(r => r.querySelector('summary b').textContent.includes(t));
+      const posts = () => F.calls.filter(c => c.method === 'POST' && c.path === 'issues/state');
+      const open0 = chip('open'), badge0 = badge();
+      expect(open0 === 16 && chip('acknowledged') === 0 && chip('snoozed') === 0, `tabs Open / Acknowledged / Snoozed with counts: ${open0}/${chip('acknowledged')}/${chip('snoozed')}`);
+      expect($('[data-act=prob-state][data-v=open]').getAttribute('aria-pressed') === 'true', 'Open is the tab you land on');
+      expect(badge0 === 6, 'the badge counts open errors: ' + badge0);
+      openAll();
+      const target = 'design-imac: agent-file/claude failed';
+      expect(rowOf(target).querySelector('[data-op=acknowledge]') && !rowOf(target).querySelector('[data-op=reopen]'), 'an open problem offers Acknowledge');
+      expect([...rowOf(target).querySelectorAll('[data-op=snooze]')].map(b => b.textContent + ':' + b.dataset.hours).join() === '1 h:1,4 h:4,24 h:24,7 d:168', 'and Snooze for 1 h, 4 h, 24 h and 7 d');
+      expect([...rowOf(target).querySelectorAll('[data-op=snooze]')].every(b => /^Snooze for /.test(b.getAttribute('aria-label'))), 'each snooze button has a full label');
+      click(rowOf(target).querySelector('[data-op=acknowledge]'));
+      await until(() => chip('acknowledged') === 1, 'acknowledged');
+      const p = posts().at(-1);
+      expect(p && p.body.action === 'acknowledge' && /^assignment_failed:[0-9a-f-]+:agent-file\/claude$/.test(p.body.id) && !('hours' in p.body), 'POST issues/state with the issue ID (it contains ":") in the body: ' + JSON.stringify(p?.body));
+      expect(/Problem acknowledged/.test($('#toasts').textContent), 'a toast says so');
+      expect(chip('open') === open0 - 1 && badge() === badge0 - 1, `the Open count and the badge drop: ${chip('open')} / ${badge()}`);
+      expect(!rowOf(target), 'the problem leaves the Open list');
+      click($('[data-act=prob-state][data-v=acknowledged]')); await until(() => rowOf(target), 'acknowledged list'); openAll();
+      const r = rowOf(target);
+      expect(r.classList.contains('is-quiet') && /Acknowledged/.test(r.querySelector('.tag--state').textContent), 'it is listed under Acknowledged, quiet, with a state tag');
+      expect(/Acknowledged by joan/.test(r.querySelector('.prob-state').textContent), 'who acknowledged it: ' + r.querySelector('.prob-state').textContent.trim());
+      expect(r.querySelector('[data-op=reopen]') && !r.querySelector('[data-op=acknowledge]') && !r.querySelector('[data-op=snooze]'), 'and only Reopen is offered');
+      expect(F.audit[0].action === 'issue.acknowledged' && F.audit[0].actor === 'joan' && /^assignment_failed:/.test(F.audit[0].subject), 'the Server audit has issue.acknowledged');
+      click(r.querySelector('[data-op=reopen]'));
+      await until(() => chip('acknowledged') === 0, 'reopened');
+      expect(chip('open') === open0 && badge() === badge0 && F.issueStates.size === 0 && F.audit[0].action === 'issue.reopened', 'Reopen puts it back: the counts, the badge and issue.reopened');
+      expect(/There is nothing acknowledged|Nothing acknowledged/.test($('.empty h2')?.textContent || ''), 'an empty tab explains itself: ' + $('.empty h2')?.textContent);
+      click($('[data-act=prob-state][data-v=open]')); await until(() => rowOf(target), 'open list again'); openAll();
+      click(rowOf(target).querySelector('[data-op=snooze][data-hours="4"]'));
+      await until(() => chip('snoozed') === 1, 'snoozed');
+      const sp = posts().at(-1), st = [...F.issueStates.values()][0];
+      expect(sp.body.action === 'snooze' && sp.body.hours === 4 && Math.abs(Date.parse(st.until) - Date.now() - 4 * 3600e3) < 120e3, 'snooze 4 h sends hours: ' + JSON.stringify(sp.body));
+      expect(/Snoozed for 4 hours/.test($('#toasts').textContent) && badge() === badge0 - 1 && chip('open') === open0 - 1, 'toast, badge and counts');
+      click($('[data-act=prob-state][data-v=snoozed]')); await until(() => rowOf(target), 'snoozed list'); openAll();
+      const sr = rowOf(target);
+      expect(/Snoozed/.test(sr.querySelector('.tag--state').textContent) && /Snoozed by joan/.test(sr.querySelector('.prob-state').textContent) && /Back in Open at/.test(sr.querySelector('.prob-state').textContent) && /in 4 h/.test(sr.querySelector('.prob-state').textContent), 'a snoozed problem shows who and until when: ' + sr.querySelector('.prob-state').textContent.trim());
+      expect(F.audit[0].action === 'issue.snoozed', 'the Server audit has issue.snoozed');
+      expect(sr.querySelector('[data-op=reopen]'), 'Reopen is offered');
+      click($('[data-act=prob-state][data-v=open]')); await until(() => $('.prow'), 'open');
+      expect(!rowOf(target) && $('[data-act=prob-state][data-v=snoozed]').querySelector('span').textContent === '1', 'it stays out of Open');
+      /* The section filter works within a state. */
+      click($('[data-act=prob-filter][data-v=models]')); await wait(100);
+      expect($$('.prow').length === 1 && /CLIProxy/.test($('.prow').textContent), 'the section filter still works within the Open tab');
+    },
+    /* Every issue acknowledged: "No open problems" and no badge. Open: ?drive=issueAllQuiet#/problems */
+    async issueAllQuiet() {
+      await until(() => $('.prow'), 'problems');
+      const items = (await Fleet.api.get('issues')).items;
+      for (const i of items) await Fleet.api.post('issues/state', { id: i.id, action: i.code === 'node_not_contacting' ? 'snooze' : 'acknowledge', ...(i.code === 'node_not_contacting' ? { hours: 24 } : {}) });
+      await Fleet.reload({ quiet: true }); await wait(200);
+      expect(/No open problems/.test($('.empty h2')?.textContent || ''), 'no open problems: ' + $('.empty h2')?.textContent);
+      expect(!$('.nav-badge'), 'no badge when nothing open is an error');
+      expect(/No open problems\./.test($('.page-head p').textContent) && /acknowledged or snoozed/.test($('.page-head p').textContent), 'the header says what is left: ' + $('.page-head p').textContent);
+      const chip = k => +$(`[data-act=prob-state][data-v=${k}]`).querySelector('span').textContent;
+      expect(chip('open') === 0 && chip('acknowledged') + chip('snoozed') === items.length && chip('snoozed') === 3, `counts: ${chip('open')} / ${chip('acknowledged')} / ${chip('snoozed')}`);
+      click($('[data-act=prob-state][data-v=acknowledged]')); await until(() => $('.prow'), 'acknowledged list');
+      expect($$('.prow').length === chip('acknowledged') && $$('.prow').every(r => r.classList.contains('is-quiet')), 'the others are listed under Acknowledged');
+    },
+    /* The machine's Problems tab. Open: ?drive=issueNode#/nodes/studio-mini/problems */
+    async issueNode() {
+      const F = window.__FIXTURE;
+      await until(() => $('.prob'), 'machine problems');
+      const chip = k => +$(`[data-act=node-prob-state][data-v=${k}]`).querySelector('span').textContent;
+      const tabCount = () => $('.tabs a[href$="/problems"] .tab-cnt')?.textContent || '';
+      const badge = () => +($('.nav-badge')?.textContent || 0), badge0 = badge();
+      expect(chip('open') === 1 && chip('acknowledged') === 0 && chip('snoozed') === 0 && tabCount() === '1', 'Open / Acknowledged / Snoozed with counts on the tab');
+      const card = () => $('.prob');
+      expect(card().querySelector('[data-op=acknowledge]') && card().querySelectorAll('[data-op=snooze]').length === 4 && card().querySelector('[data-act=retry]'), 'Acknowledge, Snooze and Retry are offered');
+      expect($('.nhero-actions a.btn-primary')?.textContent.includes('Fix 1 problem'), 'the header offers to fix it');
+      click(card().querySelector('[data-op=acknowledge]'));
+      await until(() => chip('acknowledged') === 1, 'acknowledged');
+      expect(chip('open') === 0 && tabCount() === '' && !$('.nhero-actions a.btn-primary') && badge() === badge0 - 1, 'it leaves the count on the tab, the header button and the badge');
+      expect(/Nothing open on studio-mini/.test($('#tabpanel .empty h2')?.textContent || ''), 'the Open tab explains: ' + $('#tabpanel .empty h2')?.textContent);
+      click($('[data-act=node-prob-state][data-v=acknowledged]')); await until(() => $('.prob'), 'acknowledged tab');
+      expect(/Acknowledged by joan/.test(card().querySelector('.prob-state').textContent) && card().classList.contains('is-quiet') && card().querySelector('[data-op=reopen]') && card().querySelector('[data-act=retry]'), 'who acknowledged it, Reopen, and Retry stays available');
+      location.hash = '#/nodes/studio-mini/activity'; await until(() => $('.tl-item'), 'activity');
+      expect($$('.tl-item').some(i => /Acknowledged a problem/.test(i.textContent)), 'the acknowledgement is in the machine\'s Activity');
+      location.hash = '#/nodes/studio-mini/problems'; await until(() => $('[data-act=node-prob-state]'), 'back');
+      click($('[data-act=node-prob-state][data-v=acknowledged]')); await until(() => $('[data-op=reopen]'), 'reopen');
+      click($('[data-op=reopen]')); await until(() => chip('open') === 1, 'reopened');
+      expect(tabCount() === '1' && badge() === badge0 && F.issueStates.size === 0, 'Reopen restores the count, the badge and the state');
+      click($('[data-act=node-prob-state][data-v=open]')); await until(() => $('.prob [data-op=snooze]'), 'open tab');
+      click($('.prob [data-op=snooze][data-hours="168"]')); await until(() => chip('snoozed') === 1, 'snoozed');
+      expect(chip('open') === 0 && /Snoozed for 7 days/.test($('#toasts').textContent), 'snoozing for 7 days works too');
+    },
+    /* An acknowledgement applies to the current occurrence only: a new measurement is a new occurrence. Open: ?drive=issueSince&diskdelay=1000#/problems */
+    async issueSince() {
+      const F = window.__FIXTURE;
+      await until(() => $('.prow'), 'problems');
+      const chip = k => +$(`[data-act=prob-state][data-v=${k}]`).querySelector('span').textContent;
+      const rowOf = t => $$('.prow').find(r => r.querySelector('summary b').textContent.includes(t));
+      $$('.prow').forEach(d => { d.open = true; });
+      click(rowOf('homelab-nuc: disk is 96').querySelector('[data-op=acknowledge]'));
+      await until(() => chip('acknowledged') === 1, 'acknowledged');
+      const id = [...F.issueStates.keys()][0], since0 = F.issueStates.get(id).since;
+      location.hash = '#/nodes/homelab-nuc'; await until(() => $('[data-act=disk-refresh]'), 'node page');
+      click($('[data-act=disk-refresh]'));
+      await until(() => /Disk usage updated/.test($('#disk-status')?.textContent || ''), 'refresh answered', 20000);
+      const now = (await Fleet.api.get('issues')).items.find(i => i.id === id);
+      expect(now.since !== since0 && now.state === 'open' && now.stateBy === null && now.stateAt === null && now.snoozedUntil === null, 'a new measurement is a new occurrence: since changed, the acknowledgement no longer applies');
+      location.hash = '#/problems'; await until(() => $('.prow'), 'problems again');
+      expect(chip('acknowledged') === 0 && chip('open') === 16 && rowOf('homelab-nuc: disk is 96'), 'the problem is back under Open');
+      /* A snooze keeps applying when since changes. */
+      $$('.prow').forEach(d => { d.open = true; });
+      click(rowOf('homelab-nuc: disk is 96').querySelector('[data-op=snooze][data-hours="24"]'));
+      await until(() => chip('snoozed') === 1, 'snoozed');
+      F.nodes.find(n => n.alias === 'homelab-nuc')._disk.measuredAt = new Date().toISOString();
+      const after = (await Fleet.api.get('issues')).items.find(i => i.id === id);
+      expect(after.state === 'snoozed' && after.stateBy === 'joan', 'a snooze applies until its time passes, whatever since does');
+    },
+    /* A read token cannot change state. Open: ?drive=issueScope&scope=read#/problems */
+    async issueScope() {
+      const F = window.__FIXTURE;
+      await until(() => $('.prow'), 'problems');
+      $$('.prow').forEach(d => { d.open = true; });
+      const row = $$('.prow').find(r => /design-imac: agent-file\/claude failed/.test(r.textContent));
+      expect(!row.querySelector('[data-op]'), 'no working Acknowledge, Snooze or Reopen button');
+      const locked = [...row.querySelectorAll('.is-locked[data-need=operate]')].map(b => b.textContent.trim());
+      expect(locked.includes('Acknowledge') && locked.includes('Snooze'), 'locked ones stand in, with their reason: ' + locked);
+      expect(row.querySelector('.is-locked[data-need=operate]').dataset.tip.includes('Needs the operate scope'), 'which names the scope');
+      expect($('.lock-note')?.textContent.includes('operate scope'), 'and the page says why');
+      click([...row.querySelectorAll('.is-locked')].find(b => /Acknowledge/.test(b.textContent))); await wait(200);
+      expect(/Not available/.test($('#toasts').textContent), 'clicking one explains instead of acting');
+      expect(F.calls.filter(c => c.path === 'issues/state').length === 0 && F.issueStates.size === 0, 'and sends nothing');
+      location.hash = '#/nodes/studio-mini/problems'; await until(() => $('.prob'), 'machine problems');
+      expect(!$('.prob [data-op]') && $$('.prob .is-locked[data-need=operate]').length >= 3, 'the machine\'s Problems tab is locked too (Retry, Acknowledge, Snooze)');
+      expect(F.calls.filter(c => c.path === 'issues/state').length === 0, 'still nothing sent');
+      location.hash = '#/problems'; await until(() => $('.prow'), 'problems again');
+      expect($$('[data-act=prob-state]').length === 3, 'the state tabs are readable with any scope');
+    },
+    /* The Server refuses the change (403). Open: ?drive=issueForbidden&forbid=1#/problems */
+    async issueForbidden() {
+      const F = window.__FIXTURE;
+      await until(() => $('.prow'), 'problems');
+      $$('.prow').forEach(d => { d.open = true; });
+      const chip = k => +$(`[data-act=prob-state][data-v=${k}]`).querySelector('span').textContent;
+      const open0 = chip('open');
+      click($$('.prow')[0].querySelector('[data-op=acknowledge]'));
+      await until(() => /did not change|not changed/i.test($('#toasts').textContent), 'error toast');
+      expect(/scope does not allow/.test($('#toasts').textContent), 'the Server\'s refusal is explained: ' + $('#toasts').textContent.slice(0, 120));
+      expect(chip('open') === open0 && chip('acknowledged') === 0 && F.issueStates.size === 0, 'nothing changed');
+      expect($$('.prow')[0].querySelector('[data-op=acknowledge]') && !$$('.prow')[0].querySelector('[data-op=acknowledge]').disabled, 'and the button is usable again');
+    },
+    /* The contract of the new routes in the fixture. Open: ?drive=fixturePhase4#/nodes */
+    async fixturePhase4() {
+      const F = window.__FIXTURE;
+      await until(() => $('.health') || $('.empty'), 'app');
+      const csrf = (await (await fetch('/dashboard/api/csrf')).json()).token;
+      const call = async (method, path, body) => { const r = await fetch('/dashboard/api/' + path, { method, headers: { 'Content-Type': 'application/json', 'X-Fleet-CSRF': csrf }, body: method === 'GET' ? undefined : JSON.stringify(body ?? {}) }); return { status: r.status, body: await r.json().catch(() => null) }; };
+      const get = p => call('GET', p), post = (p, b) => call('POST', p, b);
+      const is = (r, status, code, label) => expect(r.status === status && (code === null || r.body?.code === code), `${label}: ${r.status} ${r.body?.code || ''}`);
+      const keys = o => Object.keys(o).sort().join();
+      const list = (await get('desired-revisions?order=newest')).body.items;
+      expect(list.every(r => 'commit' in r) && keys(list[0].commit) === 'author,committedAt,subject' && list.at(-1).commit === null && list.slice(0, -1).every(r => r.commit), 'GET desired-revisions: commit on every item, null only for the oldest');
+      expect(!JSON.stringify(list).includes('@'), 'the author\'s email is not part of it');
+      const d0 = (await get('desired-revisions/' + list[0].desiredRevisionId)).body, dN = (await get('desired-revisions/' + list.at(-1).desiredRevisionId)).body;
+      expect(keys(d0) === 'acceptedAt,commit,desiredRevisionId,previous,rolloutId,skills,sourceRevision,targets' && keys(d0.skills) === 'added,changed,removed' && keys(d0.targets) === 'added,changed,nodes,removed', 'GET desired-revisions/{id}: the contract fields');
+      expect(d0.previous.desiredRevisionId === list[1].desiredRevisionId && dN.previous === null, 'previous is the revision accepted just before, null for the first');
+      expect([d0.skills.added, d0.skills.changed, d0.skills.removed, dN.skills.added].every(l => l.join() === [...l].sort().join()) && dN.skills.removed.length === 0, 'skill lists are sorted; the first revision removes nothing');
+      expect(d0.rolloutId === (await get('rollouts?order=newest')).body.items[0].rolloutId, 'rolloutId is the rollout created for this revision');
+      const details = await Promise.all(list.map(r => get('desired-revisions/' + r.desiredRevisionId)));
+      expect(details.every(r => r.body.targets.removed === 0), 'removed Targets retain their Assignments, so the Server reports no removed Targets');
+      is(await get('desired-revisions/' + '00000000-0000-4000-a000-000000000000'), 404, 'revision_not_found', 'an unknown revision');
+      is(await get('rollouts/' + '00000000-0000-4000-a000-000000000000'), 404, 'rollout_not_found', 'an unknown rollout');
+      for (const idx of [0, 1, 2, 4]) {
+        const rid = (await get('rollouts?order=newest')).body.items[idx].rolloutId, ro = (await get('rollouts/' + rid)).body;
+        const names = ro.nodes.map(n => n.nodeName);
+        expect(keys(ro) === 'createdAt,desiredRevisionId,nodes,rolloutId,sourceRevision,summary' && keys(ro.summary) === 'applying,failed,pending,succeeded,superseded' && keys(ro.nodes[0]) === 'firstAttemptAt,lastAttemptAt,nodeId,nodeName,state,targets' && keys(ro.nodes[0].targets[0]) === 'errorCode,name,state,updatedAt', `GET rollouts/{id} #${idx}: the contract fields`);
+        const sum = { pending: 0, applying: 0, succeeded: 0, failed: 0, superseded: 0 }; ro.nodes.forEach(n => n.targets.forEach(t => { sum[t.state]++; }));
+        const worst = ['failed', 'applying', 'pending', 'succeeded', 'superseded'];
+        expect(JSON.stringify(sum) === JSON.stringify(Object.fromEntries(Object.keys(ro.summary).map(k => [k, sum[k]]))) && Object.keys(sum).every(k => sum[k] === ro.summary[k]), `#${idx}: the summary counts the Targets of the nodes`);
+        expect(names.join() === [...names].sort((a, b) => a.localeCompare(b)).join() && ro.nodes.every(n => n.state === worst.find(s => n.targets.some(t => t.state === s))), `#${idx}: ordered by name, state is the worst Target state`);
+        expect(ro.nodes.every(n => (n.firstAttemptAt === null) === (n.lastAttemptAt === null) && (n.firstAttemptAt === null || n.firstAttemptAt <= n.lastAttemptAt)) && ro.nodes.every(n => n.targets.every(t => t.state === 'failed' || t.errorCode === null)), `#${idx}: attempt times are ordered or null; error codes only on failures`);
+      }
+      const nuc = (await get('nodes/' + F.nodes.find(n => n.alias === 'homelab-nuc').id)).body, other = (await get('nodes/' + F.nodes.find(n => n.alias === 'mbp-joan').id)).body;
+      expect(nuc.drift.length === 2 && keys(nuc.drift[0]) === 'detectedAt,files,target' && nuc.drift[0].detectedAt > nuc.drift[1].detectedAt && nuc.drift[1].files.length === 2, 'GET nodes/{node}.drift: newest first, { target, files, detectedAt }');
+      expect(Array.isArray(other.drift) && other.drift.length === 0, 'a machine without drift has []');
+      /* issues/state */
+      const issues0 = (await get('issues')).body.items, id = issues0.find(i => i.code === 'disk_space_critical').id;
+      expect(issues0.every(i => i.state === 'open' && i.stateBy === null && i.stateAt === null && i.snoozedUntil === null), 'GET issues: state fields on every item, open and null by default');
+      F.state.scope = 'read'; is(await post('issues/state', { id, action: 'acknowledge' }), 403, 'insufficient_scope', 'read scope'); F.state.scope = 'operate';
+      is(await post('issues/state', { id, action: 'acknowledge' }), 200, null, 'operate scope may acknowledge');
+      is(await post('issues/state', { id, action: 'acknowledge', hours: 4 }), 400, 'invalid_request', 'hours with acknowledge');
+      is(await post('issues/state', { id, action: 'reopen', hours: 1 }), 400, 'invalid_request', 'hours with reopen');
+      is(await post('issues/state', { id, action: 'snooze' }), 400, 'invalid_request', 'snooze without hours');
+      for (const hours of [0, 169, 1.5, '4']) is(await post('issues/state', { id, action: 'snooze', hours }), 400, 'invalid_request', 'snooze for ' + JSON.stringify(hours));
+      is(await post('issues/state', { id, action: 'mute' }), 400, 'invalid_request', 'an unknown action');
+      is(await post('issues/state', { action: 'acknowledge' }), 400, 'invalid_request', 'no id');
+      is(await post('issues/state', { id: 'x'.repeat(301), action: 'acknowledge' }), 400, 'invalid_request', 'an ID longer than 300 characters');
+      is(await post('issues/state', { id: 'x'.repeat(300), action: 'acknowledge' }), 404, 'issue_not_found', 'a 300 character ID passes validation');
+      is(await post('issues/state', { id: '   ', action: 'acknowledge' }), 404, 'issue_not_found', 'whitespace is a nonempty unknown ID, like the Server');
+      is(await post('issues/state', { id: 'nope:nothing', action: 'acknowledge', hours: null }), 404, 'issue_not_found', 'null hours is absent for a nullable request field');
+      is(await post('issues/state', { id: 'nope:nothing', action: 'acknowledge' }), 404, 'issue_not_found', 'no current issue with that ID');
+      is(await post('issues/state', { id: 'nope:nothing', action: 'mute' }), 400, 'invalid_request', 'the request is checked before the issue is looked up');
+      const ack = await post('issues/state', { id, action: 'acknowledge' });
+      expect(ack.body.id === id && ack.body.state === 'acknowledged' && ack.body.stateBy === 'joan' && !isNaN(Date.parse(ack.body.stateAt)) && ack.body.snoozedUntil === null && ack.body.code === 'disk_space_critical', 'the answer is the updated issue item');
+      const listed = (await get('issues')).body.items;
+      expect(listed.map(i => i.id).join() === issues0.map(i => i.id).join() && listed.find(i => i.id === id).state === 'acknowledged', 'issues keep their order');
+      F.nodes.find(n => n.alias === 'homelab-nuc')._disk.measuredAt = new Date(Date.now() + 1000).toISOString();
+      expect((await get('issues')).body.items.find(i => i.id === id).state === 'open', 'when since differs the acknowledgement no longer applies');
+      const sn = await post('issues/state', { id, action: 'snooze', hours: 168 });
+      expect(sn.body.state === 'snoozed' && Math.abs(Date.parse(sn.body.snoozedUntil) - Date.now() - 168 * 3600e3) < 60e3, 'snooze up to 168 hours');
+      is(await post('issues/state', { id, action: 'snooze', hours: 1 }), 200, null, 'snooze for 1 hour');
+      is(await post('issues/state', { id, action: 'reopen' }), 200, null, 'reopen');
+      expect((await get('issues')).body.items.find(i => i.id === id).state === 'open', 'reopen removes the state');
+      expect(F.audit.slice(0, 5).map(e => e.action).reverse().join() === 'issue.acknowledged,issue.acknowledged,issue.snoozed,issue.snoozed,issue.reopened', 'each change is audited: ' + F.audit.filter(e => /^issue\./.test(e.action)).map(e => e.action).join());
+      expect(F.audit.find(e => e.action === 'issue.reopened').nodeId === F.nodes.find(n => n.alias === 'homelab-nuc').id, 'with the Node of the issue');
+    },
+    /* Hostile commit subject and author, skill name, drift path, Operator name. Open: ?drive=p4Xss&xss=1&states=1#/deployments */
+    async p4Xss() {
+      let alerts = 0; window.alert = () => { alerts++; };
+      const bad = () => document.querySelectorAll('#root img, #root script, #root svg[onload], #root [onerror], #root [onclick], #root [onload]').length;
+      const shown = s => document.body.textContent.includes(s);
+      const revs = window.FLEET.revisions;
+      await until(() => $('.dep-hero') && $('.hist-item'), 'deployments');
+      expect(shown('<img src=x onerror=alert(1)> "quoted" & <script>alert(9)</script>') && shown('"><svg onload=alert(10)>') && bad() === 0, 'the list shows the hostile subject and author as text (' + bad() + ')');
+      expect(shown('<img src=x onerror=alert(11)>') && bad() === 0, 'the hero shows the hostile skill name as text');
+      location.hash = '#/deployments/' + revs[0].id; await until(() => $('h1.dep-title') && $('.rv-row'), 'revision page');
+      expect($('h1.dep-title').textContent.includes('<script>alert(9)</script>') && shown('<img src=x onerror=alert(11)>') && bad() === 0, 'the revision page shows them as text (' + bad() + ')');
+      location.hash = '#/nodes'; await until(() => $('.tile-commit'), 'gallery');
+      $('.tile-commit').dispatchEvent(new MouseEvent('pointerover', { bubbles: true }));
+      await wait(100);
+      expect($('.tile-commit').textContent.includes('<img src=x onerror=alert(1)>') && bad() === 0 && !document.querySelector('#tip img'), 'the gallery tile and its tooltip are text (' + bad() + ')');
+      location.hash = '#/nodes/homelab-nuc/activity'; await until(() => $('.tl-files'), 'activity');
+      $$('.tl-files').forEach(d => { d.open = true; }); await wait(100);
+      expect(shown('"><script>alert(12)</script>/<img src=x onerror=alert(13)>.md') && bad() === 0, 'a hostile drift path is text (' + bad() + ')');
+      location.hash = '#/problems'; await until(() => $('.prow'), 'problems');
+      click($('[data-act=prob-state][data-v=acknowledged]')); await until(() => $('.prow'), 'acknowledged');
+      $$('.prow').forEach(d => { d.open = true; }); await wait(100);
+      expect(shown('Acknowledged by "><svg onload=alert(10)>') && bad() === 0, 'a hostile Operator name is text (' + bad() + ')');
       await wait(300);
       expect(alerts === 0, 'alert was never called');
     },

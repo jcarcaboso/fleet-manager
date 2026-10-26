@@ -1,0 +1,36 @@
+{
+  "rolloutId": "00000000-0000-0000-0000-0000000000f1",
+  "desiredRevisionId": "00000000-0000-0000-0000-0000000000d1",
+  "sourceRevision": "a3f9c21d0c5b4e8f9a1b2c3d4e5f60718293a4b5",
+  "createdAt": "2026-10-25T09:00:00Z",
+  "summary": {
+    "pending": 0,
+    "applying": 1,
+    "succeeded": 3,
+    "failed": 1,
+    "superseded": 0
+  },
+  "nodes": [
+    {
+      "nodeId": "00000000-0000-0000-0000-000000000001",
+      "nodeName": "studio-mini",
+      "state": "failed",
+      "firstAttemptAt": "2026-10-25T09:00:00Z",
+      "lastAttemptAt": "2026-10-25T14:20:00Z",
+      "targets": [
+        {
+          "name": "ai-client/claude",
+          "state": "failed",
+          "errorCode": "ai_client_reconcile_failed",
+          "updatedAt": "2026-10-25T14:20:00Z"
+        },
+        {
+          "name": "skills",
+          "state": "succeeded",
+          "errorCode": null,
+          "updatedAt": "2026-10-25T09:01:30Z"
+        }
+      ]
+    }
+  ]
+}

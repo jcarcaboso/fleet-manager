@@ -40,11 +40,13 @@ pub async fn apply(
     reconciler: &crate::ai_client::Reconciler,
     api: &Api,
     assignment: &Assignment,
-) -> std::result::Result<(), ActionError> {
+) -> std::result::Result<Vec<String>, ActionError> {
     validate(assignment).map_err(ActionError::invalid_assignment)?;
+    // AI-client drift is out of scope: nothing is reported.
     reconciler
         .reconcile(api, assignment.ai_client.as_ref().unwrap())
         .await
+        .map(|_| Vec::new())
         .map_err(|failure| {
             let error = ActionError::new("ai_client_reconcile_failed", failure.error)
                 .with_step(failure.step);

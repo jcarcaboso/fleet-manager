@@ -119,7 +119,8 @@ public static class FleetServerHosting
                 context.Response.StatusCode = exception.Code switch
                 {
                     "unauthorized" or "invalid_credential" or "node_unauthorized" or "bundle_not_authorized" or "cliproxy_credential_not_authorized" => 403,
-                    "not_found" or "node_not_found" or "credential_not_found" or "attempt_not_found" or "target_not_found" or "enrollment_link_not_found" => 404,
+                    "not_found" or "node_not_found" or "credential_not_found" or "attempt_not_found" or "target_not_found" or "enrollment_link_not_found" or "revision_not_found" or
+                        "rollout_not_found" => 404,
                     "node_alias_in_use" or "node_revoked" or "node_alias_changed" or "target_not_failed" or "attempt_not_failed" => 409,
                     _ => 400
                 };

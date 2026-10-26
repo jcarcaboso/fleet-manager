@@ -131,6 +131,28 @@ public static partial class OperatorApi
             CancellationToken ct) =>
             new { items = await OperatorIssues.ReadAsync(db, coordinator, catalog, options, configuration, time, latest.Value, ct) })
             .Scope(OperatorScope.Read);
+        // Acknowledges or snoozes an issue of the current list, or reopens it. Answers with the updated issue.
+        api.MapPost("/issues/state", async (IssueStateRequest request, HttpContext http, FleetDbContext db, IFleetCoordinator coordinator,
+            CliProxyCatalog catalog, IOptions<FleetOptions> options, IConfiguration configuration, TimeProvider time, LatestAgentVersion latest,
+            CancellationToken ct) =>
+        {
+            if (string.IsNullOrEmpty(request.Id) || request.Id.Length > IssueStateRules.MaximumIdLength)
+                throw new OperatorApiException(400, "invalid_request", $"id is required, at most {IssueStateRules.MaximumIdLength} characters.");
+            var action = request.Action switch
+            {
+                "acknowledge" => IssueStateAction.Acknowledge,
+                "snooze" => IssueStateAction.Snooze,
+                "reopen" => IssueStateAction.Reopen,
+                _ => throw new OperatorApiException(400, "invalid_request", "action must be acknowledge, snooze or reopen.")
+            };
+            IssueStateRules.ValidateHours(action, request.Hours);
+            var issues = await OperatorIssues.ReadAsync(db, coordinator, catalog, options, configuration, time, latest.Value, ct);
+            var issue = issues.FirstOrDefault(x => string.Equals(x.Id, request.Id, StringComparison.Ordinal))
+                ?? throw new OperatorApiException(404, "issue_not_found", "No current issue has that ID.");
+            var entry = await coordinator.ChangeIssueStateAsync(new(issue.Id, action, request.Hours, issue.Since, issue.NodeId, Actor(http),
+                issues.Select(x => x.Id).ToList()), ct);
+            return OperatorIssues.WithState(issue, entry, time.GetUtcNow());
+        }).Scope(OperatorScope.Operate);
         api.MapGet("/errors", () => new { items = ErrorCatalog.All }).Scope(OperatorScope.Read);
         api.MapGet("/errors/{code}", (string code) => ErrorCatalog.Find(code) ?? throw new OperatorApiException(404, "invalid_request",
             "No error catalog entry exists for that code.")).Scope(OperatorScope.Read);
@@ -146,6 +168,10 @@ public static partial class OperatorApi
             await coordinator.GetDesiredRevisionsAsync(new(limit ?? 100, after, Order(order)), ct)).Scope(OperatorScope.Read);
         api.MapGet("/rollouts", async (int? limit, string? after, string? order, IFleetCoordinator coordinator, CancellationToken ct) =>
             await coordinator.GetRolloutsAsync(new(limit ?? 100, after, Order(order)), ct)).Scope(OperatorScope.Read);
+        api.MapGet("/desired-revisions/{id}", async (string id, IFleetCoordinator coordinator, CancellationToken ct) =>
+            await coordinator.GetDesiredRevisionAsync(new(Guid.TryParse(id, out var revision) ? revision : Guid.Empty), ct)).Scope(OperatorScope.Read);
+        api.MapGet("/rollouts/{id}", async (string id, IFleetCoordinator coordinator, CancellationToken ct) =>
+            await coordinator.GetRolloutAsync(new(Guid.TryParse(id, out var rollout) ? rollout : Guid.Empty), ct)).Scope(OperatorScope.Read);
         api.MapGet("/rollouts/{id:guid}/attempts", async (Guid id, int? limit, string? after, IFleetCoordinator coordinator, CancellationToken ct) =>
             await coordinator.GetAttemptsAsync(new(id), new(limit ?? 100, after), ct)).Scope(OperatorScope.Read);
         api.MapGet("/warnings", async (int? limit, string? after, IFleetCoordinator coordinator, CancellationToken ct) =>

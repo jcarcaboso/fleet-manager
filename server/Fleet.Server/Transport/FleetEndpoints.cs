@@ -121,6 +121,15 @@ public static class FleetEndpoints
                 request.StateDirectory), ct);
             return Results.NoContent();
         }).LimitPerNode();
+        // The Agent reports the files it repaired in an assigned Target. The Server keeps the newest events of the Node.
+        agents.MapPost("/drift", async (DriftRequest request, HttpContext context, IFleetCoordinator coordinator, CancellationToken ct) =>
+        {
+            if (request.Target is null) throw new CoordinationException("invalid_request", "target is required.");
+            if (request.Files is null || request.Files.Any(x => x is null))
+                throw new CoordinationException("invalid_request", "files is required and holds paths.");
+            await coordinator.RecordDriftAsync(Node(context), new(request.Target, request.Files!.Select(x => x!).ToList()), ct);
+            return Results.NoContent();
+        }).LimitPerNode();
         agents.MapPost("/credentials/renew", async (RenewalRequest request, HttpContext context, IFleetCoordinator coordinator,
             NodeCertificateIssuer issuer, TimeProvider time, CancellationToken ct) =>
         {
@@ -164,8 +173,8 @@ public static class FleetEndpoints
 }
 
 /// <summary>
-/// Per-Node limit shared by <c>POST /agent/v1/attempts/{attemptId}/detail</c>, <c>PUT /agent/v1/disk-usage</c> and
-/// <c>PUT /agent/v1/telemetry</c>: a bucket of 30
+/// Per-Node limit shared by <c>POST /agent/v1/attempts/{attemptId}/detail</c>, <c>PUT /agent/v1/disk-usage</c>,
+/// <c>PUT /agent/v1/telemetry</c> and <c>POST /agent/v1/drift</c>: a bucket of 30
 /// that refills one request every 2 seconds (30 a minute sustained), with no queue. A healthy Agent sends one detail per failed
 /// Attempt plus retries, and one disk report every few hours, far below this. Partitions exist only for authenticated Nodes
 /// and the framework removes idle ones.
