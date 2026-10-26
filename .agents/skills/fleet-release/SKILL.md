@@ -27,6 +27,16 @@ volumes.
 The GitHub workflow builds and publishes client archives. It does **not** build
 or push the Server Docker image. That remains a manual release step.
 
+The dashboard (frontend) is embedded in the Server image from
+`server/Fleet.Server/Dashboard/Assets/` and served at `/dashboard`. There is no
+separate frontend image or artifact: publishing the Server image publishes the
+dashboard, and a dashboard change needs a new Server image and version. The
+`Dashboard/Dev/` harness is not embedded and is never published.
+
+A release therefore has three parts that share one version and one source commit:
+the Server image with the dashboard (manual), the Agent and `fleet` archives
+(workflow), and the Homebrew formulas (workflow).
+
 ## Prepare the source
 
 1. Fetch `origin/master` and tags; inspect GitHub releases and registry tags.
@@ -45,6 +55,55 @@ or push the Server Docker image. That remains a manual release step.
 5. Select the exact tested `master` commit as `SHA`. Use a clean checkout or a
    disposable detached worktree at that commit for release builds. All image,
    tag, and archive provenance must refer to that same commit.
+
+## Breaking and minor releases
+
+A release that changes behaviour operators or scripts depend on needs more than
+a version bump. Treat a change as breaking when it alters a `fleet` command's
+flags, output or exit codes, removes or reshapes an Operator API or dashboard
+route, tightens a limit, adds a database migration, or changes what an older
+Agent or Server can accept. Use a minor version while the project is below 1.0.
+
+For a breaking release, before publishing:
+
+1. List the breaking changes by reading the merged PRs and
+   `git diff vX.Y.Z..origin/master` for `clients/bins/fleet/`,
+   `server/Fleet.Server/Transport/`, `server/Fleet.Server/Dashboard/`,
+   `server/Fleet.Server/Persistence/Migrations/`, `contracts/` and
+   `docs/technical-design/operator-*.md`. Do not rely on PR titles.
+2. In `docs/releases/VERSION.md`, add a **Breaking changes** section and an
+   **Upgrade** section. Give the upgrade order (Server first when Agents tolerate
+   an older Server, otherwise Agents first, as in 0.8.1), the migrations and
+   whether they run concurrently or lock tables, the backup command from
+   `docs/technical-design/backup-restore.md`, and what an older Agent or Server
+   shows after a partial upgrade. State what was not verified, such as macOS code
+   that CI only compiles.
+3. Confirm every PR the release depends on reached `origin/master`. A PR whose
+   base branch was already merged lands in that old branch, not `master`; check
+   with `git merge-base --is-ancestor <pr-head> origin/master` and open a PR to
+   `master` if it is not an ancestor.
+4. Update documentation that names removed or renamed UI, commands or routes.
+   Search for their labels and paths.
+5. Run the checks in `CONTRIBUTING.md` and the image smoke test below with
+   `scripts/smoke-https.py`. Also open `/dashboard` once on the smoke-test Server
+   with the temporary Operator token, because the smoke script does not exercise
+   the dashboard assets.
+6. Check compatibility on the same smoke-test Server instead of trusting the
+   notes. Build the previous release's Agent from its tag in a scratch directory
+   (`git archive vX.Y.Z clients | tar -x -C DIR`, then `cargo build --locked -p
+   fleet-agent` with its own `CARGO_TARGET_DIR`), enroll it with a temporary
+   alias and run `run --once`; it must poll without errors and show as fresh.
+   Then enroll and run the new Agent, and confirm `fleet nodes show` returns the
+   machine details and disk usage it reports and `fleet doctor` works. Remove
+   the temporary Compose project, volumes, image and scratch directories.
+7. Ask for review of the Breaking changes section from someone who runs the
+   installation before tagging.
+
+Version 0.9.0 is the first release with this process. Its breaking changes are
+the `fleet --yes` gate, JSON errors and exit codes, `{code,message}` Operator
+API errors and the 1 to 100 `limit`, the removed `GET /dashboard/api/diagnostics`
+route and the rebuilt dashboard, with six migrations. The Server image,
+`fleet`, `fleet-agent` and the dashboard all ship as 0.9.0.
 
 ## Publish the Server image before the Git tag
 
@@ -69,6 +128,14 @@ to the local image, choose an unused loopback port, wait for migrations and
 readiness, then run `scripts/smoke-https.py` with that temporary Operator
 environment and `FLEET_CA_CERT`. Clean up only that temporary Compose project
 and its volumes.
+
+The image push is manual because no workflow publishes it. It needs Docker Hub
+credentials for `skorcius/fleet-manager` in the local credential store. Check
+`docker login` state without printing credentials, and ask the user to log in if
+it is missing; do not look for tokens in files or the environment. Publishing the
+image and pushing the tag are separate outward-facing steps: build and smoke-test
+first, report the image ID and labels, and push only when the user has asked for
+publication.
 
 If a remote version image already exists, verify its revision and digest and
 reuse it only when it matches the intended source. Do not overwrite a published
