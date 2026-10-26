@@ -8,6 +8,7 @@ public sealed class FleetDbContext(DbContextOptions<FleetDbContext> options) : D
     public DbSet<NodeRow> Nodes => Set<NodeRow>();
     public DbSet<NodeCheckinRow> NodeCheckins => Set<NodeCheckinRow>();
     public DbSet<NodeDiskUsageRow> NodeDiskUsages => Set<NodeDiskUsageRow>();
+    public DbSet<NodeTelemetryRow> NodeTelemetries => Set<NodeTelemetryRow>();
     public DbSet<CredentialRow> Credentials => Set<CredentialRow>();
     public DbSet<EnrollmentRow> Enrollments => Set<EnrollmentRow>();
     public DbSet<BundleRow> Bundles => Set<BundleRow>();
@@ -38,6 +39,18 @@ public sealed class FleetDbContext(DbContextOptions<FleetDbContext> options) : D
         model.Entity<NodeDiskUsageRow>().ToTable("node_disk_usage").HasKey(x => new { x.NodeId, x.Label });
         model.Entity<NodeDiskUsageRow>().Property(x => x.Label).HasMaxLength(16);
         model.Entity<NodeDiskUsageRow>().HasOne<NodeRow>().WithMany().HasForeignKey(x => x.NodeId).OnDelete(DeleteBehavior.Cascade);
+        model.Entity<NodeTelemetryRow>().ToTable("node_telemetry").HasKey(x => x.NodeId);
+        model.Entity<NodeTelemetryRow>().Property(x => x.AgentVersion).HasMaxLength(128);
+        model.Entity<NodeTelemetryRow>().Property(x => x.OsName).HasMaxLength(128);
+        model.Entity<NodeTelemetryRow>().Property(x => x.OsVersion).HasMaxLength(128);
+        model.Entity<NodeTelemetryRow>().Property(x => x.OsKernel).HasMaxLength(128);
+        model.Entity<NodeTelemetryRow>().Property(x => x.Arch).HasMaxLength(128);
+        model.Entity<NodeTelemetryRow>().Property(x => x.Hostname).HasMaxLength(128);
+        model.Entity<NodeTelemetryRow>().Property(x => x.User).HasMaxLength(128);
+        model.Entity<NodeTelemetryRow>().Property(x => x.InstallMethod).HasMaxLength(16);
+        model.Entity<NodeTelemetryRow>().Property(x => x.ServiceManager).HasMaxLength(16);
+        model.Entity<NodeTelemetryRow>().Property(x => x.StateDirectory).HasMaxLength(512);
+        model.Entity<NodeTelemetryRow>().HasOne<NodeRow>().WithMany().HasForeignKey(x => x.NodeId).OnDelete(DeleteBehavior.Cascade);
         model.Entity<CredentialRow>().ToTable("node_credentials").HasKey(x => x.Id);
         model.Entity<CredentialRow>().HasIndex(x => x.CertificateSha256).IsUnique();
         model.Entity<CredentialRow>().HasIndex(x => new { x.NodeId, x.RevokedAt });
@@ -119,6 +132,22 @@ public sealed class NodeDiskUsageRow
     public long UsedBytes { get; set; }
     public long AvailableBytes { get; set; }
     public DateTimeOffset MeasuredAt { get; set; }
+}
+// The latest Agent and machine report only: one row per Node, replaced as a whole by each report. Hostname and user identify people and machines.
+public sealed class NodeTelemetryRow
+{
+    public Guid NodeId { get; set; }
+    public required string AgentVersion { get; set; }
+    public string? OsName { get; set; }
+    public string? OsVersion { get; set; }
+    public string? OsKernel { get; set; }
+    public string? Arch { get; set; }
+    public string? Hostname { get; set; }
+    public string? User { get; set; }
+    public string? InstallMethod { get; set; }
+    public string? ServiceManager { get; set; }
+    public string? StateDirectory { get; set; }
+    public DateTimeOffset ReportedAt { get; set; }
 }
 public sealed class NodeCheckinRow
 {

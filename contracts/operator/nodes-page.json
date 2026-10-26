@@ -25,6 +25,16 @@
         "availableBytes": 72818462720,
         "totalBytes": 994662584320,
         "measuredAt": "2026-10-25T12:00:00Z"
+      },
+      "agent": {
+        "version": "0.8.0",
+        "outdated": true,
+        "os": {
+          "name": "Fedora Linux",
+          "version": "44"
+        },
+        "arch": "x86_64",
+        "hostname": "studio-mini.home.arpa"
       }
     }
   ],

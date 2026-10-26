@@ -92,6 +92,20 @@ Server that predates this feature answers 404; the Agent ignores that and asks
 again at the next slot. See the values on the machine's dashboard page or with
 `fleet nodes disk <alias>`.
 
+The Agent also tells the Server about itself and the machine, so the dashboard
+can show them and mark an Agent that is behind the Server's version. It sends
+the Agent version, the operating system name and version, the kernel version,
+the CPU architecture, the **host name** and the **login name of the user the
+Agent runs as**, how the Agent was installed (`homebrew`, `cargo` or `binary`),
+whether a service manager started it (`systemd`, `launchd` or `none`) and the
+state directory with your home directory shown as `~`. It reads only the
+operating system's own version files and system calls: no commands are run, no
+directories are scanned, and no environment variable values or file contents
+are sent. It sends this after the first successful
+poll and again, at most every 4 hours, only when something changed. A value
+that cannot be read is sent as empty, and a Server that predates this feature
+answers 404, which the Agent ignores until the next slot.
+
 ## Publish and verify Skills
 
 Configure this Node's alias in the source repository:

@@ -6,7 +6,8 @@
 //!
 //! Those calls can block for ever in the kernel on a hung network or FUSE
 //! home, so they never run on the Agent's own loop. A [`Worker`] runs them on
-//! one lazily started, detached thread, one request at a time.
+//! one lazily started, detached thread, one request at a time. The machine
+//! information report reuses the same worker for its own local reads.
 
 use std::{
     io,
@@ -162,23 +163,39 @@ fn c_path(path: &Path) -> io::Result<std::ffi::CString> {
         .map_err(|_| io::Error::from(io::ErrorKind::InvalidInput))
 }
 
-pub type Measurer = Box<dyn Fn() -> Option<DiskUsageReport> + Send + 'static>;
+pub type Measurer<T = DiskUsageReport> = Box<dyn Fn() -> Option<T> + Send + 'static>;
 
 /// The thread and its two single-purpose channels. Dropping this lets a
 /// worker that ever returns exit; one that never returns is left behind.
-struct Link {
+struct Link<T> {
     requests: SyncSender<()>,
-    results: Receiver<Option<DiskUsageReport>>,
+    results: Receiver<Option<T>>,
 }
+
+/// How a worker presents itself: the thread name, what it measures in log
+/// messages, and the thread's stack.
+#[derive(Debug, Clone, Copy)]
+pub struct Style {
+    pub thread: &'static str,
+    pub what: &'static str,
+    pub stack_bytes: usize,
+}
+
+const DISK_STYLE: Style = Style {
+    thread: "fleet-disk",
+    what: "disk usage measurement",
+    stack_bytes: WORKER_STACK_BYTES,
+};
 
 /// Runs measurements off the Agent loop. At most one is outstanding, on at most
 /// one thread, for the life of the process. If a measurement stays unfinished
 /// for [`STUCK_AFTER`], measuring is disabled instead of starting another
 /// thread behind it. The thread is detached, so it can never block exit.
-pub struct Worker {
+pub struct Worker<T = DiskUsageReport> {
     /// Taken by the thread when it starts.
-    measurer: Option<Measurer>,
-    link: Option<Link>,
+    measurer: Option<Measurer<T>>,
+    link: Option<Link<T>>,
+    style: Style,
     outstanding: Option<Instant>,
     disabled: bool,
     wait: Duration,
@@ -195,9 +212,26 @@ impl Worker {
     }
 
     pub fn with_measurer(measurer: Measurer, wait: Duration, stuck_after: Duration) -> Self {
+        Self::styled(measurer, wait, stuck_after, DISK_STYLE)
+    }
+}
+
+impl<T: Send + 'static> Worker<T> {
+    /// A worker with the standard bounds for any kind of result.
+    pub fn standard(measurer: Measurer<T>, style: Style) -> Self {
+        Self::styled(measurer, MEASURE_WAIT, STUCK_AFTER, style)
+    }
+
+    pub fn styled(
+        measurer: Measurer<T>,
+        wait: Duration,
+        stuck_after: Duration,
+        style: Style,
+    ) -> Self {
         Self {
             measurer: Some(measurer),
             link: None,
+            style,
             outstanding: None,
             disabled: false,
             wait,
@@ -212,7 +246,7 @@ impl Worker {
 
     /// Takes the result of an earlier request without blocking. A request
     /// unfinished after the stuck threshold disables the worker.
-    pub fn collect(&mut self, now: Instant) -> Option<DiskUsageReport> {
+    pub fn collect(&mut self, now: Instant) -> Option<T> {
         let since = self.outstanding?;
         match self.link.as_ref()?.results.try_recv() {
             Ok(result) => {
@@ -235,7 +269,7 @@ impl Worker {
     /// Requests a measurement, starting the thread on first use, and waits at
     /// most the configured bound for it. `None` means no result yet: it is
     /// picked up by [`Worker::collect`] in a later cycle. Call only when idle.
-    pub async fn measure(&mut self, now: Instant) -> Option<DiskUsageReport> {
+    pub async fn measure(&mut self, now: Instant) -> Option<T> {
         if !self.is_idle() || !self.request(now) {
             return None;
         }
@@ -262,8 +296,8 @@ impl Worker {
             let (requests, request_rx) = mpsc::sync_channel::<()>(1);
             let (result_tx, results) = mpsc::channel();
             let started = std::thread::Builder::new()
-                .name("fleet-disk".to_owned())
-                .stack_size(WORKER_STACK_BYTES)
+                .name(self.style.thread.to_owned())
+                .stack_size(self.style.stack_bytes)
                 .spawn(move || {
                     while request_rx.recv().is_ok() {
                         if result_tx.send(measurer()).is_err() {
@@ -272,7 +306,7 @@ impl Worker {
                     }
                 });
             if let Err(error) = started {
-                eprintln!("could not start the disk usage thread: {error}");
+                eprintln!("could not start the {} thread: {error}", self.style.thread);
                 self.disable("the measurement thread could not be started");
                 return false;
             }
@@ -291,7 +325,10 @@ impl Worker {
     }
 
     fn disable(&mut self, reason: &str) {
-        eprintln!("disk usage measurement is off until the Agent restarts: {reason}");
+        eprintln!(
+            "{} is off until the Agent restarts: {reason}",
+            self.style.what
+        );
         self.disabled = true;
         self.outstanding = None;
         self.link = None;

@@ -194,7 +194,8 @@ public sealed record NodeStatus(
     DateTimeOffset? CredentialNotAfter,
     TargetStateCounts Targets,
     string? CurrentRevision,
-    NodeDiskSummary? Disk = null);
+    NodeDiskSummary? Disk = null,
+    NodeAgentSummary? Agent = null);
 
 public sealed record NodeCredentialStatus(
     CredentialId CredentialId,
@@ -244,7 +245,8 @@ public sealed record NodeDetail(
     NodeCredentialStatus? Credential,
     IReadOnlyList<NodeTargetStatus> Targets,
     TargetStateCounts Summary,
-    NodeDisk? Disk = null);
+    NodeDisk? Disk = null,
+    NodeAgent? Agent = null);
 
 public sealed record NodeAttemptStatus(
     AttemptId AttemptId,
@@ -274,6 +276,21 @@ public sealed record NodeDiskSummary(string Label, double UsedPercent, long Used
 public sealed record NodeDisk(DateTimeOffset? MeasuredAt, DateTimeOffset? RefreshRequestedAt, IReadOnlyList<NodeDiskVolume> Volumes);
 
 public sealed record DiskRefreshRequested(DateTimeOffset RefreshRequestedAt);
+
+/// <summary>What an Agent reports about itself and its machine. Only <c>AgentVersion</c> is required; the other fields are null when the Agent could not read them.</summary>
+public sealed record AgentTelemetryReport(string AgentVersion, string? OsName, string? OsVersion, string? OsKernel, string? Arch,
+    string? Hostname, string? User, string? InstallMethod, string? ServiceManager, string? StateDirectory);
+
+public sealed record NodeAgentOs(string? Name, string? Version);
+
+public sealed record NodeAgentOsDetail(string? Name, string? Version, string? Kernel);
+
+/// <summary>The Agent information shown in the Node list.</summary>
+public sealed record NodeAgentSummary(string Version, bool Outdated, NodeAgentOs Os, string? Arch, string? Hostname);
+
+/// <summary>The latest telemetry report of a Node. <c>ReportedAt</c> is when the Server received it; <c>LatestVersion</c> is the Server's own version.</summary>
+public sealed record NodeAgent(string Version, string LatestVersion, bool Outdated, NodeAgentOsDetail Os, string? Arch, string? Hostname,
+    string? User, string? InstallMethod, string? ServiceManager, string? StateDirectory, DateTimeOffset ReportedAt);
 
 public sealed record CheckinBucket(DateTimeOffset Hour, int Polls);
 

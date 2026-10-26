@@ -772,6 +772,46 @@ fn nodes_disk_reads_the_node_and_prints_only_its_alias_and_disk() {
     }
 }
 
+fn agent_json() -> Value {
+    json!({
+        "version": "0.9.0", "latestVersion": "0.10.0", "outdated": true,
+        "os": {"name": "Fedora Linux", "version": "44", "kernel": "7.2.11-200.fc44.x86_64"},
+        "arch": "x86_64", "hostname": "studio-mini.home.arpa", "user": "joan", "installMethod": "homebrew",
+        "serviceManager": "systemd", "stateDirectory": "~/.local/state/fleet-agent", "reportedAt": "2026-10-26T08:00:00Z"
+    })
+}
+
+#[test]
+fn nodes_show_and_list_pass_the_agent_through_unchanged() {
+    let show = mock(|_| {
+        let mut node: Value = serde_json::from_str(&node_json()).unwrap();
+        node["agent"] = agent_json();
+        (200, node.to_string())
+    });
+    let run = fleet_at(&show.url, &["nodes", "show", "studio mini/1"]);
+    assert_eq!(run.code, 0, "{}", run.stderr);
+    assert_eq!(run.out()["agent"], agent_json());
+
+    // A Node that never reported, or a Server before phase 3, is not an error: agent is null or absent as sent.
+    let list = mock(|_| {
+        (
+            200,
+            json!({"items": [
+                {"nodeId": NODE_ID, "name": "a", "agent": {"version": "0.9.0", "outdated": false, "os": {"name": "macOS", "version": "15.1"}, "arch": "aarch64", "hostname": "a.local"}},
+                {"nodeId": NODE_ID, "name": "b", "agent": null},
+                {"nodeId": NODE_ID, "name": "c"}
+            ], "nextCursor": null})
+            .to_string(),
+        )
+    });
+    let run = fleet_at(&list.url, &["nodes", "list"]);
+    assert_eq!(run.code, 0, "{}", run.stderr);
+    let out = run.out();
+    assert_eq!(out["items"][0]["agent"]["os"]["name"], "macOS");
+    assert_eq!(out["items"][1]["agent"], Value::Null);
+    assert!(out["items"][2].get("agent").is_none());
+}
+
 #[test]
 fn nodes_disk_refresh_posts_the_request_and_prints_the_202_reply() {
     let server = mock(|line| {

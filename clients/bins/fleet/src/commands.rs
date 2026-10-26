@@ -157,12 +157,12 @@ pub(crate) struct NodesArgs {
 
 #[derive(Debug, Subcommand)]
 enum NodesSubcommand {
-    /// List nodes: alias, platform, freshness, target-state counts and current revision.
+    /// List nodes: alias, platform, freshness, target-state counts, current revision, disk and Agent summary (version, outdated, OS, hostname).
     #[command(
         after_help = "Examples:\n  fleet nodes list\n  fleet nodes list --after <nextCursor>"
     )]
     List(AfterArgs),
-    /// Show one node: credential validity and each target's state, latest attempt and error code.
+    /// Show one node: credential validity, each target's state, latest attempt and error code, disk and `agent` (version, latestVersion, outdated, OS, install method; null before Agent 0.9.0).
     #[command(
         after_help = "Examples:\n  fleet nodes show studio-mini\n  fleet nodes show 00000000-0000-0000-0000-000000000001"
     )]
