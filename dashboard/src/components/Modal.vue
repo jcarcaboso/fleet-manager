@@ -13,7 +13,8 @@ import Icon from './Icon.vue';
  * - `role="dialog"`, `aria-modal="true"`, labelled by its title. While open, the page behind it does not scroll.
  *
  * The header (icon, title, subtitle, close button) is built from props; the default slot is the body, `footer` the buttons.
- * `persistent` ignores Escape and the backdrop (use it while a request runs).
+ * `persistent` ignores Escape and the backdrop (use it while a request runs). A custom `head` slot receives `titleId`: put it on the
+ * heading so `aria-labelledby` finds it.
  */
 const props = withDefaults(defineProps<{
   title: string;
@@ -22,6 +23,8 @@ const props = withDefaults(defineProps<{
   tone?: 'info' | 'serious' | 'critical' | 'good' | 'warning';
   wide?: boolean;
   persistent?: boolean;
+  /** The default slot is the whole dialog content after the `head` slot, without the padded `.modal-body` wrapper (the Add machine wizard lays itself out). */
+  bare?: boolean;
 }>(), { tone: 'info' });
 const emit = defineEmits<{ close: [] }>();
 
@@ -85,14 +88,15 @@ onBeforeUnmount(() => {
   <Teleport :to="target">
     <div class="modal-back" @click="close"></div>
     <div ref="dialog" class="modal" :class="{ 'modal--wide': wide }" role="dialog" aria-modal="true" :aria-labelledby="titleId">
-      <slot name="head">
+      <slot name="head" :title-id="titleId">
         <div class="modal-head">
           <span v-if="icon" class="modal-ic" :class="`t-${tone}`"><Icon :name="icon" /></span>
           <div><h2 :id="titleId">{{ title }}</h2><p v-if="subtitle">{{ subtitle }}</p></div>
           <button type="button" class="icon-btn" aria-label="Close" @click="close"><Icon name="x" /></button>
         </div>
       </slot>
-      <div class="modal-body"><slot /></div>
+      <slot v-if="bare" />
+      <div v-else class="modal-body"><slot /></div>
       <div v-if="$slots.footer" class="modal-foot"><slot name="footer" /></div>
     </div>
   </Teleport>

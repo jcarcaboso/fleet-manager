@@ -1,11 +1,11 @@
-<script setup lang="ts">
+<script setup lang="ts" generic="P extends { key: string; label: string; level: GlyphLevel; kind?: GlyphKind; value: number }">
 import { num } from '@/lib/format';
-import type { StatePart } from '@/lib/targets';
+import type { GlyphKind, GlyphLevel } from '@/lib/status';
 import StatusGlyph from './StatusGlyph.vue';
 
 /** The legend of a `Segbar`. With `clickable`, every state with a value is a button that emits `pick` with its key (a filter). */
-defineProps<{ parts: StatePart[]; clickable?: boolean }>();
-const emit = defineEmits<{ pick: [key: StatePart['key']] }>();
+defineProps<{ parts: P[]; clickable?: boolean }>();
+const emit = defineEmits<{ pick: [key: P['key']] }>();
 </script>
 
 <template>

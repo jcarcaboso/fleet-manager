@@ -15,7 +15,7 @@
 .tip span{color:#d2ccc0}
 #modal-root{position:fixed;inset:0;z-index:70;display:grid;place-items:center;padding:24px}
 #modal-root[hidden]{display:none}
-.modal-back{position:absolute;inset:0;background:rgba(29,27,24,.4);backdrop-filter:blur(3px);-webkit-backdrop-filter:blur(3px)}
+.modal-back{position:absolute;inset:0;background:rgba(29,27,24,.4);-webkit-backdrop-filter:blur(3px);backdrop-filter:blur(3px)}
 .modal{position:relative;width:min(560px,100%);max-height:calc(100vh - 48px);overflow:auto;background:var(--surface);border-radius:24px;box-shadow:0 30px 80px -20px rgba(0,0,0,.45);animation:modalIn .24s cubic-bezier(.2,.8,.3,1)}
 .modal--wide{width:min(840px,100%)}
 .modal-head{display:flex;align-items:flex-start;gap:14px;padding:22px 22px 4px 24px}

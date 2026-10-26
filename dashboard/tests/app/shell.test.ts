@@ -115,12 +115,12 @@ describe('shell', () => {
 
   it('refreshes the badges on navigation, at most every 20 seconds', async () => {
     vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'setInterval', 'clearInterval', 'Date'] });
-    app = await mountApp();
+    app = await mountApp({ path: '/audit' });
     const reads = () => app!.mock.calls.filter(c => c.path === 'issues').length;
     await settle();
     const first = reads();
     expect(first).toBe(1);
-    await app.go('/problems');
+    await app.go('/enrollment');
     await app.go('/audit');
     expect(reads()).toBe(first);
     await vi.advanceTimersByTimeAsync(21_000);
@@ -157,13 +157,13 @@ describe('shell', () => {
     expect(app.wrapper.find('#tip').attributes('hidden')).toBeDefined();
   });
 
-  it('opens and closes the Add machine wizard placeholder from the context', async () => {
+  it('opens and closes the Add machine wizard from the context', async () => {
     app = await mountApp();
     app.ctx.wizard.show();
     await app.settle();
-    expect(document.querySelector('#modal-root .modal h2')?.textContent).toBe('Add a machine');
+    expect(document.querySelector('#modal-root .modal h2')?.textContent).toBe('Name your new machine');
     expect(app.wrapper.find('#modal-root').attributes('hidden')).toBeUndefined();
-    (document.querySelector('#modal-root .modal-foot button') as HTMLElement).click();
+    (document.querySelector('#modal-root .modal button[aria-label="Close"]') as HTMLElement).click();
     await app.settle();
     expect(document.querySelector('#modal-root .modal')).toBeNull();
     expect(app.wrapper.find('#modal-root').attributes('hidden')).toBeDefined();

@@ -1,6 +1,6 @@
 /* Layout: top bar and page layout. */
 /* top bar */
-.topbar{position:sticky;top:0;z-index:30;background:rgba(246,244,239,.86);backdrop-filter:saturate(1.4) blur(14px);-webkit-backdrop-filter:saturate(1.4) blur(14px);border-bottom:1px solid var(--hair)}
+.topbar{position:sticky;top:0;z-index:30;background:rgba(246,244,239,.86);-webkit-backdrop-filter:saturate(1.4) blur(14px);backdrop-filter:saturate(1.4) blur(14px);border-bottom:1px solid var(--hair)}
 .topbar-in{max-width:1320px;margin:0 auto;padding:0 32px;height:64px;display:flex;align-items:center;gap:26px}
 .brand{display:flex;align-items:center;gap:10px;color:var(--ink);font-weight:750;font-size:16px;letter-spacing:-.01em;flex:none}
 .brand:hover{text-decoration:none}

@@ -22,7 +22,7 @@ describe('createFleetApp', () => {
     await settle(20);
     expect(ctx.config.apiUrl).toBe(MOCK_API_URL);
     expect(host.querySelector('header.topbar')).not.toBeNull();
-    expect(host.querySelector('#view')?.textContent).toContain('Problems is not ported yet');
+    expect(host.querySelector('#view h1')?.textContent).toBe('Problems');
   });
 });
 

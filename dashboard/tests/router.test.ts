@@ -18,15 +18,15 @@ describe('route table', () => {
     app = await mountApp({ path: '/' });
     expect(app.router.currentRoute.value.fullPath).toBe('/machines');
   });
-  it('shows each placeholder page', async () => {
+  it('shows each page', async () => {
     app = await mountApp();
     for (const [path, expected] of [['/problems', 'Problems'], ['/deployments', 'Deployments'], ['/repository', 'Repository'], ['/models', 'Models'], ['/enrollment', 'Enrollment'], ['/audit', 'Audit']] as const) {
       await app.go(path);
-      expect(textOf(app.wrapper.find('#view').element), path).toContain(`${expected} is not ported yet`);
+      expect(app.wrapper.find('#view h1').text(), path).toBe(expected);
     }
     await app.go('/deployments/00000000-0000-4000-a000-000000000001');
     expect(app.router.currentRoute.value.name).toBe('revision');
-    expect(textOf(app.wrapper.find('#view').element)).toContain('00000000-0000-4000-a000-000000000001');
+    expect(app.wrapper.find('#view h1').text()).toBe('We could not find that revision');
   });
   it('redirects /deployments/<short SHA> to the list with ?revision=', async () => {
     app = await mountApp();
@@ -37,10 +37,10 @@ describe('route table', () => {
   });
   it('shows the machine page with the tab named in the address, and Overview for an unknown tab', async () => {
     app = await mountApp({ path: '/machines/studio-mini/security' });
-    expect(textOf(app.wrapper.find('#tabpanel').element)).toContain('The Security tab is not ported yet');
+    expect(app.wrapper.find('#view h1').text()).toBe('studio-mini');
     expect(app.wrapper.find('.tabs a[aria-current="page"]').text()).toBe('Security');
     await app.go('/machines/studio-mini');
-    expect(textOf(app.wrapper.find('#tabpanel').element)).toContain('The Overview tab is not ported yet');
+    expect(app.wrapper.find('.tabs a[aria-current="page"]').text()).toBe('Overview');
     await app.go('/machines/studio-mini/nonsense');
     expect(app.wrapper.find('.tabs a[aria-current="page"]').text()).toBe('Overview');
   });
@@ -73,7 +73,7 @@ describe('route table', () => {
 
 describe('machine addresses', () => {
   it('encodes an alias with a slash, a percent and a space as one path segment', async () => {
-    app = await mountApp();
+    app = await mountApp({ mock: { weirdAlias: true } });
     const resolved = app.router.resolve(nodeRoute('rack/A 100%', 'security'));
     expect(resolved.href).toBe('/machines/rack%2FA%20100%25/security');
     await app.go(resolved.href);
@@ -125,7 +125,7 @@ describe('guards', () => {
     app.mock.options.offline = false;
     await view.find('.empty-retry button').trigger('click');
     await app.settle();
-    expect(app.wrapper.find('#view').text()).toContain('Problems is not ported yet');
+    expect(app.wrapper.find('#view h1').text()).toBe('Problems');
   });
   it('sends the visitor to login with the current page when the session ends (401)', async () => {
     app = await mountApp({ path: '/audit' });
