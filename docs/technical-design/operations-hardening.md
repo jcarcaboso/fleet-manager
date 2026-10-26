@@ -26,7 +26,7 @@ is not implemented.
 
 ## Multiple Operators
 
-Every Operator remains a full administrator. Configure distinct token digests:
+Every Operator is a full administrator unless it has a scope. Configure distinct token digests:
 
 ```sh
 export Fleet__Operators__alice=<sha256-hex-digest>
@@ -40,6 +40,27 @@ credentials. The previous `Fleet__OperatorTokenSha256` and `Fleet__OperatorName`
 settings remain supported as one additional Operator. Audit records use the
 authenticated name. Rotate or revoke a token by changing configuration and
 restarting. No Operator credential administration endpoint exists yet.
+
+### Operator scopes
+
+Limit what a token can do with `Fleet:OperatorScopes:<operator-name>`:
+
+```sh
+export Fleet__OperatorScopes__automation=read
+export Fleet__OperatorScopes__alice=operate
+```
+
+| Scope | Allows |
+|---|---|
+| `read` | Every `GET` route |
+| `operate` | `read`, plus retry, source rescan, CLIProxy refresh and model selection |
+| `admin` | `operate`, plus enrollment tokens and links, Node rename, revoke and remove, and credential revoke |
+
+An Operator without an entry is `admin`, so existing deployments keep their
+behavior. Any other value, including a different letter case, stops the Server at
+startup. A dashboard session takes the scope at login and ends if the scope changes.
+A denied request returns HTTP 403 with code `insufficient_scope`. Give an LLM
+agent a `read` or `operate` token so it cannot revoke or remove machines.
 
 ## CLIProxyAPI credential
 

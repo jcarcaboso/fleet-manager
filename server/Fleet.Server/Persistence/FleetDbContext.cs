@@ -6,6 +6,7 @@ public sealed class FleetDbContext(DbContextOptions<FleetDbContext> options) : D
 {
     public DbSet<WorkspaceRow> Workspaces => Set<WorkspaceRow>();
     public DbSet<NodeRow> Nodes => Set<NodeRow>();
+    public DbSet<NodeCheckinRow> NodeCheckins => Set<NodeCheckinRow>();
     public DbSet<CredentialRow> Credentials => Set<CredentialRow>();
     public DbSet<EnrollmentRow> Enrollments => Set<EnrollmentRow>();
     public DbSet<BundleRow> Bundles => Set<BundleRow>();
@@ -30,6 +31,9 @@ public sealed class FleetDbContext(DbContextOptions<FleetDbContext> options) : D
         model.Entity<NodeRow>().HasIndex(x => new { x.WorkspaceId, x.Name }).IsUnique();
         model.Entity<NodeRow>().HasIndex(x => new { x.WorkspaceId, x.LastContactAt });
         model.Entity<NodeRow>().HasOne<WorkspaceRow>().WithMany().HasForeignKey(x => x.WorkspaceId).OnDelete(DeleteBehavior.Restrict);
+        model.Entity<NodeCheckinRow>().ToTable("node_checkins").HasKey(x => new { x.NodeId, x.Hour });
+        model.Entity<NodeCheckinRow>().HasIndex(x => x.Hour);
+        model.Entity<NodeCheckinRow>().HasOne<NodeRow>().WithMany().HasForeignKey(x => x.NodeId).OnDelete(DeleteBehavior.Cascade);
         model.Entity<CredentialRow>().ToTable("node_credentials").HasKey(x => x.Id);
         model.Entity<CredentialRow>().HasIndex(x => x.CertificateSha256).IsUnique();
         model.Entity<CredentialRow>().HasIndex(x => new { x.NodeId, x.RevokedAt });
@@ -43,11 +47,13 @@ public sealed class FleetDbContext(DbContextOptions<FleetDbContext> options) : D
         model.Entity<BundleRow>().Property(x => x.Content).HasColumnType("bytea");
         model.Entity<DesiredRevisionRow>().ToTable("desired_revisions").HasKey(x => x.Id);
         model.Entity<DesiredRevisionRow>().HasIndex(x => new { x.WorkspaceId, x.SourceRevision }).IsUnique();
+        model.Entity<DesiredRevisionRow>().HasIndex(x => new { x.WorkspaceId, x.AcceptedAt, x.Id });
         model.Entity<DesiredRevisionRow>().HasOne<WorkspaceRow>().WithMany().HasForeignKey(x => x.WorkspaceId).OnDelete(DeleteBehavior.Cascade);
         model.Entity<WarningRow>().ToTable("source_warnings").HasKey(x => x.Id);
         model.Entity<WarningRow>().Property(x => x.SourceLocations).HasColumnType("jsonb");
         model.Entity<WarningRow>().HasOne<DesiredRevisionRow>().WithMany().HasForeignKey(x => x.DesiredRevisionId).OnDelete(DeleteBehavior.Cascade);
         model.Entity<RolloutRow>().ToTable("rollouts").HasKey(x => x.Id);
+        model.Entity<RolloutRow>().HasIndex(x => new { x.CreatedAt, x.Id });
         model.Entity<RolloutRow>().HasOne<DesiredRevisionRow>().WithMany().HasForeignKey(x => x.DesiredRevisionId).OnDelete(DeleteBehavior.Cascade);
         model.Entity<AssignmentRow>().ToTable("assignments").HasKey(x => x.Id);
         model.Entity<AssignmentRow>().HasIndex(x => new { x.NodeId, x.TargetName, x.IsCurrent }).HasFilter("\"IsCurrent\"").IsUnique();
@@ -68,6 +74,9 @@ public sealed class FleetDbContext(DbContextOptions<FleetDbContext> options) : D
         model.Entity<AttemptRow>().ToTable("attempts").HasKey(x => x.Id);
         model.Entity<AttemptRow>().HasIndex(x => new { x.AssignmentId, x.Id });
         model.Entity<AttemptRow>().HasIndex(x => new { x.RolloutId, x.Id });
+        // Latest Attempt of an Assignment, and the first/latest/count of its failed Attempts, without reading them all.
+        model.Entity<AttemptRow>().HasIndex(x => new { x.AssignmentId, x.UpdatedAt, x.Id });
+        model.Entity<AttemptRow>().HasIndex(x => new { x.AssignmentId, x.UpdatedAt }).HasFilter("\"State\" = 3");
         model.Entity<AttemptRow>().HasOne<AssignmentRow>().WithMany().HasForeignKey(x => x.AssignmentId).OnDelete(DeleteBehavior.Cascade);
         model.Entity<AttemptRow>().HasOne<RolloutRow>().WithMany().HasForeignKey(x => x.RolloutId).OnDelete(DeleteBehavior.Restrict);
         model.Entity<AttemptRow>().HasOne<NodeRow>().WithMany().HasForeignKey(x => x.NodeId).OnDelete(DeleteBehavior.Cascade);
@@ -76,7 +85,7 @@ public sealed class FleetDbContext(DbContextOptions<FleetDbContext> options) : D
         model.Entity<SourceScanRow>().HasOne<WorkspaceRow>().WithMany().HasForeignKey(x => x.WorkspaceId).OnDelete(DeleteBehavior.Cascade);
         model.Entity<AuditEventRow>().ToTable("audit_events").HasKey(x => x.Id);
         model.Entity<AuditEventRow>().HasIndex(x => new { x.WorkspaceId, x.Id });
-        model.Entity<AuditEventRow>().HasIndex(x => new { x.WorkspaceId, x.RecordedAt });
+        model.Entity<AuditEventRow>().HasIndex(x => new { x.WorkspaceId, x.RecordedAt, x.Id });
         model.Entity<AuditEventRow>().HasOne<WorkspaceRow>().WithMany().HasForeignKey(x => x.WorkspaceId).OnDelete(DeleteBehavior.Cascade);
         model.Entity<CliProxySelectionRow>().ToTable("cliproxy_selections").HasKey(x => x.BaseUrl);
     }
@@ -92,6 +101,13 @@ public sealed class NodeRow
     public DateTimeOffset EnrolledAt { get; set; }
     public DateTimeOffset? RevokedAt { get; set; }
     public DateTimeOffset? LastContactAt { get; set; }
+}
+public sealed class NodeCheckinRow
+{
+    public Guid NodeId { get; set; }
+    // Start of the UTC hour in which the polls arrived.
+    public DateTimeOffset Hour { get; set; }
+    public int Polls { get; set; }
 }
 public sealed class CredentialRow
 {

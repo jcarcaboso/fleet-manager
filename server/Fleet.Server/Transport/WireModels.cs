@@ -19,12 +19,21 @@ public sealed class IdentifierJsonConverter<T>(Func<Guid, T> create, Func<T, Gui
     public override void Write(Utf8JsonWriter writer, T identifier, JsonSerializerOptions options) => writer.WriteStringValue(value(identifier));
 }
 
+/// <summary>Writes every timestamp as ISO 8601 UTC with a trailing Z, as the Operator API contract documents.</summary>
+public sealed class UtcDateTimeOffsetConverter : JsonConverter<DateTimeOffset>
+{
+    public override DateTimeOffset Read(ref Utf8JsonReader reader, Type typeToConvert, JsonSerializerOptions options) => reader.GetDateTimeOffset();
+    public override void Write(Utf8JsonWriter writer, DateTimeOffset value, JsonSerializerOptions options) =>
+        writer.WriteStringValue(value.UtcDateTime.ToString("yyyy-MM-dd'T'HH:mm:ss.FFFFFFF'Z'", System.Globalization.CultureInfo.InvariantCulture));
+}
+
 public static class WireJson
 {
     public static void Configure(JsonSerializerOptions options)
     {
         options.UnmappedMemberHandling = JsonUnmappedMemberHandling.Disallow;
         options.MaxDepth = 16;
+        options.Converters.Add(new UtcDateTimeOffsetConverter());
         options.Converters.Add(new JsonStringEnumConverter(JsonNamingPolicy.SnakeCaseLower, allowIntegerValues: false));
         options.Converters.Add(new IdentifierJsonConverter<NodeId>(x => new(x), x => x.Value));
         options.Converters.Add(new IdentifierJsonConverter<CredentialId>(x => new(x), x => x.Value));

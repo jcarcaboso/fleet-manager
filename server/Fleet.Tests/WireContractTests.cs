@@ -11,7 +11,9 @@ public sealed class WireContractTests
     public void Node_page_matches_the_fixture_read_by_the_Rust_CLI()
     {
         var page = new Page<NodeStatus>([new(new(Guid.Parse("00000000-0000-0000-0000-000000000001")),
-            "linux-example", false, null, FreshnessState.NeverContacted)], null);
+            "studio-mini", false, new DateTimeOffset(2026, 10, 25, 14, 29, 10, TimeSpan.Zero), FreshnessState.Fresh, "macos",
+            new DateTimeOffset(2026, 9, 1, 10, 0, 0, TimeSpan.Zero), null, new DateTimeOffset(2026, 10, 30, 9, 0, 0, TimeSpan.Zero),
+            new(0, 0, 4, 1, 0), "a3f9c21d0c5b4e8f9a1b2c3d4e5f60718293a4b5")], null);
         var options = new JsonSerializerOptions(JsonSerializerDefaults.Web);
         WireJson.Configure(options);
         var actual = JsonSerializer.SerializeToNode(page, options);

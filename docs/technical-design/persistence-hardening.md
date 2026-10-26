@@ -37,6 +37,9 @@ their retry window. It preserves the authorization digest, consumption time,
 certificate request digest, Node ID, and credential ID, so the authorization
 remains consumed.
 
+It also deletes Node check-in counters older than seven days. That window is
+fixed and does not depend on the retention policy below.
+
 Audit event and source scan deletion is disabled unless the caller supplies a
 positive retention period. Each maintenance call accepts a batch size from 1
 through 10,000 and uses `FOR UPDATE SKIP LOCKED`. Bundles, desired revisions,

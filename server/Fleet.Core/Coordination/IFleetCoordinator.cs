@@ -108,6 +108,52 @@ public interface IFleetCoordinator
 
     Task<Page<AuditEventStatus>> GetAuditEventsAsync(
         PageRequest page,
+        NodeId? node = null,
+        CancellationToken cancellationToken = default);
+
+    /// <summary>
+    /// Resolves a Node ID or exact alias; a UUID-shaped value is tried as an ID first. Revoked Nodes resolve.
+    /// With <paramref name="allowRemovedId"/>, an unknown UUID is returned as is, so history of removed Nodes stays reachable.
+    /// </summary>
+    Task<NodeId> ResolveNodeAsync(
+        string nodeOrAlias,
+        bool allowRemovedId = false,
+        CancellationToken cancellationToken = default);
+
+    Task<NodeDetail> GetNodeDetailAsync(
+        NodeId nodeId,
+        DateTimeOffset now,
+        TimeSpan staleAfter,
+        CancellationToken cancellationToken = default);
+
+    Task<Page<NodeAttemptStatus>> GetNodeAttemptsAsync(
+        NodeId nodeId,
+        string? targetName,
+        PageRequest page,
+        CancellationToken cancellationToken = default);
+
+    Task<NodeCheckins> GetNodeCheckinsAsync(
+        NodeId nodeId,
+        int hours,
+        CancellationToken cancellationToken = default);
+
+    Task<RetryResult> RetryAssignmentAsync(
+        RetryAssignment command,
+        CancellationToken cancellationToken = default);
+
+    Task<Page<SourceScanEntry>> GetSourceScansAsync(
+        PageRequest page,
+        CancellationToken cancellationToken = default);
+
+    Task<Page<EnrollmentLinkStatus>> GetEnrollmentLinksAsync(
+        PageRequest page,
+        DateTimeOffset now,
+        CancellationToken cancellationToken = default);
+
+    /// <summary>One enrollment link in the shape of <see cref="GetEnrollmentLinksAsync"/>; <c>enrollment_link_not_found</c> if there is none.</summary>
+    Task<EnrollmentLinkStatus> GetEnrollmentLinkAsync(
+        Guid id,
+        DateTimeOffset now,
         CancellationToken cancellationToken = default);
 
     Task<PersistenceMaintenanceResult> MaintainPersistenceAsync(

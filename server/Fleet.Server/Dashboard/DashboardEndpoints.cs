@@ -3,8 +3,8 @@ using System.Security.Cryptography;
 using System.Security.Cryptography.X509Certificates;
 using System.Text;
 using System.Text.Json;
+using System.Text.RegularExpressions;
 using Fleet.Core.Coordination;
-using Fleet.Server.Hosting;
 using Fleet.Server.Security;
 using Fleet.Server.Transport;
 using Microsoft.AspNetCore.Antiforgery;
@@ -15,7 +15,7 @@ using Microsoft.Extensions.Options;
 
 namespace Fleet.Server.Dashboard;
 
-public static class DashboardEndpoints
+public static partial class DashboardEndpoints
 {
     public const string Scheme = "Dashboard";
     private const string DigestClaim = "fleet:operator-digest";
@@ -43,7 +43,7 @@ public static class DashboardEndpoints
             options.Events.OnRedirectToLogin = context =>
             {
                 context.Response.StatusCode = StatusCodes.Status401Unauthorized;
-                return Task.CompletedTask;
+                return FleetAuthenticationHandler.WriteUnauthorizedAsync(context.Response);
             };
             options.Events.OnRedirectToAccessDenied = context =>
             {
@@ -56,7 +56,9 @@ public static class DashboardEndpoints
                 var actor = context.Principal?.FindFirstValue(ClaimTypes.NameIdentifier);
                 var digest = context.Principal?.FindFirstValue(DigestClaim);
                 if (!settings.OperatorCredentials().Any(x => x.Key == actor &&
-                    string.Equals(x.Value, digest, StringComparison.OrdinalIgnoreCase))) context.RejectPrincipal();
+                    string.Equals(x.Value, digest, StringComparison.OrdinalIgnoreCase)) ||
+                    context.Principal?.FindFirstValue(OperatorScopeNames.ClaimType) != settings.ScopeOf(actor!).Name())
+                    context.RejectPrincipal();
                 return Task.CompletedTask;
             };
         });
@@ -68,22 +70,13 @@ public static class DashboardEndpoints
     {
         var settings = app.Services.GetRequiredService<IOptions<FleetOptions>>().Value;
         if (string.IsNullOrEmpty(settings.PublicUrl)) return;
-        var origin = new Uri(settings.PublicUrl).GetLeftPart(UriPartial.Authority);
-        var caPath = string.IsNullOrEmpty(settings.EnrollmentCaCertificatePath)
-            ? settings.IssuerCertificatePath : settings.EnrollmentCaCertificatePath;
-        var caText = File.ReadAllText(caPath);
-        if (caText.Length > 8192 || caText.Contains("PRIVATE KEY", StringComparison.Ordinal))
-            throw new InvalidOperationException("Enrollment CA must contain only a bounded public certificate.");
-        using var ca = X509Certificate2.CreateFromPem(caText);
-        if (!ca.Extensions.OfType<X509BasicConstraintsExtension>().Any(x => x.CertificateAuthority))
-            throw new InvalidOperationException("Enrollment trust must be a CA certificate.");
-        var caPem = ca.ExportCertificatePem();
+        var origin = app.Services.GetRequiredService<EnrollmentLinkSettings>().Origin!;
 
         var pages = app.MapGroup("").AddEndpointFilter(async (context, next) =>
         {
             var http = context.HttpContext;
             if (!http.Request.IsHttps || !string.Equals($"https://{http.Request.Host}", origin, StringComparison.OrdinalIgnoreCase))
-                return Results.BadRequest(new { code = "dashboard_origin_required" });
+                return Results.BadRequest(new { code = "dashboard_origin_required", message = "Open the dashboard at the Server's public HTTPS origin." });
             http.Response.Headers["Content-Security-Policy"] = "default-src 'none'; script-src 'self'; style-src 'self'; connect-src 'self'; base-uri 'none'; frame-ancestors 'none'; form-action 'self'";
             http.Response.Headers["Referrer-Policy"] = "no-referrer";
             http.Response.Headers["X-Content-Type-Options"] = "nosniff";
@@ -91,21 +84,20 @@ public static class DashboardEndpoints
             return await next(context);
         });
         pages.MapGet("/", () => Results.Redirect("/dashboard"));
-        pages.MapGet("/dashboard", () => Asset("index.html", "text/html; charset=utf-8"));
-        pages.MapGet("/enroll", () => Asset("enroll.html", "text/html; charset=utf-8"));
-        pages.MapGet("/dashboard/app.js", () => Asset("app.js", "text/javascript; charset=utf-8"));
-        pages.MapGet("/dashboard/enroll.js", () => Asset("enroll.js", "text/javascript; charset=utf-8"));
-        pages.MapGet("/dashboard/style.css", () => Asset("style.css", "text/css; charset=utf-8"));
+        pages.MapGet("/dashboard", () => Asset("index.html"));
+        pages.MapGet("/enroll", () => Asset("enroll.html"));
+        // Any embedded asset with a plain lower-case name. Other names return 404.
+        pages.MapGet("/dashboard/{file}", (string file) => AssetName().IsMatch(file) ? Asset(file) : Results.NotFound());
 
-        var api = pages.MapGroup("/dashboard/api").AddEndpointFilter(async (context, next) =>
+        var api = pages.MapGroup("/dashboard/api").WithMetadata(ErrorMessages.Instance).AddEndpointFilter(async (context, next) =>
         {
             var http = context.HttpContext;
             if (!HttpMethods.IsGet(http.Request.Method))
             {
                 if (!string.Equals(http.Request.Headers.Origin, origin, StringComparison.OrdinalIgnoreCase))
-                    return Results.BadRequest(new { code = "invalid_origin" });
+                    return Results.BadRequest(new { code = "invalid_origin", message = "The Origin header must be the Server's public origin." });
                 try { await http.RequestServices.GetRequiredService<IAntiforgery>().ValidateRequestAsync(http); }
-                catch (AntiforgeryValidationException) { return Results.BadRequest(new { code = "invalid_csrf" }); }
+                catch (AntiforgeryValidationException) { return Results.BadRequest(new { code = "invalid_csrf", message = "The CSRF token is missing or no longer valid." }); }
             }
             return await next(context);
         });
@@ -113,86 +105,57 @@ public static class DashboardEndpoints
             Results.Ok(new { token = antiforgery.GetAndStoreTokens(http).RequestToken }));
         api.MapPost("/login", async (LoginRequest request, HttpContext http, IOptions<FleetOptions> options) =>
         {
-            if (request.Token is null || request.Token.Length is < 32 or > 1024) return Results.Unauthorized();
+            if (request.Token is null || request.Token.Length is < 32 or > 1024) return LoginRejected();
             var digest = SHA256.HashData(Encoding.UTF8.GetBytes(request.Token));
             string? actor = null;
             foreach (var candidate in options.Value.OperatorCredentials())
                 if (CryptographicOperations.FixedTimeEquals(digest, Convert.FromHexString(candidate.Value))) actor = candidate.Key;
-            if (actor is null) return Results.Unauthorized();
+            if (actor is null) return LoginRejected();
+            var scope = options.Value.ScopeOf(actor);
             var principal = new ClaimsPrincipal(new ClaimsIdentity([
-                new Claim(ClaimTypes.NameIdentifier, actor), new Claim(DigestClaim, Convert.ToHexStringLower(digest))], Scheme));
+                new Claim(ClaimTypes.NameIdentifier, actor), new Claim(DigestClaim, Convert.ToHexStringLower(digest)),
+                new Claim(OperatorScopeNames.ClaimType, scope.Name())], Scheme));
             await http.SignInAsync(Scheme, principal, new AuthenticationProperties { IsPersistent = false, AllowRefresh = false });
-            return Results.Ok(new { actor });
+            return Results.Ok(new { actor, scope = scope.Name() });
         }).RequireRateLimiting("enrollment");
         var authenticated = api.MapGroup("").RequireAuthorization(Scheme);
-        authenticated.MapPost("/source/rescan", async (SourcePollingService source, HttpContext http, CancellationToken ct) =>
-            Results.Ok(await source.ScanNowAsync(Actor(http), ct)))
-            .WithRequestTimeout(TimeSpan.FromSeconds(app.Configuration.GetValue("Source:ScanTimeoutSeconds", 180) + 30));
         authenticated.MapGet("/diagnostics", DashboardDiagnostics.ReadAsync);
-        authenticated.MapGet("/cliproxy/status", (CliProxyCatalog catalog) => Results.Ok(catalog.Status()));
-        authenticated.MapGet("/cliproxy/selection", (CliProxySelectionStore selection, CancellationToken ct) => selection.ListAsync(ct));
-        authenticated.MapPost("/cliproxy/selection", async (SelectionRequest request, CliProxySelectionStore selection, CancellationToken ct) =>
+        authenticated.MapGet("/session", (HttpContext http) => Results.Ok(new
         {
-            var (status, body) = await selection.SaveAsync(request.BaseUrl, request.Version, request.Policy, ct);
-            return Results.Json(body, statusCode: status);
-        });
-        authenticated.MapPost("/cliproxy/refresh", async (CliProxySyncService sync, CancellationToken ct) =>
-            Results.Ok(await sync.SyncNowAsync(true, ct)));
-        authenticated.MapGet("/session", (HttpContext http) => Results.Ok(new { actor = Actor(http) }));
+            actor = Actor(http),
+            scope = http.User.FindFirstValue(OperatorScopeNames.ClaimType)
+        }));
         authenticated.MapPost("/logout", async (HttpContext http) =>
         {
             await http.SignOutAsync(Scheme);
             return Results.Ok(new { signedOut = true });
         });
-        authenticated.MapGet("/nodes", async (string? after, IFleetCoordinator coordinator, TimeProvider time, CancellationToken ct) =>
-            await coordinator.GetNodesAsync(new(100, after), time.GetUtcNow(), TimeSpan.FromSeconds(settings.StaleAfterSeconds), ct));
-        authenticated.MapPost("/nodes/rename", async (RenameRequest request, HttpContext http, IFleetCoordinator coordinator, CancellationToken ct) =>
-            await coordinator.RenameNodeAliasAsOperatorAsync(new(request.CurrentAlias, request.Alias, Actor(http)), ct));
-        authenticated.MapPost("/nodes/{id:guid}/revoke", async (Guid id, HttpContext http, IFleetCoordinator coordinator, CancellationToken ct) =>
-        {
-            await coordinator.RevokeNodeAsync(new(id), Actor(http), ct);
-            return Results.Ok(new { revoked = true });
-        });
-        authenticated.MapPost("/nodes/{id:guid}/remove", async (Guid id, RemoveNodeRequest request, HttpContext http, IFleetCoordinator coordinator, CancellationToken ct) =>
-        {
-            await coordinator.RemoveNodeAsync(new(id), request.Alias, Actor(http), ct);
-            return Results.Ok(new { removed = true });
-        });
-        authenticated.MapPost("/enrollment-links", async (LinkRequest request, HttpContext http, IFleetCoordinator coordinator, TimeProvider time, CancellationToken ct) =>
-        {
-            if (request.ExpiresInSeconds is < 60 or > 3600) return Results.BadRequest(new { code = "invalid_expiry" });
-            if (string.IsNullOrWhiteSpace(request.Alias) || request.Alias.Length > 200)
-                return Results.BadRequest(new { code = "invalid_alias" });
-            var result = await coordinator.CreateEnrollmentAuthorizationAsync(new(Actor(http),
-                time.GetUtcNow().AddSeconds(request.ExpiresInSeconds), TimeSpan.FromSeconds(settings.EnrollmentDeliverySeconds), request.Alias), ct);
-            var payload = JsonSerializer.SerializeToUtf8Bytes(new
-            {
-                version = 1,
-                serverUrl = origin,
-                token = result.Token,
-                alias = request.Alias,
-                caPem,
-                expiresAt = result.ExpiresAt
-            });
-            return Results.Ok(new { id = result.Id, result.ExpiresAt, link = origin + "/enroll#fleet-v1=" + WebEncoders.Base64UrlEncode(payload) });
-        });
-        authenticated.MapPost("/enrollment-links/{id:guid}/revoke", async (Guid id, HttpContext http, IFleetCoordinator coordinator, CancellationToken ct) =>
-        {
-            await coordinator.RevokeEnrollmentAuthorizationAsync(id, Actor(http), ct);
-            return Results.Ok(new { revoked = true });
-        });
+        // Every Operator route is shared with /operator/v1, so the two surfaces cannot drift.
+        OperatorApi.Map(authenticated, TimeSpan.FromSeconds(app.Configuration.GetValue("Source:ScanTimeoutSeconds", 180) + 30));
     }
 
     private static string Actor(HttpContext http) => http.User.FindFirstValue(ClaimTypes.NameIdentifier)!;
-    private static IResult Asset(string name, string contentType)
+
+    private static IResult LoginRejected() => Results.Json(
+        new { code = "unauthorized", message = "The Operator token was not accepted." }, statusCode: StatusCodes.Status401Unauthorized);
+    // Embedded files under Dashboard/Assets, keyed by file name, with the content type for their extension.
+    [GeneratedRegex(@"^[a-z0-9][a-z0-9-]*\.(js|css|html|svg)\z")]
+    private static partial Regex AssetName();
+
+    private static readonly IReadOnlyDictionary<string, string> ContentTypes = new Dictionary<string, string>(StringComparer.Ordinal)
     {
-        using var stream = typeof(DashboardEndpoints).Assembly.GetManifestResourceStream("Fleet.Server.Dashboard.Assets." + name)!;
+        [".js"] = "text/javascript; charset=utf-8",
+        [".css"] = "text/css; charset=utf-8",
+        [".html"] = "text/html; charset=utf-8",
+        [".svg"] = "image/svg+xml"
+    };
+
+    private static IResult Asset(string name)
+    {
+        using var stream = typeof(DashboardEndpoints).Assembly.GetManifestResourceStream("Fleet.Server.Dashboard.Assets." + name);
+        if (stream is null || !ContentTypes.TryGetValue(Path.GetExtension(name), out var contentType)) return Results.NotFound();
         using var reader = new StreamReader(stream);
         return Results.Text(reader.ReadToEnd(), contentType);
     }
     public sealed record LoginRequest(string Token);
-    public sealed record RenameRequest(string CurrentAlias, string Alias);
-    public sealed record RemoveNodeRequest(string Alias);
-    public sealed record LinkRequest(string Alias, int ExpiresInSeconds = 900);
-    public sealed record SelectionRequest(string BaseUrl, long Version, CliProxySelectionPolicy? Policy);
 }

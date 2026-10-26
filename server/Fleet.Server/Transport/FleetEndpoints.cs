@@ -1,8 +1,8 @@
-using System.Security.Claims;
 using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
 using Fleet.Core.Coordination;
+using Fleet.Server.Hosting;
 using Fleet.Server.Security;
 using Microsoft.Extensions.Options;
 
@@ -13,42 +13,9 @@ public static class FleetEndpoints
     public static void MapFleetEndpoints(this WebApplication app)
     {
         var operators = app.MapGroup("/operator/v1").RequireAuthorization("Operator").WithGroupName("operator");
-        operators.MapPost("/nodes/rename", async (OperatorRenameAliasRequest request, HttpContext context,
-            IFleetCoordinator coordinator, CancellationToken ct) =>
-            await coordinator.RenameNodeAliasAsOperatorAsync(new(request.CurrentAlias, request.Alias, OperatorName(context)), ct));
-        operators.MapGet("/nodes", async (int? limit, string? after, IFleetCoordinator coordinator,
-            IOptions<FleetOptions> options, TimeProvider time, CancellationToken ct) =>
-            await coordinator.GetNodesAsync(new(limit ?? 100, after), time.GetUtcNow(), TimeSpan.FromSeconds(options.Value.StaleAfterSeconds), ct));
-        operators.MapGet("/rollouts", async (int? limit, string? after, IFleetCoordinator coordinator, CancellationToken ct) =>
-            await coordinator.GetRolloutsAsync(new(limit ?? 100, after), ct));
-        operators.MapGet("/desired-revisions", async (int? limit, string? after, IFleetCoordinator coordinator, CancellationToken ct) =>
-            await coordinator.GetDesiredRevisionsAsync(new(limit ?? 100, after), ct));
-        operators.MapGet("/rollouts/{id:guid}/attempts", async (Guid id, int? limit, string? after, IFleetCoordinator coordinator, CancellationToken ct) =>
-            await coordinator.GetAttemptsAsync(new(id), new(limit ?? 100, after), ct));
-        operators.MapGet("/warnings", async (int? limit, string? after, IFleetCoordinator coordinator, CancellationToken ct) =>
-            await coordinator.GetWarningsAsync(new(limit ?? 100, after), ct));
-        operators.MapGet("/audit", async (int? limit, string? after, IFleetCoordinator coordinator, CancellationToken ct) =>
-            await coordinator.GetAuditEventsAsync(new(limit ?? 100, after), ct));
-        operators.MapPost("/enrollment-tokens", async (EnrollmentTokenRequest request, HttpContext context,
-            IFleetCoordinator coordinator, IOptions<FleetOptions> options, TimeProvider time, CancellationToken ct) =>
-        {
-            if (request.ExpiresInSeconds is < 60 or > 3600) return Results.BadRequest(new { code = "invalid_expiry" });
-            var result = await coordinator.CreateEnrollmentAuthorizationAsync(new(
-                OperatorName(context), time.GetUtcNow().AddSeconds(request.ExpiresInSeconds),
-                TimeSpan.FromSeconds(options.Value.EnrollmentDeliverySeconds)), ct);
-            context.Response.Headers.CacheControl = "no-store";
-            return Results.Ok(result);
-        });
-        operators.MapPost("/credentials/{id:guid}/revoke", async (Guid id, HttpContext context, IFleetCoordinator coordinator, CancellationToken ct) =>
-        {
-            await coordinator.RevokeCredentialAsync(new(id), OperatorName(context), ct);
-            return Results.Ok(new { revoked = true });
-        });
-        operators.MapPost("/nodes/{id:guid}/revoke", async (Guid id, HttpContext context, IFleetCoordinator coordinator, CancellationToken ct) =>
-        {
-            await coordinator.RevokeNodeAsync(new(id), OperatorName(context), ct);
-            return Results.Ok(new { revoked = true });
-        });
+        var operatorApi = OperatorApi.Map(operators, TimeSpan.FromSeconds(app.Configuration.GetValue("Source:ScanTimeoutSeconds", 180) + 30));
+        operatorApi.MapGet("/metrics", (FleetMetrics metrics) => Results.Ok(metrics.Snapshot()))
+            .WithMetadata(new RequiredScope(OperatorScope.Read));
 
         app.MapPost("/agent/v1/enroll", async (EnrollmentRequest request, HttpContext context, NodeCertificateIssuer issuer,
             IFleetCoordinator coordinator, IOptions<FleetOptions> options, TimeProvider time, CancellationToken ct) =>
@@ -132,6 +99,4 @@ public static class FleetEndpoints
 
     private static NodeAuthentication Node(HttpContext context) =>
         (NodeAuthentication)context.Items[FleetAuthenticationHandler.NodeIdentityKey]!;
-
-    private static string OperatorName(HttpContext context) => context.User.FindFirstValue(ClaimTypes.NameIdentifier)!;
 }

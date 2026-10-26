@@ -40,7 +40,7 @@ public sealed class FleetAuthenticationHandler(
             {
                 return AuthenticateResult.Fail("invalid_credential");
             }
-            return Success(actor);
+            return Success(actor, fleetOptions.Value.ScopeOf(actor));
         }
 
         if (!Request.IsHttps)
@@ -63,8 +63,26 @@ public sealed class FleetAuthenticationHandler(
         return Success(identity.NodeId.Value.ToString("D"));
     }
 
-    private AuthenticateResult Success(string name) => AuthenticateResult.Success(new AuthenticationTicket(
-        new ClaimsPrincipal(new ClaimsIdentity([new Claim(ClaimTypes.NameIdentifier, name)], Scheme.Name)), Scheme.Name));
+    // Operator clients get the standard error body with the 401. The Agent scheme keeps its empty 401.
+    protected override async Task HandleChallengeAsync(AuthenticationProperties properties)
+    {
+        Response.StatusCode = StatusCodes.Status401Unauthorized;
+        if (Scheme.Name == OperatorScheme) await WriteUnauthorizedAsync(Response);
+    }
+
+    public static Task WriteUnauthorizedAsync(HttpResponse response) => response.WriteAsJsonAsync(new
+    {
+        code = "unauthorized",
+        message = "A valid Operator token or dashboard session is required."
+    });
+
+    private AuthenticateResult Success(string name, OperatorScope? scope = null)
+    {
+        var claims = new List<Claim> { new(ClaimTypes.NameIdentifier, name) };
+        if (scope is { } granted) claims.Add(new Claim(OperatorScopeNames.ClaimType, granted.Name()));
+        return AuthenticateResult.Success(new AuthenticationTicket(
+            new ClaimsPrincipal(new ClaimsIdentity(claims, Scheme.Name)), Scheme.Name));
+    }
 }
 
 // Only the renewal endpoint may authenticate with an expired, non-revoked credential.

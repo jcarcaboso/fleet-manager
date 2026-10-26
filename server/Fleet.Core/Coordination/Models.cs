@@ -2,9 +2,12 @@ using System.Text.Json.Serialization;
 
 namespace Fleet.Core.Coordination;
 
-public sealed record PageRequest(int Limit, string? Cursor = null)
+/// <summary>How a list is ordered: by ID (the default, cursor is the last ID) or newest first by its timestamp, then ID.</summary>
+public enum PageOrder { Id, Newest }
+
+public sealed record PageRequest(int Limit, string? Cursor = null, PageOrder Order = PageOrder.Id)
 {
-    public const int MaximumLimit = 200;
+    public const int MaximumLimit = 100;
 }
 
 public sealed record Page<T>(IReadOnlyList<T> Items, string? NextCursor);
@@ -167,12 +170,110 @@ public enum FreshnessState
     NeverContacted,
 }
 
+public sealed record TargetStateCounts(int Pending, int Applying, int Succeeded, int Failed, int Superseded)
+{
+    public static TargetStateCounts None { get; } = new(0, 0, 0, 0, 0);
+}
+
 public sealed record NodeStatus(
     NodeId NodeId,
     string Name,
     bool Revoked,
     DateTimeOffset? LastContactAt,
-    FreshnessState Freshness);
+    FreshnessState Freshness,
+    string Platform,
+    DateTimeOffset EnrolledAt,
+    DateTimeOffset? RevokedAt,
+    DateTimeOffset? CredentialNotAfter,
+    TargetStateCounts Targets,
+    string? CurrentRevision);
+
+public sealed record NodeCredentialStatus(
+    CredentialId CredentialId,
+    DateTimeOffset NotBefore,
+    DateTimeOffset NotAfter,
+    DateTimeOffset? RevokedAt,
+    string? RevokedBy,
+    int Renewals);
+
+public sealed record NodeLatestAttempt(
+    AttemptId AttemptId,
+    ConvergenceState State,
+    string? ErrorCode,
+    string? Diagnostic,
+    DateTimeOffset UpdatedAt);
+
+public sealed record NodeAiClientStatus(string Client, string Mode, string? BaseUrl, string? Model);
+
+public sealed record NodeTargetStatus(
+    string Name,
+    string Kind,
+    string Base,
+    string Path,
+    AssignmentId AssignmentId,
+    ConvergenceState State,
+    DateTimeOffset AssignedAt,
+    DesiredRevisionStatus DesiredRevision,
+    string? LastSucceededRevision,
+    NodeLatestAttempt? LatestAttempt,
+    int FailedAttempts,
+    DateTimeOffset? FirstFailedAt,
+    IReadOnlyList<SnapshotSkill> Skills,
+    SnapshotFile? File,
+    NodeAiClientStatus? AiClient);
+
+public sealed record NodeDetail(
+    NodeId NodeId,
+    string Name,
+    string Platform,
+    DateTimeOffset EnrolledAt,
+    DateTimeOffset? LastContactAt,
+    FreshnessState Freshness,
+    bool Revoked,
+    DateTimeOffset? RevokedAt,
+    NodeCredentialStatus? Credential,
+    IReadOnlyList<NodeTargetStatus> Targets,
+    TargetStateCounts Summary);
+
+public sealed record NodeAttemptStatus(
+    AttemptId AttemptId,
+    AssignmentId AssignmentId,
+    RolloutId RolloutId,
+    string TargetName,
+    string SourceRevision,
+    ConvergenceState State,
+    string? ErrorCode,
+    string? Diagnostic,
+    DateTimeOffset UpdatedAt);
+
+public sealed record CheckinBucket(DateTimeOffset Hour, int Polls);
+
+public sealed record NodeCheckins(int Hours, IReadOnlyList<CheckinBucket> Buckets);
+
+public sealed record RetryAssignment(NodeId NodeId, string Target, string RequestedBy);
+
+public sealed record RetryResult(AssignmentId AssignmentId, AttemptId AttemptId, ConvergenceState State);
+
+public sealed record SourceScanEntry(
+    Guid ScanId,
+    string? SourceRevision,
+    SourceScanOutcome Outcome,
+    string? Code,
+    string? Diagnostic,
+    DateTimeOffset ObservedAt,
+    string? RequestedBy);
+
+public enum EnrollmentLinkState { Active, Consumed, Expired, Revoked }
+
+public sealed record EnrollmentLinkStatus(
+    Guid Id,
+    string? Alias,
+    DateTimeOffset ExpiresAt,
+    DateTimeOffset? ConsumedAt,
+    DateTimeOffset? RevokedAt,
+    string? RevokedBy,
+    NodeId? NodeId,
+    EnrollmentLinkState State);
 
 public sealed record AttemptStatus(
     AttemptId AttemptId,
@@ -226,7 +327,8 @@ public sealed record AuditEventStatus(
     string Action,
     string Actor,
     NodeId? NodeId,
-    CredentialId? CredentialId);
+    CredentialId? CredentialId,
+    string? NodeName = null);
 
 public sealed record PersistenceMaintenancePolicy(
     TimeSpan? AuditEventRetention,
@@ -236,6 +338,7 @@ public sealed record PersistenceMaintenancePolicy(
 public sealed record PersistenceMaintenanceResult(
     int EnrollmentPayloadsScrubbed,
     int AuditEventsDeleted,
-    int SourceScansDeleted);
+    int SourceScansDeleted,
+    int CheckinsDeleted = 0);
 
 public sealed record BundleContent(string Digest, string Schema, long Size, byte[] Content);

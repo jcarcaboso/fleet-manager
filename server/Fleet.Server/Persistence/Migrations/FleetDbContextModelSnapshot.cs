@@ -190,6 +190,11 @@ namespace Fleet.Server.Persistence.Migrations
 
                     b.HasIndex("AssignmentId", "Id");
 
+                    b.HasIndex("AssignmentId", "UpdatedAt")
+                        .HasFilter("\"State\" = 3");
+
+                    b.HasIndex("AssignmentId", "UpdatedAt", "Id");
+
                     b.HasIndex("RolloutId", "Id");
 
                     b.ToTable("attempts", (string)null);
@@ -225,7 +230,7 @@ namespace Fleet.Server.Persistence.Migrations
 
                     b.HasIndex("WorkspaceId", "Id");
 
-                    b.HasIndex("WorkspaceId", "RecordedAt");
+                    b.HasIndex("WorkspaceId", "RecordedAt", "Id");
 
                     b.ToTable("audit_events", (string)null);
                 });
@@ -307,6 +312,8 @@ namespace Fleet.Server.Persistence.Migrations
 
                     b.HasKey("Id");
 
+                    b.HasIndex("WorkspaceId", "AcceptedAt", "Id");
+
                     b.HasIndex("WorkspaceId", "SourceRevision")
                         .IsUnique();
 
@@ -376,6 +383,24 @@ namespace Fleet.Server.Persistence.Migrations
                     b.ToTable("enrollment_authorizations", (string)null);
                 });
 
+            modelBuilder.Entity("Fleet.Server.Persistence.NodeCheckinRow", b =>
+                {
+                    b.Property<Guid>("NodeId")
+                        .HasColumnType("uuid");
+
+                    b.Property<DateTimeOffset>("Hour")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.Property<int>("Polls")
+                        .HasColumnType("integer");
+
+                    b.HasKey("NodeId", "Hour");
+
+                    b.HasIndex("Hour");
+
+                    b.ToTable("node_checkins", (string)null);
+                });
+
             modelBuilder.Entity("Fleet.Server.Persistence.NodeRow", b =>
                 {
                     b.Property<Guid>("Id")
@@ -425,6 +450,8 @@ namespace Fleet.Server.Persistence.Migrations
                         .HasColumnType("uuid");
 
                     b.HasKey("Id");
+
+                    b.HasIndex("CreatedAt", "Id");
 
                     b.HasIndex("DesiredRevisionId");
 
@@ -629,6 +656,15 @@ namespace Fleet.Server.Persistence.Migrations
                     b.HasOne("Fleet.Server.Persistence.WorkspaceRow", null)
                         .WithMany()
                         .HasForeignKey("WorkspaceId")
+                        .OnDelete(DeleteBehavior.Cascade)
+                        .IsRequired();
+                });
+
+            modelBuilder.Entity("Fleet.Server.Persistence.NodeCheckinRow", b =>
+                {
+                    b.HasOne("Fleet.Server.Persistence.NodeRow", null)
+                        .WithMany()
+                        .HasForeignKey("NodeId")
                         .OnDelete(DeleteBehavior.Cascade)
                         .IsRequired();
                 });

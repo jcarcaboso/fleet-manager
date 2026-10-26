@@ -15,6 +15,7 @@ public sealed record CliProxySelectionModel(string Id, IReadOnlyList<string> Rea
 public sealed class CliProxySelectionStore(FleetDbContext database, CliProxyCatalog catalog)
 {
     private static readonly CliProxySelectionPolicy DefaultPolicy = new(true, [], new(StringComparer.Ordinal), []);
+    private const string InvalidSelection = "The selection is malformed or leaves no model selected.";
     private static readonly JsonSerializerOptions JsonOptions = new(JsonSerializerDefaults.Web);
     private static readonly Regex GptFamily = new("^gpt-(\\d+)(?:\\.\\d+)?(?:-|$)", RegexOptions.IgnoreCase | RegexOptions.CultureInvariant | RegexOptions.Compiled);
 
@@ -49,10 +50,10 @@ public sealed class CliProxySelectionStore(FleetDbContext database, CliProxyCata
             policy.EnabledFamilies.Any(key => !ValidFamilyKey(key)) ||
             policy.DisabledFamilies.Intersect(policy.EnabledFamilies, StringComparer.Ordinal).Any() ||
             policy.ModelOverrides.Any(pair => !Fleet.Server.Source.SourceTargetPublishers.IsValidModelId(pair.Key)))
-            return (400, new { code = "invalid_selection" });
+            return (400, new { code = "invalid_selection", message = InvalidSelection });
 
         var models = await catalog.GetAsync(baseUrl, ct);
-        if (models is null) return (404, new { code = "catalog_unavailable" });
+        if (models is null) return (404, new { code = "catalog_unavailable", message = "No model catalog is available for that proxy yet." });
         var pinned = await database.AssignmentAiClients.AsNoTracking()
             .Join(database.Assignments.AsNoTracking().Where(x => x.IsCurrent), client => client.AssignmentId,
                 assignment => assignment.Id, (client, assignment) => client)
@@ -80,10 +81,10 @@ public sealed class CliProxySelectionStore(FleetDbContext database, CliProxyCata
             models.Any(model => model.Id == client.Model) && !Describe(
                 models.First(model => model.Id == client.Model), savedPolicy).Selected)
             .Select(client => client.Model).Distinct().ToArray();
-        if (pinnedExcluded.Length > 0) return (409, new { code = "pinned_model_excluded", models = pinnedExcluded });
+        if (pinnedExcluded.Length > 0) return (409, new { code = "pinned_model_excluded", message = "The selection excludes a model that a Node is assigned.", models = pinnedExcluded });
 
         var described = models.Select(model => Describe(model, savedPolicy)).ToArray();
-        if (described.All(model => !model.Selected)) return (400, new { code = "invalid_selection" });
+        if (described.All(model => !model.Selected)) return (400, new { code = "invalid_selection", message = InvalidSelection });
         var json = JsonSerializer.Serialize(savedPolicy, JsonOptions);
         int affected;
         if (version == 0)
@@ -96,7 +97,7 @@ public sealed class CliProxySelectionStore(FleetDbContext database, CliProxyCata
                 UPDATE cliproxy_selections SET "PolicyJson" = {json}, "Version" = "Version" + 1
                 WHERE "BaseUrl" = {baseUrl} AND "Version" = {version}
                 """, ct);
-        if (affected == 0) return (409, new { code = "stale_selection" });
+        if (affected == 0) return (409, new { code = "stale_selection", message = "The selection changed since it was loaded. Reload it and try again." });
         var entry = new
         {
             baseUrl,

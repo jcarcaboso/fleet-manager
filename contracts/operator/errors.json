@@ -1,0 +1,34 @@
+{
+  "items": [
+    {
+      "code": "lock_failed",
+      "source": "agent",
+      "title": "Another process holds the Target lock",
+      "explanation": "The Agent could not lock the Target. Another Agent run or tool is using it, or the `.fleet-reconcile` directory next to the Target is not writable.",
+      "fix": [
+        "Make sure only one Agent service runs for this user on the Node.",
+        "Check that the user can write to the `.fleet-reconcile` directory next to the Target.",
+        "Run `fleet retry <node> <target>`."
+      ]
+    },
+    {
+      "code": "target_not_failed",
+      "source": "server",
+      "title": "Target is not failed",
+      "explanation": "Only a failed current Assignment can be retried. This Target is pending, applying, succeeded or superseded.",
+      "fix": [
+        "Run `fleet nodes show <node>` to see the Target's state."
+      ]
+    },
+    {
+      "code": "assignment_failed",
+      "source": "issue",
+      "title": "A Target failed on a Node",
+      "explanation": "The Agent reported a failure for the Node's current Assignment of a Target. The error code on the issue says why.",
+      "fix": [
+        "Run `fleet explain <code>` for the reported error code and follow its fix steps.",
+        "When the cause is fixed, run `fleet retry <node> <target>`."
+      ]
+    }
+  ]
+}

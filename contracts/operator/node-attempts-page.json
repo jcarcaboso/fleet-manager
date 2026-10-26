@@ -1,0 +1,27 @@
+{
+  "items": [
+    {
+      "attemptId": "00000000-0000-0000-0000-0000000000b2",
+      "assignmentId": "00000000-0000-0000-0000-0000000000a2",
+      "rolloutId": "00000000-0000-0000-0000-0000000000e1",
+      "targetName": "ai-client/claude",
+      "sourceRevision": "a3f9c21d0c5b4e8f9a1b2c3d4e5f60718293a4b5",
+      "state": "failed",
+      "errorCode": "ai_client_reconcile_failed",
+      "diagnostic": null,
+      "updatedAt": "2026-10-25T14:20:00Z"
+    },
+    {
+      "attemptId": "00000000-0000-0000-0000-0000000000b3",
+      "assignmentId": "00000000-0000-0000-0000-0000000000a3",
+      "rolloutId": "00000000-0000-0000-0000-0000000000e1",
+      "targetName": "skills",
+      "sourceRevision": "a3f9c21d0c5b4e8f9a1b2c3d4e5f60718293a4b5",
+      "state": "succeeded",
+      "errorCode": null,
+      "diagnostic": null,
+      "updatedAt": "2026-10-25T09:01:30Z"
+    }
+  ],
+  "nextCursor": null
+}

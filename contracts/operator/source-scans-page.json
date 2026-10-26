@@ -1,0 +1,23 @@
+{
+  "items": [
+    {
+      "scanId": "00000000-0000-0000-0000-0000000000c5",
+      "sourceRevision": "a3f9c21d0c5b4e8f9a1b2c3d4e5f60718293a4b5",
+      "outcome": "accepted",
+      "code": null,
+      "diagnostic": null,
+      "observedAt": "2026-10-25T09:00:00Z",
+      "requestedBy": "operator"
+    },
+    {
+      "scanId": "00000000-0000-0000-0000-0000000000c6",
+      "sourceRevision": null,
+      "outcome": "failed",
+      "code": "git_fetch_failed",
+      "diagnostic": "Repository could not be fetched.",
+      "observedAt": "2026-10-24T09:00:00Z",
+      "requestedBy": null
+    }
+  ],
+  "nextCursor": null
+}

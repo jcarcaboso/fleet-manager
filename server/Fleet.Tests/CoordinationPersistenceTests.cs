@@ -343,13 +343,13 @@ public sealed class CoordinationPersistenceTests : IAsyncLifetime
             var coordinator = Coordinator(query);
             do
             {
-                var page = await coordinator.GetNodesAsync(new(200, cursor), clock.GetUtcNow(), TimeSpan.FromMinutes(5));
+                var page = await coordinator.GetNodesAsync(new(PageRequest.MaximumLimit, cursor), clock.GetUtcNow(), TimeSpan.FromMinutes(5));
                 listed += page.Items.Count;
                 cursor = page.NextCursor;
             } while (cursor is not null);
         }
         timer.Stop();
-        output.WriteLine("1,000 authenticated no-work polls in {0}; five 200-row status pages in {1} total.",
+        output.WriteLine("1,000 authenticated no-work polls in {0}; ten 100-row status pages in {1} total.",
             pollElapsed, timer.Elapsed);
         Assert.Equal(1_000, listed);
 

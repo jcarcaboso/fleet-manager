@@ -48,6 +48,30 @@ public sealed class HostHardeningTests
     }
 
     [Fact]
+    public void Operator_scopes_default_to_admin_and_reject_unknown_values()
+    {
+        var options = new FleetOptions();
+        options.Operators.Add("alice", Digest("alice-token"));
+        options.Operators.Add("bob", Digest("bob-token"));
+        options.OperatorScopes["alice"] = "read";
+        Assert.True(options.HasValidOperatorScopes());
+        Assert.Equal(OperatorScope.Read, options.ScopeOf("alice"));
+        Assert.Equal(OperatorScope.Admin, options.ScopeOf("bob"));
+        Assert.Equal(OperatorScope.Admin, options.ScopeOf("unconfigured"));
+        foreach (var value in new[] { "operate", "admin" })
+        {
+            options.OperatorScopes["alice"] = value;
+            Assert.True(options.HasValidOperatorScopes());
+        }
+        foreach (var value in new[] { "", "root", "READ", "write", " read" })
+        {
+            options.OperatorScopes["alice"] = value;
+            Assert.False(options.HasValidOperatorScopes());
+        }
+        Assert.True(OperatorScope.Read < OperatorScope.Operate && OperatorScope.Operate < OperatorScope.Admin);
+    }
+
+    [Fact]
     public void CLIProxy_credential_is_optional_but_must_be_printable_and_bounded()
     {
         var options = new FleetOptions();

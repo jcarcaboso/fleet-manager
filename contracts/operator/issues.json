@@ -1,0 +1,40 @@
+{
+  "items": [
+    {
+      "id": "assignment_failed:00000000-0000-0000-0000-000000000001:ai-client/claude",
+      "code": "assignment_failed",
+      "severity": "error",
+      "title": "studio-mini: ai-client/claude failed",
+      "detail": "The Agent reported ai_client_reconcile_failed (AI client setup failed) for this current assignment.",
+      "action": "Run `fleet models refresh` and check that the selected model is still offered.",
+      "section": "nodes",
+      "errorCode": "ai_client_reconcile_failed",
+      "nodeId": "00000000-0000-0000-0000-000000000001",
+      "nodeName": "studio-mini",
+      "target": "ai-client/claude",
+      "since": "2026-10-25T09:02:00Z",
+      "commands": [
+        "fleet nodes show studio-mini",
+        "fleet explain ai_client_reconcile_failed",
+        "fleet retry studio-mini ai-client/claude"
+      ]
+    },
+    {
+      "id": "source_not_scanned",
+      "code": "source_not_scanned",
+      "severity": "warning",
+      "title": "Repository has not been synced",
+      "detail": "No source scan has been recorded.",
+      "action": "Sync the repository to validate configuration and publish assignments.",
+      "section": "repository",
+      "errorCode": null,
+      "nodeId": null,
+      "nodeName": null,
+      "target": null,
+      "since": null,
+      "commands": [
+        "fleet source rescan"
+      ]
+    }
+  ]
+}

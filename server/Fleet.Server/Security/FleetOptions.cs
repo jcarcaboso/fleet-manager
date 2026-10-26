@@ -8,6 +8,8 @@ public sealed class FleetOptions
     public string OperatorTokenSha256 { get; set; } = "";
     public string OperatorName { get; set; } = "operator";
     public Dictionary<string, string> Operators { get; set; } = [];
+    // Optional per-Operator scope: read, operate or admin. An Operator without an entry is admin.
+    public Dictionary<string, string> OperatorScopes { get; set; } = [];
     [Required] public string IssuerCertificatePath { get; set; } = "";
     [Required] public string IssuerKeyPath { get; set; } = "";
     [Range(1, 30)] public int CertificateLifetimeDays { get; set; } = 7;
@@ -36,6 +38,12 @@ public sealed class FleetOptions
         if (!string.IsNullOrEmpty(OperatorTokenSha256)) yield return new(OperatorName, OperatorTokenSha256);
     }
 
+    public OperatorScope ScopeOf(string operatorName) =>
+        OperatorScopes.TryGetValue(operatorName, out var value) && OperatorScopeNames.TryParse(value, out var scope)
+            ? scope : OperatorScope.Admin;
+
+    public bool HasValidOperatorScopes() => OperatorScopes.Values.All(value => OperatorScopeNames.TryParse(value, out _));
+
     public bool HasValidOperators()
     {
         var credentials = OperatorCredentials().ToArray();
@@ -44,5 +52,26 @@ public sealed class FleetOptions
             x.Value.Length == 64 && x.Value.All(Uri.IsHexDigit)) &&
             credentials.Select(x => x.Key).Distinct(StringComparer.Ordinal).Count() == credentials.Length &&
             credentials.Select(x => x.Value).Distinct(StringComparer.OrdinalIgnoreCase).Count() == credentials.Length;
+    }
+}
+
+/// <summary>Operator rights. Each scope includes the ones before it.</summary>
+public enum OperatorScope { Read = 0, Operate = 1, Admin = 2 }
+
+public static class OperatorScopeNames
+{
+    public const string ClaimType = "fleet:operator-scope";
+
+    public static string Name(this OperatorScope scope) => scope.ToString().ToLowerInvariant();
+
+    public static bool TryParse(string? value, out OperatorScope scope)
+    {
+        switch (value)
+        {
+            case "read": scope = OperatorScope.Read; return true;
+            case "operate": scope = OperatorScope.Operate; return true;
+            case "admin": scope = OperatorScope.Admin; return true;
+            default: scope = OperatorScope.Admin; return false;
+        }
     }
 }
