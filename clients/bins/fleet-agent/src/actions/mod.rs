@@ -27,7 +27,6 @@ enum ActionKind {
 }
 
 impl ActionKind {
-    #[cfg(test)]
     fn name(self) -> &'static str {
         match self {
             Self::Skills => "skills",
@@ -36,13 +35,21 @@ impl ActionKind {
         }
     }
 
-    fn matches(self, assignment: &Assignment) -> bool {
+    fn matches(self, target_name: &str) -> bool {
         match self {
-            Self::Skills => assignment.target_name == "skills",
-            Self::ManagedFile => assignment.target_name.starts_with("agent-file/"),
-            Self::AiClient => assignment.target_name.starts_with("ai-client/"),
+            Self::Skills => target_name == "skills",
+            Self::ManagedFile => target_name.starts_with("agent-file/"),
+            Self::AiClient => target_name.starts_with("ai-client/"),
         }
     }
+}
+
+/// The kind of Target a name belongs to, for display.
+pub fn kind_name(target_name: &str) -> &'static str {
+    REGISTERED
+        .into_iter()
+        .find(|action| action.matches(target_name))
+        .map_or("unknown", ActionKind::name)
 }
 
 pub struct Registry<'a> {
@@ -131,7 +138,7 @@ impl<'a> Registry<'a> {
 fn registered(assignment: &Assignment) -> Result<ActionKind> {
     REGISTERED
         .into_iter()
-        .find(|action| action.matches(assignment))
+        .find(|action| action.matches(&assignment.target_name))
         .ok_or_else(|| anyhow::anyhow!("unsupported Target descriptor"))
 }
 

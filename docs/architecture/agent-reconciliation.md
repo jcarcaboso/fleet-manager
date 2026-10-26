@@ -179,7 +179,10 @@ which is what allows the Server to set that flag. The
 
 `fleet-agent status` does not measure disk usage: it is a separate short-lived
 process with no cached value, and a live call could hang on a stuck mount.
-Operators read the last report from the Server.
+Operators read the last report from the Server. `fleet-agent disk` measures on
+demand instead, with the same worker and 2-second wait: a measurement that does
+not finish prints `{"diskUsage": null, "timedOut": true}` and the process exits
+without joining the stuck thread.
 
 Measuring the home path can trigger an automount, but the Agent already
 accesses the home for its Targets, so this adds no new access. The Agent does
@@ -216,6 +219,37 @@ The schedule is in memory, so a restart reports again. The route does not need a
 capability header. The
 [Operator API](../technical-design/operator-api.md#phase-3-agent-and-machine-information)
 defines `PUT /agent/v1/telemetry`.
+
+## State lock and read-only commands
+
+One Agent process owns a state directory. `enroll`, `alias` and `run` (the
+service runs `run`) create the directory if needed, then take an exclusive
+non-blocking `flock` on `agent.lock`; a second one fails with "another
+fleet-agent process is using this state directory". Taking the lock retries up
+to 10 times, 50 ms apart, to tolerate a read-only command briefly probing it
+while the service starts.
+
+`status`, `targets`, `check` and `disk` are read-only and run while the service
+holds the lock. They take no exclusive lock, create no directory or file, change
+no permission and make no Server request; the Agent protocol has no read-only
+Server call, since polling is a mutating exchange. A missing state directory is
+reported as "Agent is not configured" (a failed JSON check for `check`) and stays
+missing. A state or credentials
+directory that is a link, belongs to another user or is readable by others is
+refused, never repaired.
+
+They read `config.json`, `credentials/identity.json`, `run.json` and
+`pending-detail.json`. Each is written by a temporary file in the same
+directory that is flushed and renamed over the old file (`state::write_bytes`,
+the credential store's `atomic_write`), so a lock-free reader sees the old or
+the new file, never a partial one. Different files are read one after another,
+so they can come from either side of an update, and each is consistent by
+itself.
+
+`status` reports `service.running` by opening `agent.lock` read-only (a missing
+file means not running) and trying a non-blocking shared lock, released at once.
+A conflict means a process holds the state lock: the service, but also a
+foreground `run`, `enroll` or `alias`.
 
 ## Work loop
 
