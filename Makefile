@@ -28,6 +28,7 @@ security:
 docs-check:
 	python3 scripts/check-doc-links.py
 
+# Builds through compose.build.yaml, the only Compose file that builds; compose.yaml itself only pulls images.
 dashboard-image:
-	docker build -f dashboard/Dockerfile -t fleet-manager-dashboard:local .
+	FLEET_DASHBOARD_IMAGE=fleet-manager-dashboard:local docker compose -p fleet-dashboard-build -f deploy/homelab/compose.yaml -f deploy/homelab/compose.build.yaml build dashboard
 	scripts/smoke-dashboard-image.sh fleet-manager-dashboard:local

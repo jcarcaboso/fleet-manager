@@ -1,0 +1,11 @@
+# Local build of the dashboard image, for development and release smoke tests only. compose.yaml itself
+# never builds: it pulls the pinned image. Use this file in addition to it, from a checkout of the repository
+# (the build context is the repository root), and point FLEET_DASHBOARD_IMAGE at a local tag, never at a
+# published release name:
+#   FLEET_DASHBOARD_IMAGE=fleet-manager-dashboard:local docker compose -f compose.yaml -f compose.build.yaml build dashboard
+#   FLEET_DASHBOARD_IMAGE=fleet-manager-dashboard:local docker compose up -d --wait
+services:
+  dashboard:
+    build:
+      context: ../..
+      dockerfile: dashboard/Dockerfile

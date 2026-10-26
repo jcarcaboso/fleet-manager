@@ -36,13 +36,29 @@ services:
     entrypoint: [/bin/sh, -ec]
     command:
       - |
+        # Two private volumes, two owners. The Server gets everything it needs (including the CA key that signs
+        # Node certificates) in runtime-config, owned by 1654. The dashboard gets only its own certificate and
+        # key plus the public CA certificate in dashboard-tls, owned by 1655. Nothing else goes into that volume.
+        for file in dashboard.pem dashboard.key; do
+          if [ ! -r "/input/tls/$$file" ]; then
+            echo "configure: secrets/tls/$$file is missing. This installation was created before the dashboard had its own certificate. Run: python3 setup.py --add-dashboard" >&2
+            exit 1
+          fi
+        done
         mkdir -p /runtime/tls /runtime/.ssh
         cp /input/server.json /runtime/appsettings.Production.json
-        cp /input/tls/* /runtime/tls/
+        for file in /input/tls/*; do
+          case "$${file##*/}" in dashboard.*) ;; *) cp "$$file" /runtime/tls/ ;; esac
+        done
         cp -R /input-ssh/. /runtime/.ssh/
         chown -R 1654:1654 /runtime
         find /runtime -type d -exec chmod 0700 {} +
         find /runtime -type f -exec chmod 0600 {} +
+        find /dashboard-tls -mindepth 1 -delete
+        cp /input/tls/dashboard.pem /input/tls/dashboard.key /input/tls/ca.pem /dashboard-tls/
+        chown -R 1655:1655 /dashboard-tls
+        chmod 0700 /dashboard-tls
+        find /dashboard-tls -type f -exec chmod 0600 {} +
     read_only: true
     network_mode: none
     cap_drop: [ALL]
@@ -52,6 +68,7 @@ services:
       - ./secrets:/input:ro
       - ./ssh:/input-ssh:ro
       - runtime-config:/runtime
+      - dashboard-tls:/dashboard-tls
     restart: "no"
 
   postgres:
@@ -102,19 +119,18 @@ services:
       start_period: 20s
 
   dashboard:
-    build:
-      context: ../..
-      dockerfile: dashboard/Dockerfile
     image: ${FLEET_DASHBOARD_IMAGE:-skorcius/fleet-manager-dashboard:0.10.0}
     restart: unless-stopped
-    user: "1654:1654"
+    # Its own uid and its own volume: the dashboard reads dashboard.pem, dashboard.key and the public ca.pem,
+    # and nothing the Server owns (no CA key, Server key, database password or Operator token digests).
+    user: "1655:1655"
     read_only: true
     cap_drop: [ALL]
     security_opt: [no-new-privileges:true]
     environment:
       FLEET_API_ORIGIN: ${FLEET_PUBLIC_URL:-https://${FLEET_HOSTNAME:-localhost}:${FLEET_PORT:-7443}}
     volumes:
-      - runtime-config:/run/fleet:ro
+      - dashboard-tls:/run/dashboard-tls:ro
     tmpfs:
       - /tmp:rw,noexec,nosuid,nodev,size=16m,mode=1777
     ports:
@@ -123,7 +139,7 @@ services:
       configure: {condition: service_completed_successfully}
       server: {condition: service_healthy}
     healthcheck:
-      test: [CMD, curl, --fail, --silent, --show-error, --max-time, "3", --cacert, /run/fleet/tls/ca.pem, https://localhost:8443/healthz]
+      test: [CMD, curl, --fail, --silent, --show-error, --max-time, "3", --cacert, /run/dashboard-tls/ca.pem, https://localhost:8443/healthz]
       interval: 15s
       timeout: 5s
       retries: 5
@@ -148,3 +164,4 @@ networks:
 volumes:
   postgres-data: {}
   runtime-config: {}
+  dashboard-tls: {}

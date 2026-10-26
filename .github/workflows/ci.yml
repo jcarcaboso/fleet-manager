@@ -73,5 +73,12 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
-      - run: docker build -f dashboard/Dockerfile -t fleet-dashboard:ci .
+      - name: Compose files
+        run: |
+          docker compose -f deploy/homelab/compose.yaml config --format json \
+            | python3 -c "import json, sys; services = json.load(sys.stdin)['services']; sys.exit('compose.yaml must not build: ' + ', '.join(name for name, service in services.items() if 'build' in service) if any('build' in service for service in services.values()) else 0)"
+      - name: Build through compose.build.yaml
+        run: docker compose -p fleet-dashboard-build -f deploy/homelab/compose.yaml -f deploy/homelab/compose.build.yaml build dashboard
+        env:
+          FLEET_DASHBOARD_IMAGE: fleet-dashboard:ci
       - run: scripts/smoke-dashboard-image.sh fleet-dashboard:ci

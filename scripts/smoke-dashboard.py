@@ -175,10 +175,20 @@ done(f'{len(resources.assets)} asset(s) from index.html load with correct types 
 status, headers, _ = fetch(DASHBOARD + '/assets/missing-0000.js')
 check(status == 404 and 'immutable' not in (headers['Cache-Control'] or ''), 'a missing hashed asset must be an uncached 404')
 check(fetch(DASHBOARD + '/missing.js')[0] == 404, 'a missing file must be a 404, not index.html')
-check(fetch(DASHBOARD + '/.env')[0] == 404 and fetch(DASHBOARD + '/.git/config')[0] == 404, 'a dotfile was served')
+for path in ['/.env', '/.git/config', '/assets/.x', '/%2eenv']:
+    check(fetch(DASHBOARD + path)[0] == 404, f'{path} was not a 404')
+for path in ['/machines/.hidden', '/machines/.hidden/overview', '/machines/%2Ehidden', '/machines/a/.b']:
+    status, _, body = fetch(DASHBOARD + path)
+    check(status == 200 and body == index, f'{path}: a Node alias that starts with a dot must still get the application')
+# Pages that nginx generates itself carry the same security headers.
+for path, expected in [('/../../etc/passwd', 400), ('/%2e%2e/%2e%2e/etc/passwd', 400), ('/missing.js', 404), ('/.git/config', 404)]:
+    status, headers, _ = fetch(DASHBOARD + path)
+    check(status == expected, f'{path} returned {status}, expected {expected}')
+    check_security_headers(headers, f'{expected} for {path}')
 for method in ['POST', 'PUT', 'DELETE']:
     status, headers, _ = fetch(DASHBOARD + '/', method=method, headers={'Content-Type': 'application/json'}, body={})
     check(status == 405 and 'GET' in (headers['Allow'] or ''), f'{method} to the dashboard returned {status}')
+    check_security_headers(headers, f'405 for {method}')
 check(fetch(DASHBOARD + '/healthz')[0] == 200, 'dashboard /healthz failed')
 done('404 for files, dotfiles denied, 405 for writes, healthz')
 

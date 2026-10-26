@@ -57,6 +57,8 @@ Upgrading from a release where the Server served the dashboard adds the
 Server redirects to the new address, so old bookmarks keep working. The
 dashboard and the Server must be on the same site (HTTPS, same host name or
 registrable domain), because the session cookie is `SameSite=Strict`. The
+dashboard has its own certificate and volume, so run `python3 setup.py
+--add-dashboard` once in the deployment directory. The
 [upgrade steps](deploy/homelab/README.md#upgrading-to-the-separate-dashboard)
 list the changes to make.
 

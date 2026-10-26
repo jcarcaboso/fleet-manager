@@ -28,23 +28,61 @@ is not implemented.
 
 The dashboard is not part of the Server. `skorcius/fleet-manager-dashboard` is an
 unprivileged nginx image that serves the built Vue application over HTTPS on
-8443 (published as `FLEET_DASHBOARD_PORT`, 7444 by default). It reuses the
-Server's certificate and key from the generated runtime volume, mounted read-only,
-and allows TLS 1.2 and 1.3 with AEAD cipher suites only. Compose runs it as UID
-1654 on a read-only root file system with a 16 MiB `/tmp` tmpfs, no capabilities,
+8443 (published as `FLEET_DASHBOARD_PORT`, 7444 by default). It has its own TLS
+identity and does not share secrets with the Server. It allows TLS 1.2 and 1.3
+with AEAD cipher suites only. Compose runs it as UID 1655 (the Server is 1654) on
+a read-only root file system with a 16 MiB `/tmp` tmpfs, no capabilities,
 `no-new-privileges`, the Server's memory and process limits, and a healthcheck
-against `/healthz`. It joins its own network, not the database or the Server's
-outbound network, because it never calls the Server: the browser does.
+against `/healthz` that trusts the public `ca.pem`. It joins its own network, not
+the database or the Server's outbound network, because it never calls the Server:
+the browser does.
+
+### Secret separation
+
+`setup.py` issues two leaf certificates from the homelab CA, `server.pem` and
+`dashboard.pem`, each with its own key and the same names. The CA private key is
+only ever needed by the Server, which signs Node certificates with it. The
+`configure` service (no network, brief root) copies the files into two named volumes:
+
+| Volume | Owner and mode | Files | Mounted by |
+|---|---|---|---|
+| `runtime-config` | 1654, directories 0700, files 0600 | `appsettings.Production.json` (PostgreSQL password, Operator token digests), `tls/ca.key`, `tls/ca.pem`, `tls/server.key`, `tls/server.pem`, `.ssh/` | `server` and `migrate`, read-only |
+| `dashboard-tls` | 1655, directory 0700, files 0600 | `dashboard.key`, `dashboard.pem`, `ca.pem` (public), nothing else | `dashboard`, read-only at `/run/dashboard-tls` |
+
+`configure` empties `dashboard-tls` before filling it and never copies
+`dashboard.*` into `runtime-config`. So a compromised dashboard container can read its own key and certificate and the
+public CA certificate. It cannot read the CA key, the Server key, the database
+password, the Operator token digests, the SSH configuration or the Server's
+volume, and the Server cannot read the dashboard's. Stealing the dashboard key
+lets an attacker impersonate the dashboard address to a browser that trusts the
+CA, as the Server key does for the Server, but yields no Node credentials, no
+API access and no database access.
+
+An installation created before the dashboard had its own certificate has no
+`dashboard.pem`. `configure` then stops with a message that points at
+`python3 setup.py --add-dashboard`, which issues the certificate from the
+existing CA in `secrets/tls` without touching the CA or the Server certificate,
+adds the missing `FLEET_DASHBOARD_*` settings and `DashboardOrigin`, and refuses
+to overwrite an existing dashboard certificate. Rotating the dashboard certificate
+means replacing `dashboard.pem` and `dashboard.key` in `secrets/tls` with ones
+signed by the same CA and recreating the stack.
 
 At start-up the container writes `/config.json` and the Content-Security-Policy
 from `FLEET_API_ORIGIN`, the Server's public HTTPS origin. It refuses to start
-with a missing value or anything but a bare `https` origin (plain `http` only for
-`localhost` and `127.0.0.1`). Pages carry `default-src 'none'; script-src 'self';
+with a missing value or anything but a bare `https` origin with a DNS hostname or
+IPv4 address (plain `http` only for `localhost` and `127.0.0.1`). IPv6 literals
+are refused with a message to use a hostname: the Content-Security-Policy
+host-source syntax has no form for them, so a browser would drop the
+`connect-src` entry and block every API call. `setup.py` refuses an IPv6
+`--host` for the same reason. Pages carry `default-src 'none'; script-src 'self';
 style-src 'self'; connect-src 'self' ORIGIN; frame-ancestors 'none'` and related
 headers, `Referrer-Policy: no-referrer`, `X-Content-Type-Options: nosniff`, a
 deny-all `Permissions-Policy` and `Cross-Origin-Opener-Policy: same-origin`.
-Only GET and HEAD are served, dotfiles are refused, and the access log leaves
-out query strings and `Referer`. Hashed files under `/assets/` are cached for a
+Only GET and HEAD are served, dotfiles are refused (a Node alias under a route
+such as `/machines/.name` still gets the application), and the access log leaves
+out query strings and `Referer`. The same security headers are set on every
+response nginx generates, error pages for malformed (400), too long (414) or
+unknown (404) requests included. Hashed files under `/assets/` are cached for a
 year; `index.html` and `config.json` are `no-store`.
 
 ### Dashboard origin, CORS and CSRF

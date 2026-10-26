@@ -41,8 +41,8 @@ Embedding the public CA allows normal TLS certificate and hostname verification
 from the first request. There is no unverified download or TLS bypass. Changing
 the CA requires a new link; leaf certificate rotation under the same CA does not.
 The Operator's browser must trust the Server and dashboard certificates (the
-homelab dashboard serves the Server's certificate), which may require installing
-the homelab CA on that Operator machine once. Enrollment links name the Server
+homelab dashboard has its own certificate from the same CA), which may require
+installing the homelab CA on that Operator machine once. Enrollment links name the Server
 (`/enroll` stays on the Server), not the dashboard.
 
 The Agent accepts at most 16 KiB, requires matching HTTPS origins and exact

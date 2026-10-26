@@ -150,8 +150,7 @@ reference. Every screen, route, action, state and message carries over:
 - Stale-response protection: a response for a view that has since been replaced
   never changes the current view, and a request whose view is gone is aborted.
   Use one `AbortController` per view and Vue's scope disposal.
-- Bounded polling that stops on navigation (disk refresh, Add machine wizard,
-  rollout progress).
+- Bounded polling that stops on navigation (disk refresh, Add machine wizard).
 - Accessibility: status is always icon plus label, controls are keyboard
   reachable with a visible focus ring, and modals trap focus and restore it.
 
@@ -197,19 +196,30 @@ pinned unprivileged nginx stage serves `dist/` over HTTPS on 8443.
 
 - The service runs read-only, as a non-root user, with all capabilities dropped
   and `no-new-privileges`, with a healthcheck, like the Server service.
-- TLS: it uses the Server's certificate and key from the generated
-  `runtime-config` volume (`/run/fleet/tls/server.pem`, `server.key`). The
-  certificate already covers `FLEET_HOSTNAME`.
+- TLS: it has its own certificate and key, `dashboard.pem` and `dashboard.key`,
+  signed by the same CA as the Server's and carrying the same names. `configure`
+  copies only these two files and the public `ca.pem` into a separate
+  `dashboard-tls` volume (owner 1655, directory 0700, files 0600), mounted
+  read-only at `/run/dashboard-tls`, and the container runs as 1655. It therefore
+  cannot read the Server's `runtime-config` volume: the CA key, the Server key,
+  the database password or the Operator token digests. `setup.py --add-dashboard`
+  upgrades an installation created before this. See the
+  [operations hardening guide](../technical-design/operations-hardening.md#secret-separation).
 - Environment: `FLEET_API_ORIGIN` (the Server's public origin).
-- Headers: `Content-Security-Policy: default-src 'none'; script-src 'self';
+- `FLEET_API_ORIGIN` must be a hostname or IPv4 origin: CSP host sources cannot
+  express an IPv6 literal, so the container and `setup.py` refuse one.
+- Headers (the security headers are on every response, including nginx's own
+  error pages): `Content-Security-Policy: default-src 'none'; script-src 'self';
   style-src 'self'; img-src 'self'; font-src 'self'; connect-src 'self'
   FLEET_API_ORIGIN; base-uri 'none'; frame-ancestors 'none'; form-action
   'none'`, `Referrer-Policy: no-referrer`, `X-Content-Type-Options: nosniff`,
   `Cache-Control: no-store` for `index.html` and `config.json`, long-lived
   immutable caching for hashed assets, and an `index.html` fallback for the
   route paths.
-- Compose gets a `dashboard` service with a `build:` section (for local builds)
-  and `image: ${FLEET_DASHBOARD_IMAGE:-skorcius/fleet-manager-dashboard:0.10.0}`,
+- Compose gets a `dashboard` service with only
+  `image: ${FLEET_DASHBOARD_IMAGE:-skorcius/fleet-manager-dashboard:0.10.0}`
+  (`compose.yaml` never builds; local builds use the override
+  `compose.build.yaml`),
   published on `${FLEET_BIND_IP}:${FLEET_DASHBOARD_PORT:-7444}`. The Server
   service gets `Fleet__DashboardOrigin` from `FLEET_DASHBOARD_URL`
   (default `https://${FLEET_HOSTNAME}:${FLEET_DASHBOARD_PORT:-7444}`).

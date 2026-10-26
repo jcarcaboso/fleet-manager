@@ -22,13 +22,13 @@ COPY --chown=root:root --chmod=0644 LICENSE /usr/share/licenses/fleet-dashboard/
 COPY --from=build --chown=root:root /src/dashboard/dist/ /srv/dashboard/
 ENV FLEET_API_ORIGIN=
 LABEL org.opencontainers.image.title="Fleet Manager Dashboard" \
-      org.opencontainers.image.description="Fleet Manager Operator dashboard served by nginx over HTTPS. Requires the Fleet Server's TLS certificate and FLEET_API_ORIGIN." \
+      org.opencontainers.image.description="Fleet Manager Operator dashboard served by nginx over HTTPS. Requires its own TLS certificate and key in /run/dashboard-tls and FLEET_API_ORIGIN." \
       org.opencontainers.image.licenses="MIT" \
       org.opencontainers.image.source="https://github.com/jcarcaboso/fleet-manager" \
       org.opencontainers.image.url="https://github.com/jcarcaboso/fleet-manager" \
       org.opencontainers.image.version="0.10.0"
-# The Server runs as 1654 and owns the 0600 certificate files in the runtime-config volume.
-USER 1654:1654
+# Not the Server's uid (1654): the dashboard owns only the 0600 files in its own dashboard-tls volume.
+USER 1655:1655
 EXPOSE 8443
 ENTRYPOINT ["/usr/local/bin/fleet-dashboard-entrypoint"]
 CMD ["nginx", "-g", "daemon off;"]
