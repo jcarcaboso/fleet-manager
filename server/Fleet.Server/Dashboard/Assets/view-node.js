@@ -1,6 +1,6 @@
 'use strict';
 /* Fleet dashboard: one machine, with Overview, Installed, Problems, Activity, Security and Settings tabs.
-   API: GET nodes/{node}, GET nodes/{node}/checkins, GET nodes/{node}/attempts, GET audit?node=&order=newest, GET issues, GET errors,
+   API: GET nodes/{node} (with disk and agent), POST nodes/{node}/disk-usage/refresh, GET nodes/{node}/checkins, GET nodes/{node}/attempts, GET audit?node=&order=newest, GET issues, GET errors,
    POST nodes/{node}/retry, POST nodes/rename, POST nodes/{id}/revoke, POST nodes/{id}/remove. */
 (function () {
   const Fleet = window.Fleet = window.Fleet || {};
@@ -52,7 +52,7 @@
   };
 
   const facts = list => `<dl class="facts-row">${list.map(([k, v, sub, mono]) => `<div><dt>${esc(k)}</dt><dd${mono ? ' class="mono"' : ''}>${esc(v)}</dd>${sub ? `<dd class="sub">${esc(sub)}</dd>` : ''}</div>`).join('')}</dl>`;
-  const attemptRows = list => `<div class="tbl-wrap"><table class="tbl tbl--compact"><thead><tr><th>Attempt</th><th>Revision</th><th>Result</th><th>Updated (UTC)</th><th>Error code</th></tr></thead><tbody>${list.map(a => `<tr><td class="mono">${esc(u.shortId(a.attemptId))}</td><td>${u.revChip(a.sourceRevision, a.sourceRevision)}</td><td>${u.stateTag(a.state)}</td><td>${esc(u.fmtFull(a.updatedAt))}</td><td>${a.errorCode ? `<code>${esc(a.errorCode)}</code>` : '<span class="muted">—</span>'}</td></tr>`).join('')}</tbody></table></div>`;
+  const attemptRows = list => `<div class="tbl-wrap"><table class="tbl tbl--compact"><thead><tr><th>Attempt</th><th>Revision</th><th>Result</th><th>Updated (UTC)</th><th>Error code</th><th>Step</th></tr></thead><tbody>${list.map(a => `<tr><td class="mono">${esc(u.shortId(a.attemptId))}</td><td>${u.revChip(a.sourceRevision, a.sourceRevision)}</td><td>${u.stateTag(a.state)}</td><td>${esc(u.fmtFull(a.updatedAt))}</td><td>${a.errorCode ? `<code>${esc(a.errorCode)}</code>` : '<span class="muted">—</span>'}</td><td>${a.step ? esc(u.stepLabel(a.step)) : '<span class="muted">—</span>'}</td></tr>`).join('')}</tbody></table></div>`;
 
   const problemCard = p => {
     const n = S.n, cat = p.cat, i = p.issue, t = p.target;
@@ -72,8 +72,11 @@
     } else if (i) {
       factList = [['Since', i.since ? u.fmtFull(i.since) + ' UTC' : '—', i.since ? u.rel(i.since) : ''], ['Severity', i.severity === 'error' ? 'Error' : 'Warning', ''], ...(i.errorCode ? [['Error code', i.errorCode, '', true]] : [])];
     }
-    const diag = t?.latestAttempt?.diagnostic;
-    const fix = cat?.fix?.length ? cat.fix.map(x => ({ t: x })) : (i?.action ? [{ t: i.action }] : []);
+    /* Detail of the latest failed Attempt: a failed Target has it on latestAttempt, an Issue carries the same three fields. */
+    const la = t?.latestAttempt;
+    const det = t ? (u.hasDetail(la) || !i ? la : i) : null;
+    const detail = t || i?.code === 'assignment_failed' ? ui.failureDetail(t ? det : i, t) : '';
+    const fix = model.fixSteps(i, cat);
     const commands = i?.commands || [];
     const attempts = t ? S.tAttempts.get(t.name) : null;
     const retrying = t && S.retrying.has(n.id + ':' + t.name);
@@ -86,7 +89,7 @@
     <div class="prob-body">
       ${explanation ? `<p class="prob-expl">${u.md(explanation)}${specific ? ` <strong>${u.md(specific)}</strong>` : ''}</p>` : '<p class="prob-expl muted">The Server has no catalog entry for this code yet.</p>'}
       ${factList.length ? facts(factList) : ''}
-      ${diag ? `<p class="kv-label">Diagnostic from the Agent</p><pre class="code code--diag">${esc(diag)}</pre>` : ''}
+      ${detail}
       <div class="prob-cols">
         <section class="fix" aria-label="How to fix"><h4>How to fix</h4>${fix.length ? ui.stepsList(fix) : '<p class="muted">No fix steps are published for this problem.</p>'}${t ? '<p class="muted small prob-note">The Agent applies a retry on its next poll.</p>' : ''}</section>
         <section class="why">
@@ -120,6 +123,17 @@
         : left < u.DAY ? { level: 'warning', kind: 'bang', title: 'Certificate expires soon', text: `${u.span(left)} left${n.freshness === 'fresh' ? ' · renews at the next poll' : ' · cannot renew while offline'}` }
           : { level: 'good', kind: 'check', title: 'Certificate valid', text: `${u.span(left)} left · renews automatically` });
     }
+    const worst = n.disk?.volumes.slice().sort((a, b) => b.usedPercent - a.usedPercent)[0];
+    if (!n.revoked && worst) {
+      const lv = model.diskLevel(worst.usedPercent);
+      out.push({ level: lv.level, kind: lv.kind, title: lv.key === 'good' ? 'Disk has room' : lv.key === 'warning' ? 'Disk is filling up' : 'Disk is nearly full',
+        text: `${worst.usedPercent.toFixed(1)}% used · ${u.bytes(worst.availableBytes)} available of ${u.bytes(worst.totalBytes)}` });
+    }
+    if (!n.revoked && n.agent?.version) {
+      const a = n.agent;
+      out.push(a.outdated ? { level: 'warning', kind: 'bang', title: 'Agent update available', text: `Running ${a.version}${a.latestVersion ? `; ${a.latestVersion} is the latest` : ''}` }
+        : { level: 'good', kind: 'check', title: 'Agent is up to date', text: `Running ${a.version}` });
+    }
     if (n.credential) out.push({ level: 'neutral', kind: 'info', title: `${u.plural(n.credential.renewals, 'renewal')} since enrollment`, text: `Issued ${u.fmtFull(n.credential.notBefore)} UTC` });
     return out;
   };
@@ -140,6 +154,182 @@
     }).join('')}</tbody></table></div>`;
   };
 
+  /* ---------------------------------------------------------------- disk panel */
+  /* The refresh in progress for the machine on screen (module state, not part of S: a reload must not lose it). It belongs to one visit,
+     and every callback checks that it is still the current refresh and that the user is still on that machine. Navigating away drops it.
+       phase: requesting (POST in flight) -> waiting (polling GET nodes/{node} every 5 s) -> answered | timeout | error.
+     The Node detail has no poll interval, so two poll intervals are taken as 2.5 minutes.
+     Every request of a refresh carries the refresh's AbortController signal. stopDisk() (navigation, a new refresh) aborts what is in flight,
+     and an independent deadline timer ends the wait even when a read never answers: it aborts that read and shows the no-answer state.
+     The deadline allows the last read, due at DISK_WAIT_MS, a moment to answer. An abort is a silent cancel and never reaches the user. */
+  const DISK_POLL_MS = 5000, DISK_WAIT_MS = 150000, DISK_GRACE_MS = 1000;
+  let dr = null;
+  const clearDisk = r => { clearTimeout(r.timer); clearTimeout(r.deadline); r.timer = r.deadline = null; };
+  const stopDisk = () => { if (dr) { clearDisk(dr); const ctl = dr.ctl; dr.ctl = null; dr = null; ctl?.abort(); } };
+  /* Ends the wait with a final phase. The in-flight read, if any, is aborted and its late result ignored (it checks the phase). */
+  const finishDisk = (r, phase) => { clearDisk(r); r.phase = phase; const ctl = r.ctl; r.ctl = null; ctl?.abort(); };
+  const diskNow = () => dr && S.n && dr.nodeId === S.n.id ? dr : null;
+  const diskLive = r => dr === r && staying(r.n, r.visit);
+  const diskBusy = () => { const r = diskNow(); return !!r && (r.phase === 'requesting' || r.phase === 'waiting'); };
+  const VOLUME = { home: ['Home folder', 'The volume that holds the user’s home directory'], state: ['Agent state', 'The volume that holds the Agent’s state directory'] };
+
+  const volumeRow = v => {
+    const lv = model.diskLevel(v.usedPercent), pct = v.usedPercent.toFixed(1), [title, sub] = VOLUME[v.label] || [v.label, 'Volume reported by the Agent'];
+    return `<li class="dvol dvol--${lv.key}" data-volume="${esc(v.label)}">
+      <div class="dvol-top"><div class="dvol-name"><b>${esc(title)}</b><span class="muted small">${esc(sub)}</span></div><div class="dvol-pct">${esc(pct)}%</div></div>
+      <div class="meter m-${lv.key}" role="img" aria-label="${esc(`${title}: ${pct}% used, ${lv.label}`)}"><span data-w="${Math.min(100, v.usedPercent).toFixed(1)}"></span></div>
+      <span class="dvol-state t-${lv.level}">${glyph(lv.level, lv.kind)}<span>${esc(lv.label)}</span></span>
+      <dl class="dvol-nums"><div><dt>Used</dt><dd>${esc(u.bytes(v.usedBytes))}</dd></div><div><dt>Available</dt><dd>${esc(u.bytes(v.availableBytes))}</dd></div><div><dt>Total</dt><dd>${esc(u.bytes(v.totalBytes))}</dd></div></dl>
+    </li>`;
+  };
+  const diskBody = () => {
+    const n = S.n, d = n.disk;
+    if (!d || !d.volumes.length) return `<div class="empty-mini">${ic('server')}<p>${n.revoked ? 'This machine is revoked, so it reports no disk usage.' : 'No disk data yet. An Agent reports its disk usage after its first check-in and every 4 hours. Agents before 0.9.0 do not report it.'}</p></div>`;
+    return `<ul class="dvols">${d.volumes.map(volumeRow).join('')}</ul>
+      <p class="disk-measured">${d.measuredAt ? `Measured ${esc(u.rel(d.measuredAt))} · ${esc(u.fmtFull(d.measuredAt))} UTC` : ''}</p>`;
+  };
+  const diskTools = () => {
+    const n = S.n;
+    if (n.revoked) return '';
+    const busy = diskBusy(), label = busy ? 'Refreshing…' : 'Refresh', icon = ic('retry', busy ? 'spin' : '');
+    if (!api.can('operate')) return ui.locked('operate', 'btn-secondary btn-sm', `${icon}Refresh`);
+    return `<button type="button" class="btn btn-secondary btn-sm" data-act="disk-refresh" ${busy ? 'disabled aria-busy="true"' : ''}>${icon}${label}</button>`;
+  };
+  /* The status line under the volumes: what the refresh is doing, or why it failed. */
+  const diskStatus = () => {
+    const n = S.n, r = diskNow();
+    if (!r) {
+      if (n.disk?.refreshRequestedAt) return { tone: 'info', html: `${glyph('info', 'info')}<span>A refresh was requested ${esc(u.rel(n.disk.refreshRequestedAt))}. The Agent answers on its next check-in.</span>` };
+      return { tone: '', html: '' };
+    }
+    switch (r.phase) {
+      case 'requesting': return { tone: 'info', html: `${ic('sync', 'spin')}<span>Requesting a refresh…</span>` };
+      case 'waiting': return { tone: 'info', html: `${ic('sync', 'spin')}<span>Refresh requested — the Agent answers on its next check-in.</span>` };
+      case 'answered': return { tone: 'good', html: `${glyph('good', 'check')}<span>Disk usage updated ${esc(u.rel(n.disk?.measuredAt))}.</span>` };
+      case 'timeout': return { tone: 'warning', html: `${glyph('warning', 'bang')}<span>No answer yet. Agents before 0.9.0 do not report disk usage.</span>` };
+      default: return { tone: r.tone || 'critical', html: `${glyph(r.tone === 'warning' ? 'warning' : 'critical', r.tone === 'warning' ? 'bang' : 'x')}<span>${esc(r.message)}</span>` };
+    }
+  };
+  const diskPanel = () => {
+    const n = S.n, st = diskStatus();
+    return `<section class="panel" id="disk-panel" aria-labelledby="disk-h"><header class="panel-head row"><div><h2 id="disk-h">Disk</h2><p>Space on the volume that holds ${esc(n.alias)}’s files. Git worktrees and caches fill it up.</p></div>
+      <div class="head-tools" id="disk-tools">${diskTools()}</div></header>
+      <div id="disk-body">${diskBody()}</div>
+      <p class="disk-status${st.tone ? ` disk-status--${st.tone}` : ''}" id="disk-status" role="status">${st.html}</p>
+      ${n.revoked ? '' : ui.lockNote('operate')}</section>`;
+  };
+  /* Repaints only the Disk panel, so charts, open details and focus elsewhere on the page stay as they are. */
+  const repaintDisk = () => {
+    const panel = document.getElementById('disk-panel');
+    if (!panel || !S.n || S.tab !== 'overview') return;
+    const refocus = document.activeElement?.closest?.('#disk-tools') ? '[data-act="disk-refresh"]' : null;
+    const st = diskStatus();
+    ui.setHtml(document.getElementById('disk-tools'), diskTools());
+    ui.setHtml(document.getElementById('disk-body'), diskBody());
+    const el = document.getElementById('disk-status');
+    el.className = `disk-status${st.tone ? ` disk-status--${st.tone}` : ''}`;
+    el.innerHTML = st.html;
+    if (refocus) document.querySelector('#disk-tools ' + refocus)?.focus({ preventScroll: true });
+  };
+  const diskFail = (r, e) => {
+    const code = e.code, status = e.status;
+    finishDisk(r, 'error');
+    r.tone = status === 403 ? 'warning' : 'critical';
+    r.message = code === 'node_revoked' || status === 409 ? 'This machine has been revoked, so it cannot answer a disk refresh.'
+      : e.message || 'The refresh was not requested.';
+  };
+  const newerDisk = (cur, next) => !cur || !cur.measuredAt || !next.measuredAt || u.ms(next.measuredAt) >= u.ms(cur.measuredAt);
+  const pollDisk = r => {
+    r.timer = setTimeout(async () => {
+      r.timer = null;
+      if (!diskLive(r) || r.phase !== 'waiting') { if (dr === r && r.phase === 'waiting') stopDisk(); return; }
+      const ctl = r.ctl = new AbortController();
+      let raw = null, failure = null;
+      try { raw = await api.get(`nodes/${enc(r.nodeId)}`, undefined, { signal: ctl.signal }); } catch (e) { failure = e; }
+      if (r.ctl === ctl) r.ctl = null;
+      if (!diskLive(r)) { if (dr === r) stopDisk(); return; }
+      /* The deadline ended the wait while this read was in flight (and aborted it): the state is final and already painted. */
+      if (r.phase !== 'waiting') return;
+      if (failure && (failure.silent || failure.code === 'node_not_found')) { if (failure.silent) { stopDisk(); return; } diskFail(r, failure); repaintDisk(); return; }
+      const d = failure ? null : model.diskDetail(raw?.disk);
+      if (d && newerDisk(S.n.disk, d)) { S.n.disk = d; if (S.raw && raw) S.raw = { ...S.raw, disk: raw.disk }; }
+      if (d && d.measuredAt && u.ms(d.measuredAt) > u.ms(r.requestedAt)) {
+        finishDisk(r, 'answered'); repaintDisk();
+        /* Reload quietly so the Problems tab count and the disk issues follow the new measurement. */
+        const n = r.n, visit = r.visit;
+        if (staying(n, visit)) await Fleet.reload({ quiet: true });
+        return;
+      }
+      if (u.now() - r.startedAt >= DISK_WAIT_MS) { finishDisk(r, 'timeout'); repaintDisk(); return; }
+      pollDisk(r);
+    }, DISK_POLL_MS);
+  };
+  /* The independent deadline: whatever the reads are doing, the wait ends DISK_WAIT_MS after the request was accepted. */
+  const expireDisk = r => {
+    r.deadline = null;
+    if (!diskLive(r) || r.phase !== 'waiting') return;
+    finishDisk(r, 'timeout'); repaintDisk();
+  };
+  Fleet.actions['disk-refresh'] = async () => {
+    const n = S.n, visit = S.visit;
+    if (!n || n.revoked || diskBusy()) return;
+    stopDisk();
+    const r = dr = { n, nodeId: n.id, visit, phase: 'requesting', requestedAt: null, startedAt: u.now(), timer: null, deadline: null, ctl: new AbortController(), message: '', tone: '' };
+    repaintDisk();
+    let res;
+    const post = r.ctl;
+    try { res = await api.post(`nodes/${enc(n.id)}/disk-usage/refresh`, {}, { signal: post.signal }); }
+    catch (e) {
+      if (!diskLive(r)) { if (dr === r) stopDisk(); return; }
+      diskFail(r, e); repaintDisk();
+      if (e.status !== 403 && e.status !== 409) ui.fail(e, 'Disk refresh was not requested');
+      return;
+    }
+    if (!diskLive(r)) { if (dr === r) stopDisk(); return; }
+    r.requestedAt = res?.refreshRequestedAt || new Date().toISOString();
+    r.ctl = null; r.startedAt = u.now(); r.phase = 'waiting';
+    r.deadline = setTimeout(() => expireDisk(r), DISK_WAIT_MS + DISK_GRACE_MS);
+    S.n.disk = { measuredAt: S.n.disk?.measuredAt || null, volumes: S.n.disk?.volumes || [], refreshRequestedAt: r.requestedAt };
+    repaintDisk();
+    pollDisk(r);
+  };
+
+  /* ---------------------------------------------------------------- machine panel */
+  const NOT_REPORTED = '<span class="muted">Not reported</span>';
+  const machineItem = (label, value, { mono = false, html = false } = {}) =>
+    `<div><dt>${esc(label)}</dt><dd${mono && value ? ' class="mono"' : ''}>${value ? (html ? value : esc(value)) : NOT_REPORTED}</dd></div>`;
+  /* The upgrade command for how this Agent was installed, as steps with copy buttons. Only for a machine that can still be upgraded. */
+  const upgradeCallout = () => {
+    const n = S.n, plan = model.agentOutdated(n) ? model.upgradePlan(n) : null;
+    if (!plan) return '';
+    const a = n.agent;
+    return `<div class="callout callout--warning upgrade" id="agent-upgrade" data-method="${esc(plan.method || 'unknown')}">${glyph('warning', 'bang')}<div><b>Update available: Agent ${esc(a.version)}${a.latestVersion ? ` → ${esc(a.latestVersion)}` : ''}</b>
+      <p>${a.installMethod ? `This Agent was installed ${esc(model.INSTALLED[a.installMethod] || `with ${a.installMethod}`)}.` : 'The install method was not reported.'} Upgrade it on ${esc(n.alias)}. Its identity and state stay in place.</p>
+      ${ui.stepsList(plan.steps.map(s => ({ t: s.text, cmd: s.cmd })))}
+      ${plan.releaseUrl ? `<p class="small"><a href="${esc(plan.releaseUrl)}" target="_blank" rel="noopener noreferrer">Release notes and archives on GitHub</a></p>` : ''}</div></div>`;
+  };
+  const machinePanel = () => {
+    const n = S.n, a = n.agent;
+    if (!a) return `<section class="panel" id="machine-panel" aria-labelledby="machine-h"><header class="panel-head"><h2 id="machine-h">Machine</h2><p>The operating system and Agent that run ${esc(n.alias)}.</p></header>
+      <p class="muted machine-none">Not reported. Agents before 0.9.0 do not send machine details.</p></section>`;
+    const old = model.agentOutdated(n);
+    const version = `${esc(a.version || '—')}${old ? ` <span class="chip chip--update">${glyph('warning', 'bang')}Update available</span>` : ''}${a.latestVersion ? ` <span class="muted small">${old ? `latest ${esc(a.latestVersion)}` : n.revoked ? '' : 'latest release'}</span>` : ''}`;
+    return `<section class="panel" id="machine-panel" aria-labelledby="machine-h"><header class="panel-head"><h2 id="machine-h">Machine</h2><p>${a.reportedAt ? `Reported by the Agent ${esc(u.rel(a.reportedAt))}. It sends this again whenever it changes.` : 'Reported by the Agent.'}</p></header>
+      ${upgradeCallout()}
+      <dl class="kv kv--grid kv--3">
+        ${machineItem('Hostname', a.hostname, { mono: true })}
+        ${machineItem('User', a.user)}
+        ${machineItem('Operating system', model.osText(n))}
+        ${machineItem('Kernel', a.os.kernel, { mono: true })}
+        ${machineItem('Architecture', a.arch, { mono: true })}
+        ${machineItem('Agent version', version, { html: true })}
+        ${machineItem('Install method', a.installMethod && (model.INSTALL[a.installMethod] || a.installMethod))}
+        ${machineItem('Service manager', a.serviceManager && (model.SERVICE[a.serviceManager] || a.serviceManager))}
+        ${machineItem('State directory', a.stateDirectory, { mono: true })}
+        ${machineItem('Reported', a.reportedAt && `${u.fmtFull(a.reportedAt)} UTC · ${u.rel(a.reportedAt)}`)}
+      </dl></section>`;
+  };
+
   const tabOverview = () => {
     const n = S.n, checks = healthChecks();
     const buckets = S.checkins[S.hours];
@@ -153,6 +343,8 @@
         : `<div class="empty-mini">${ic('layers')}<p>Nothing is assigned yet.</p></div>`}
       <a class="more" href="#/deployments">See all deployments${ic('arrowR')}</a></section>
   </div>
+  ${diskPanel()}
+  ${machinePanel()}
   <section class="panel"><header class="panel-head"><h2>Targets: last in sync vs desired</h2><p>The revision each Target last applied successfully, next to the revision it should reach.</p></header>${targetsTable()}</section>
   <section class="panel"><header class="panel-head row"><div><h2>Check-ins</h2><p>Authenticated polls received per hour. Times in UTC.</p></div>
     <div class="head-tools"><div class="seg-ctl" role="group" aria-label="Range">${[[168, '7 days'], [24, '24 hours']].map(([h, l]) => `<button type="button" data-act="range" data-v="${h}" aria-pressed="${S.hours === h}">${l}</button>`).join('')}</div>
@@ -196,7 +388,7 @@
     for (const a of S.attempts) {
       const m = u.tstate(a.state);
       ev.push({ at: a.updatedAt, level: m.level, kind: m.kind, cat: 'attempt', title: `${u.targetLabel(targetByName(a.targetName))} ${u.attemptVerb(a.state)}`,
-        sub: [u.shortSha(a.sourceRevision), a.errorCode ? catalog.title(a.errorCode) : null, a.errorCode].filter(Boolean).join(' · '), text: a.diagnostic });
+        sub: [u.shortSha(a.sourceRevision), a.errorCode ? catalog.title(a.errorCode) : null, a.errorCode].filter(Boolean).join(' · '), text: a.diagnostic, step: a.step, key: a.attemptId });
     }
     for (const e of S.audit) {
       const sec = /credential/.test(e.action);
@@ -266,6 +458,20 @@
   };
 
   /* ---------------------------------------------------------------- page */
+  /* The Agent card of the header: its version, a warning when it is outdated, and how it was installed. */
+  const agentFact = n => {
+    const a = n.agent;
+    if (!a?.version) return ['Agent', '—', 'not reported'];
+    const old = model.agentOutdated(n), method = a.installMethod ? model.INSTALL[a.installMethod] || a.installMethod : 'install method not reported';
+    return ['Agent', `${old ? glyph('warning', 'bang') : ''}${esc(a.version)}`, `${method} · ${old ? `${a.latestVersion || 'a newer version'} available` : n.revoked ? 'revoked' : 'up to date'}`, true];
+  };
+  /* Under the name: host, user, OS and architecture as the Agent reported them; the enrollment platform when it reported nothing. */
+  const heroSub = n => {
+    const a = n.agent;
+    if (!a) return `${esc(u.platformLabel(n.platform))} machine · enrolled ${esc(u.fmtDay(n.enrolledAt))}`;
+    return [a.hostname && `<span class="mono">${esc(a.hostname)}</span>`, a.user && `signed in as ${esc(a.user)}`, esc(model.osText(n) || `${u.platformLabel(n.platform)} machine`), a.arch && esc(a.arch)].filter(Boolean).join(' · ');
+  };
+
   const paint = () => {
     const n = S.n, h = health(), a = enc(n.alias), tab = S.tab;
     const probs = problems();
@@ -278,7 +484,7 @@
       ['Revision', n.currentRevision ? u.shortSha(n.currentRevision) : '—', total ? `${synced} of ${total} Targets in sync` : 'no Targets assigned'],
       ['Certificate', model.certText(n), n.revoked ? `revoked ${u.rel(n.revokedAt)}` : n.notAfter ? `until ${u.fmtFull(n.notAfter)} UTC` : ''],
       ['Targets', String(total), total ? u.listText(u.STATES.filter(s => n.counts[s.key] > 0).map(s => `${n.counts[s.key]} ${s.label.toLowerCase()}`)) : 'none yet'],
-      ['Platform', u.platformLabel(n.platform), 'reported at enrollment'],
+      agentFact(n),
       ['Enrolled', u.fmtDay(n.enrolledAt), u.rel(n.enrolledAt)],
     ];
     let meter = '';
@@ -294,9 +500,9 @@
       <div class="nhero-stage">${Fleet.art.device(n, h)}<span class="nhero-model">${n.platform === 'macos' ? ic('apple') : n.platform === 'linux' ? ic('tux') : ''}${esc(u.platformLabel(n.platform))}</span></div>
       <div class="nhero-info">
         <div class="nhero-top"><h1 tabindex="-1">${esc(n.alias)}</h1>${u.pill(h.level, h.kind, h.label)}</div>
-        <p class="nhero-sub">${esc(u.platformLabel(n.platform))} machine · enrolled ${esc(u.fmtDay(n.enrolledAt))}</p>
+        <p class="nhero-sub">${heroSub(n)}</p>
         <a class="reason reason--lg reason--${h.level}" href="#/nodes/${a}/${h.key === 'failing' || h.key === 'offline' || h.key === 'never' ? 'problems' : 'overview'}">${glyph(h.level, h.kind)}<span>${esc(h.reason)}${h.extra ? `<span class="reason-extra"> · ${esc(h.extra)}</span>` : ''}</span>${ic('chevR', 'rchev')}</a>
-        <dl class="facts">${fact.map(([k, v, s]) => `<div><dt>${esc(k)}</dt><dd>${esc(v)}</dd><dd class="sub">${esc(s)}</dd>${k === 'Certificate' ? meter : ''}</div>`).join('')}</dl>
+        <dl class="facts">${fact.map(([k, v, s, html]) => `<div><dt>${esc(k)}</dt><dd>${html ? v : esc(v)}</dd><dd class="sub">${esc(s)}</dd>${k === 'Certificate' ? meter : ''}</div>`).join('')}</dl>
         <div class="nhero-actions">
           ${serious ? `<a class="btn btn-primary" href="#/nodes/${a}/problems">${ic('alert')}Fix ${u.plural(serious, 'problem')}</a>` : ''}
           <a class="btn btn-secondary" href="#/nodes/${a}/settings">${ic('pencil')}Rename</a>
@@ -342,7 +548,7 @@
       const key = params[0];
       const tab = TABS.includes(params[1]) ? params[1] : 'overview';
       /* The address may name the machine by alias or by ID, and tabs switch between them, so compare with the machine on screen too. */
-      if (S.key !== null && key !== S.key && !(S.n && (S.n.alias === key || S.n.id === key))) S.visit++;
+      if (S.key !== null && key !== S.key && !(S.n && (S.n.alias === key || S.n.id === key))) { S.visit++; stopDisk(); }
       S.key = key;
       /* Every await below can outlive this navigation. The generation says whether this load is still the newest. */
       const gen = ++S.token;
@@ -373,7 +579,7 @@
       return paint();
     },
     paint: () => S.n ? paint() : notFound(S.alias),
-    unmount() { S.visit++; S.key = null; },
+    unmount() { S.visit++; S.key = null; stopDisk(); },
   };
 
   /* ---------------------------------------------------------------- actions */

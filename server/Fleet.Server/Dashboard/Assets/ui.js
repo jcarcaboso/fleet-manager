@@ -149,6 +149,25 @@
     let k = 0;
     return `<ol class="steps">${steps.map(s => `<li class="${s.or ? 'is-or' : ''}"><span class="sn" aria-hidden="true">${s.or ? 'or' : ++k}</span><div class="sbody"><p>${Fleet.u.md(s.t)}</p>${s.cmd ? Fleet.u.cmdBlock(s.cmd) : ''}</div></li>`).join('')}</ol>`;
   };
+  /* Phase 2 attempt detail. src is { diagnostic, path, step }; t is the Target (for its base) when known.
+     Every server string goes through esc(); the diagnostic is shown in a pre, so it keeps its line breaks. */
+  ui.NO_DETAIL = 'No detail reported. Agents before 0.9.0 send only the error code.';
+  ui.failureDetail = (src, t) => {
+    const d = src?.diagnostic, path = src?.path ? Fleet.u.failPath(t, src.path) : '', step = src?.step;
+    if (!d && !path && !step) return `<p class="fdetail-none">${esc(ui.NO_DETAIL)}</p>`;
+    return `<div class="fdetail">
+      ${step || path ? `<div class="fdetail-meta">${Fleet.u.stepChip(step)}${path ? `<span class="fdetail-path"><span class="fdetail-k">Failing path</span><code>${esc(path)}</code>${Fleet.u.copyBtn(path, '', 'Copy failing path')}</span>` : ''}</div>` : ''}
+      ${d ? `<div class="fdetail-diag"><p class="kv-label">Diagnostic from the Agent</p><pre class="code code--diag">${esc(d)}</pre>${Fleet.u.copyBtn(d, 'Copy', 'Copy diagnostic')}</div>` : ''}
+    </div>`;
+  };
+  /* One line of diagnostic. Short single-line text is plain; anything else is a details element that opens to the full text
+     (the closed state is cut to one line by CSS). key keeps it open across repaints. */
+  ui.diagLine = (text, key, cls = '') => {
+    if (!text) return '';
+    if (text.length <= 90 && !text.includes('\n')) return `<p class="diag-line diag-line--short ${cls}">${esc(text)}</p>`;
+    const k = 'diag:' + key;
+    return `<details class="diag-line ${cls}" data-open-key="${esc(k)}" ${Fleet.openState.get(k) ? 'open' : ''}><summary><span class="diag-text">${esc(text)}</span>${ic('chevD', 'sumchev')}</summary></details>`;
+  };
   ui.timeline = events => {
     if (!events.length) return `<div class="empty-mini">${ic('activity')}<p>Nothing to show here.</p></div>`;
     const days = [];
@@ -158,6 +177,6 @@
       if (!d || d.k !== k) days.push(d = { k, label: Fleet.u.dayLabel(e.at), items: [] });
       d.items.push(e);
     }
-    return days.map(d => `<div class="tl-day"><h3>${esc(d.label)}</h3><ol class="tl">${d.items.map(e => `<li class="tl-item"><span class="tl-dot">${glyph(e.level, e.kind)}</span><div class="tl-card"><div class="tl-top"><b>${esc(e.title)}</b><time datetime="${esc(e.at)}">${Fleet.u.fmtTime(e.at)}</time></div>${e.sub ? `<p class="tl-sub">${esc(e.sub)}</p>` : ''}${e.text ? `<p class="tl-text">${esc(e.text)}</p>` : ''}</div></li>`).join('')}</ol></div>`).join('');
+    return days.map(d => `<div class="tl-day"><h3>${esc(d.label)}</h3><ol class="tl">${d.items.map(e => `<li class="tl-item"><span class="tl-dot">${glyph(e.level, e.kind)}</span><div class="tl-card"><div class="tl-top"><b>${esc(e.title)}</b><time datetime="${esc(e.at)}">${Fleet.u.fmtTime(e.at)}</time></div>${e.sub || e.step ? `<p class="tl-sub">${e.sub ? `<span>${esc(e.sub)}</span>` : ''}${Fleet.u.stepChip(e.step)}</p>` : ''}${e.text ? ui.diagLine(e.text, e.key || e.at + e.title, 'tl-text') : ''}</div></li>`).join('')}</ol></div>`).join('');
   };
 })();

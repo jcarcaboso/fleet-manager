@@ -20,7 +20,7 @@ anything possible in the dashboard is also possible with `fleet`.
 
 | Surface | Auth | Used by | Routes |
 |---|---|---|---|
-| `/agent/v1` | Node mTLS | Agent | `POST enroll`, `POST poll` (no body), `GET bundles/{digest}`, `GET cliproxy/credential`, `GET cliproxy/models`, `POST reports` (`attemptId`, `state`, `errorCode`), `POST credentials/renew`, `PUT alias` |
+| `/agent/v1` | Node mTLS | Agent | `POST enroll`, `POST poll` (no body), `GET bundles/{digest}`, `GET cliproxy/credential`, `GET cliproxy/models`, `POST reports` (`attemptId`, `state`, `errorCode`), `POST attempts/{attemptId}/detail` (phase 2: `diagnostic`, `path`, `step`; see [Operator API](../technical-design/operator-api.md#phase-2-attempt-detail)), `POST credentials/renew`, `PUT alias` |
 | `/operator/v1` | Bearer token | `fleet` | `GET nodes`, `rollouts`, `desired-revisions`, `rollouts/{id}/attempts`, `warnings`, `audit`, `metrics`, `source/status`, `cliproxy/status`; `POST nodes/rename`, `nodes/{id}/revoke`, `enrollment-tokens`, `credentials/{id}/revoke`, `source/rescan`, `cliproxy/refresh` |
 | `/dashboard/api` | Cookie + CSRF | Dashboard | `GET csrf`, `session`, `nodes`, `diagnostics`, `cliproxy/status`, `cliproxy/selection`; `POST login`, `logout`, `source/rescan`, `cliproxy/refresh`, `cliproxy/selection`, `nodes/rename`, `nodes/{id}/revoke`, `nodes/{id}/remove`, `enrollment-links`, `enrollment-links/{id}/revoke` |
 

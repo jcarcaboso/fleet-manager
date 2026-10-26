@@ -172,6 +172,18 @@
     return !t.base || t.base === 'home' ? `~/${t.path}` : `${t.base}:${t.path}`;
   };
 
+  /* Phase 2 attempt detail. step is one of the Agent's step names; an unknown step (a newer Agent) is shown as written, escaped. */
+  const STEP = { lock: 'Taking the lock', download: 'Downloading', verify: 'Verifying', stage: 'Staging', activate: 'Activating', recover: 'Recovering', receipt: 'Writing the receipt', configure: 'Configuring', validate: 'Validating' };
+  u.stepLabel = s => (Object.hasOwn(STEP, s) ? STEP[s] : '') || cap(String(s).replace(/_/g, ' '));
+  u.stepChip = s => s ? `<span class="stepchip" data-step="${u.esc(s)}"><span class="stepchip-k">Step</span>${u.esc(u.stepLabel(s))}</span>` : '';
+  /* The failing path is relative to the Target base. With the Target at hand it reads like the Target path (~/.claude/settings.json); otherwise it is shown as sent. */
+  u.failPath = (t, rel) => {
+    if (rel === undefined || rel === null || rel === '') return '';
+    if (!t || t.path === undefined || t.path === null) return String(rel);
+    return !t.base || t.base === 'home' ? `~/${rel}` : `${t.base}:${rel}`;
+  };
+  u.hasDetail = a => !!(a && (a.diagnostic || a.path || a.step));
+
   /* Assignment states from the API (snake_case) mapped to display. */
   const TSTATE = {
     succeeded: { level: 'good', kind: 'check', label: 'In sync' },
@@ -210,5 +222,14 @@
   u.digestShort = d => { const h = String(d || '').replace(/^sha256:/, ''); return h.length > 14 ? `${h.slice(0, 8)}…${h.slice(-4)}` : h; };
   u.copyBtn = (text, label, aria) => `<button type="button" class="copy copy--icon" data-act="copy" data-copy="${u.esc(text)}" aria-label="${u.esc(aria || 'Copy to clipboard')}">${u.ic('copy')}${label ? `<span>${u.esc(label)}</span>` : ''}</button>`;
   u.cmdBlock = (cmd, label = 'Copy', cls = '') => `<div class="cmd ${cls}"><pre><code>${u.esc(cmd)}</code></pre><button type="button" class="copy" data-act="copy" data-copy="${u.esc(cmd)}" aria-label="Copy to clipboard">${u.ic('copy')}<span>${u.esc(label)}</span></button></div>`;
+  /* Binary units with one decimal (the Agent measures in bytes with statvfs/statfs, df -h style). */
+  u.bytes = n => {
+    const v = Number(n);
+    if (!Number.isFinite(v) || v < 0) return '—';
+    const units = ['B', 'KiB', 'MiB', 'GiB', 'TiB', 'PiB'];
+    let x = v, i = 0;
+    while (i < units.length - 1 && (i === 0 ? x : Math.round(x * 10) / 10) >= 1024) { x /= 1024; i++; }
+    return i === 0 ? `${x} B` : `${x.toFixed(1)} ${units[i]}`;
+  };
   u.avatar = (name, cls = '') => `<span class="av ${u.avatarClass(name)} ${cls}" aria-hidden="true">${u.esc(u.initial(name))}</span>`;
 })();

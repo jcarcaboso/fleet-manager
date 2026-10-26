@@ -112,6 +112,10 @@ The following defaults are implementation choices pending measured budgets:
 | HTTP request body | 16 KiB |
 | Concurrent HTTP requests | 128, no waiting queue |
 | Enrollment and renewal requests per source address | 20 per minute |
+| Attempt detail, disk usage and telemetry requests per Node (one shared limit) | Burst of 30, then 1 every 2 seconds (30 per minute), no queue |
+| Disk usage warning threshold (`disk_space_low`) | 85.0% used, from the fullest reported volume |
+| Disk usage critical threshold (`disk_space_critical`) | 95.0% used, from the fullest reported volume |
+| Agent version comparison | The Server's own version (the entry assembly's informational version without `+build`, from `<Version>` in `Directory.Build.props`) is the latest Agent version; an Agent below it (a prerelease sorts below its release) raises `agent_outdated` |
 | Database command timeout | 15 seconds |
 | Collection page size | 100, maximum 200 |
 

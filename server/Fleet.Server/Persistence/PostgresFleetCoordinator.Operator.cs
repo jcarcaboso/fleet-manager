@@ -55,10 +55,25 @@ public sealed partial class PostgresFleetCoordinator
         var counts = await db.Assignments.AsNoTracking().Where(x => x.IsCurrent && ids.Contains(x.NodeId))
             .GroupBy(x => new { x.NodeId, x.State }).Select(x => new { x.Key.NodeId, x.Key.State, Count = x.Count() })
             .ToListAsync(cancellationToken);
+        // At most two rows per Node; the fullest volume is picked here because used + available can be 0.
+        var disks = (await db.NodeDiskUsages.AsNoTracking().Where(x => ids.Contains(x.NodeId)).ToListAsync(cancellationToken))
+            .GroupBy(x => x.NodeId).ToDictionary(x => x.Key, x => FullestVolume(x));
+        // One row per Node, read for the page only.
+        var agents = (await db.NodeTelemetries.AsNoTracking().Where(x => ids.Contains(x.NodeId)).ToListAsync(cancellationToken))
+            .ToDictionary(x => x.NodeId, x => new NodeAgentSummary(x.AgentVersion,
+                AgentTelemetryRules.IsOutdated(x.AgentVersion, options.LatestAgentVersion), new(x.OsName, x.OsVersion), x.Arch, x.Hostname));
         return MakePage(rows, limit, x => x.Node.Id, x => new NodeStatus(new(x.Node.Id), x.Node.Name, x.Node.RevokedAt != null,
             x.Node.LastContactAt, Freshness(x.Node.LastContactAt, now, staleAfter), x.Node.Platform, x.Node.EnrolledAt,
             x.Node.RevokedAt, x.CredentialNotAfter, StateCounts(counts.Where(c => c.NodeId == x.Node.Id).Select(c => (c.State, c.Count))),
-            x.CurrentRevision));
+            x.CurrentRevision, disks.GetValueOrDefault(x.Node.Id), agents.GetValueOrDefault(x.Node.Id)));
+    }
+
+    private static NodeDiskSummary FullestVolume(IEnumerable<NodeDiskUsageRow> rows)
+    {
+        var fullest = rows.Select(x => (Row: x, Percent: DiskUsageRules.UsedPercent(x.UsedBytes, x.AvailableBytes)))
+            .OrderByDescending(x => x.Percent).ThenBy(x => x.Row.Label, StringComparer.Ordinal).First();
+        return new(fullest.Row.Label, fullest.Percent, fullest.Row.UsedBytes, fullest.Row.AvailableBytes, fullest.Row.TotalBytes,
+            fullest.Row.MeasuredAt);
     }
 
     public async Task<NodeDetail> GetNodeDetailAsync(NodeId nodeId, DateTimeOffset now, TimeSpan staleAfter,
@@ -96,7 +111,7 @@ public sealed partial class PostgresFleetCoordinator
                 db.Attempts.Count(x => x.AssignmentId == a.Id && x.State == failed),
                 db.Attempts.Where(x => x.AssignmentId == a.Id && x.State == failed).Min(x => (DateTimeOffset?)x.UpdatedAt),
                 db.Attempts.Where(x => x.AssignmentId == a.Id).OrderByDescending(x => x.UpdatedAt).ThenByDescending(x => x.Id)
-                    .Select(x => new LatestAttemptRow(x.Id, x.State, x.ErrorCode, x.Diagnostic, x.UpdatedAt)).FirstOrDefault()))
+                    .Select(x => new LatestAttemptRow(x.Id, x.State, x.ErrorCode, x.Diagnostic, x.FailurePath, x.FailureStep, x.UpdatedAt)).FirstOrDefault()))
             .ToListAsync(cancellationToken)).ToDictionary(x => x.AssignmentId);
         // The newest Assignment of this Target with a succeeded Attempt. A succeeded Assignment becomes superseded when
         // a newer revision replaces it, so its Attempts are the durable record of what the Node last applied.
@@ -121,20 +136,32 @@ public sealed partial class PostgresFleetCoordinator
             return new NodeTargetStatus(a.TargetName, a.TargetName.Split('/')[0], a.TargetBase, a.TargetPath, new(a.Id),
                 (ConvergenceState)a.State, a.CreatedAt, new(new(item.Revision.Id), item.Revision.SourceRevision, item.Revision.AcceptedAt),
                 lastRevision,
-                attempt is null ? null : new(new(attempt.Id), (ConvergenceState)attempt.State, attempt.ErrorCode, attempt.Diagnostic, attempt.UpdatedAt),
+                attempt is null ? null : new(new(attempt.Id), (ConvergenceState)attempt.State, attempt.ErrorCode, attempt.Diagnostic, attempt.FailurePath, attempt.FailureStep, attempt.UpdatedAt),
                 summary?.FailedCount ?? 0, summary?.FirstFailedAt,
                 skills[a.Id].Select(x => new SnapshotSkill(x.Name, x.BundleDigest)).ToList(),
                 file is null ? null : new SnapshotFile(file.Name, file.BundleDigest),
                 aiClient is null ? null : new NodeAiClientStatus(aiClient.Client, aiClient.Mode, aiClient.BaseUrl, aiClient.Model));
         }).ToList();
+        var stored = (await db.NodeDiskUsages.AsNoTracking().Where(x => x.NodeId == id).ToListAsync(cancellationToken))
+            .OrderBy(x => x.Label, StringComparer.Ordinal).ToList();
+        var disk = stored.Count == 0 && node.DiskUsageRefreshRequestedAt is null ? null
+            : new NodeDisk(stored.Count == 0 ? null : stored.Max(x => x.MeasuredAt), node.DiskUsageRefreshRequestedAt,
+                stored.Select(x => new NodeDiskVolume(x.Label, x.TotalBytes, x.UsedBytes, x.AvailableBytes,
+                    DiskUsageRules.UsedPercent(x.UsedBytes, x.AvailableBytes))).ToList());
+        var telemetry = await db.NodeTelemetries.AsNoTracking().SingleOrDefaultAsync(x => x.NodeId == id, cancellationToken);
+        var agent = telemetry is null ? null : new NodeAgent(telemetry.AgentVersion, options.LatestAgentVersion.Text,
+            AgentTelemetryRules.IsOutdated(telemetry.AgentVersion, options.LatestAgentVersion),
+            new(telemetry.OsName, telemetry.OsVersion, telemetry.OsKernel), telemetry.Arch, telemetry.Hostname, telemetry.User,
+            telemetry.InstallMethod, telemetry.ServiceManager, telemetry.StateDirectory, telemetry.ReportedAt);
         return new(new(node.Id), node.Name, node.Platform, node.EnrolledAt, node.LastContactAt,
             Freshness(node.LastContactAt, now, staleAfter), node.RevokedAt != null, node.RevokedAt,
             newest is null ? null : new(new(newest.Id), newest.NotBefore, newest.NotAfter, newest.RevokedAt, newest.RevokedBy,
                 credentialCount - 1),
-            targets, StateCounts(current.Select(x => (x.Assignment.State, 1))));
+            targets, StateCounts(current.Select(x => (x.Assignment.State, 1))), disk, agent);
     }
 
-    private sealed record LatestAttemptRow(Guid Id, int State, string? ErrorCode, string? Diagnostic, DateTimeOffset UpdatedAt);
+    private sealed record LatestAttemptRow(Guid Id, int State, string? ErrorCode, string? Diagnostic, string? FailurePath, string? FailureStep,
+        DateTimeOffset UpdatedAt);
 
     private sealed record AssignmentAttempts(Guid AssignmentId, int FailedCount, DateTimeOffset? FirstFailedAt, LatestAttemptRow? Latest);
 
@@ -156,7 +183,7 @@ public sealed partial class PostgresFleetCoordinator
             .Take(limit + 1).ToListAsync(cancellationToken);
         return MakeTimePage(rows, limit, x => x.Attempt.UpdatedAt, x => x.Attempt.Id, x => new NodeAttemptStatus(new(x.Attempt.Id),
             new(x.Attempt.AssignmentId), new(x.Attempt.RolloutId), x.TargetName, x.SourceRevision, (ConvergenceState)x.Attempt.State,
-            x.Attempt.ErrorCode, x.Attempt.Diagnostic, x.Attempt.UpdatedAt));
+            x.Attempt.ErrorCode, x.Attempt.Diagnostic, x.Attempt.FailurePath, x.Attempt.FailureStep, x.Attempt.UpdatedAt));
     }
 
     public async Task<NodeCheckins> GetNodeCheckinsAsync(NodeId nodeId, int hours, CancellationToken cancellationToken = default)
@@ -210,6 +237,85 @@ public sealed partial class PostgresFleetCoordinator
         await db.SaveChangesAsync(cancellationToken);
         await transaction.CommitAsync(cancellationToken);
         return new(new(assignment.Id), new(attempt.Id), ConvergenceState.Pending);
+    }
+
+    public async Task RecordDiskUsageAsync(NodeAuthentication authentication, DiskUsageReport report,
+        CancellationToken cancellationToken = default)
+    {
+        DiskUsageRules.Validate(report);
+        await Authenticate(authentication, clock.GetUtcNow(), false, cancellationToken);
+        var nodeId = authentication.NodeId.Value;
+        var labels = report.Volumes.Select(x => x.Label).ToArray();
+        await using var transaction = await db.Database.BeginTransactionAsync(IsolationLevel.ReadCommitted, cancellationToken);
+        // The Node row lock serializes reports of one Node with each other and with refresh requests: two concurrent reports with
+        // different volumes cannot both survive, and a Node removed in the meantime cannot violate the foreign key.
+        var node = await db.Nodes.FromSqlInterpolated($"SELECT * FROM nodes WHERE \"Id\" = {nodeId} FOR UPDATE").AsNoTracking()
+            .SingleOrDefaultAsync(cancellationToken);
+        if (node is null || node.RevokedAt is not null) throw Error("node_unauthorized", "Node credential is not active.");
+        // Taken under the lock: a refresh request that committed before the lock was acquired is older than this receipt, and one that
+        // is made later waits for the lock, so a report never clears a request that arrived after it.
+        var now = TruncateToMicroseconds(clock.GetUtcNow());
+        foreach (var volume in report.Volumes)
+            await db.Database.ExecuteSqlInterpolatedAsync($$"""
+                INSERT INTO node_disk_usage ("NodeId", "Label", "TotalBytes", "UsedBytes", "AvailableBytes", "MeasuredAt")
+                VALUES ({{nodeId}}, {{volume.Label}}, {{volume.TotalBytes}}, {{volume.UsedBytes}}, {{volume.AvailableBytes}}, {{now}})
+                ON CONFLICT ("NodeId", "Label") DO UPDATE SET "TotalBytes" = EXCLUDED."TotalBytes", "UsedBytes" = EXCLUDED."UsedBytes",
+                    "AvailableBytes" = EXCLUDED."AvailableBytes", "MeasuredAt" = EXCLUDED."MeasuredAt"
+                """, cancellationToken);
+        await db.Database.ExecuteSqlInterpolatedAsync(
+            $"DELETE FROM node_disk_usage WHERE \"NodeId\" = {nodeId} AND \"Label\" <> ALL({labels})", cancellationToken);
+        await db.Database.ExecuteSqlInterpolatedAsync(
+            $"UPDATE nodes SET \"DiskUsageRefreshRequestedAt\" = NULL WHERE \"Id\" = {nodeId} AND \"DiskUsageRefreshRequestedAt\" <= {now}",
+            cancellationToken);
+        await transaction.CommitAsync(cancellationToken);
+    }
+
+    public async Task RecordAgentTelemetryAsync(NodeAuthentication authentication, AgentTelemetryReport report,
+        CancellationToken cancellationToken = default)
+    {
+        var sanitized = AgentTelemetryRules.Sanitize(report);
+        await Authenticate(authentication, clock.GetUtcNow(), false, cancellationToken);
+        var nodeId = authentication.NodeId.Value;
+        await using var transaction = await db.Database.BeginTransactionAsync(IsolationLevel.ReadCommitted, cancellationToken);
+        // The Node row lock serializes reports of one Node, and a Node removed in the meantime cannot violate the foreign key.
+        var node = await db.Nodes.FromSqlInterpolated($"SELECT * FROM nodes WHERE \"Id\" = {nodeId} FOR UPDATE").AsNoTracking()
+            .SingleOrDefaultAsync(cancellationToken);
+        if (node is null || node.RevokedAt is not null) throw Error("node_unauthorized", "Node credential is not active.");
+        var now = TruncateToMicroseconds(clock.GetUtcNow());
+        await db.Database.ExecuteSqlInterpolatedAsync($$"""
+            INSERT INTO node_telemetry ("NodeId", "AgentVersion", "OsName", "OsVersion", "OsKernel", "Arch", "Hostname", "User",
+                "InstallMethod", "ServiceManager", "StateDirectory", "ReportedAt")
+            VALUES ({{nodeId}}, {{sanitized.AgentVersion}}, {{sanitized.OsName}}, {{sanitized.OsVersion}}, {{sanitized.OsKernel}},
+                {{sanitized.Arch}}, {{sanitized.Hostname}}, {{sanitized.User}}, {{sanitized.InstallMethod}}, {{sanitized.ServiceManager}},
+                {{sanitized.StateDirectory}}, {{now}})
+            ON CONFLICT ("NodeId") DO UPDATE SET "AgentVersion" = EXCLUDED."AgentVersion", "OsName" = EXCLUDED."OsName",
+                "OsVersion" = EXCLUDED."OsVersion", "OsKernel" = EXCLUDED."OsKernel", "Arch" = EXCLUDED."Arch",
+                "Hostname" = EXCLUDED."Hostname", "User" = EXCLUDED."User", "InstallMethod" = EXCLUDED."InstallMethod",
+                "ServiceManager" = EXCLUDED."ServiceManager", "StateDirectory" = EXCLUDED."StateDirectory",
+                "ReportedAt" = EXCLUDED."ReportedAt"
+            """, cancellationToken);
+        await transaction.CommitAsync(cancellationToken);
+    }
+
+    public async Task<DiskRefreshRequested> RequestDiskUsageRefreshAsync(NodeId nodeId, string requestedBy,
+        CancellationToken cancellationToken = default)
+    {
+        var actor = Required(requestedBy, 200, "requested_by");
+        await EnsureWorkspace(cancellationToken);
+        await using var transaction = await db.Database.BeginTransactionAsync(IsolationLevel.ReadCommitted, cancellationToken);
+        var id = nodeId.Value;
+        var node = await db.Nodes.FromSqlInterpolated($"SELECT * FROM nodes WHERE \"Id\" = {id} FOR UPDATE")
+            .SingleOrDefaultAsync(cancellationToken);
+        if (node is null || node.WorkspaceId != options.WorkspaceId.Value) throw Error("node_not_found", "Node was not found.");
+        if (node.RevokedAt is not null) throw Error("node_revoked", "A revoked Node cannot report disk usage.");
+        if (node.DiskUsageRefreshRequestedAt is { } pending) return new(pending);
+        // PostgreSQL keeps microseconds; the first answer must equal what a repeat reads back.
+        var now = TruncateToMicroseconds(clock.GetUtcNow());
+        node.DiskUsageRefreshRequestedAt = now;
+        db.AuditEvents.Add(Audit("node.disk_refresh_requested", actor, now, id));
+        await db.SaveChangesAsync(cancellationToken);
+        await transaction.CommitAsync(cancellationToken);
+        return new(now);
     }
 
     public async Task<Page<SourceScanEntry>> GetSourceScansAsync(PageRequest page, CancellationToken cancellationToken = default)
@@ -329,6 +435,8 @@ public sealed partial class PostgresFleetCoordinator
             WITH expired AS (SELECT "NodeId", "Hour" FROM node_checkins WHERE "Hour" < {{cutoff}} ORDER BY "Hour" LIMIT {{batchSize}} FOR UPDATE SKIP LOCKED)
             DELETE FROM node_checkins c USING expired WHERE c."NodeId" = expired."NodeId" AND c."Hour" = expired."Hour"
             """, cancellationToken);
+
+    private static DateTimeOffset TruncateToMicroseconds(DateTimeOffset value) => new(value.UtcTicks / 10 * 10, TimeSpan.Zero);
 
     private static DateTimeOffset TruncateToHour(DateTimeOffset value)
     {

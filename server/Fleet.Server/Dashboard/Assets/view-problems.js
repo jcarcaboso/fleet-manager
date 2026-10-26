@@ -34,7 +34,7 @@
     const i = p.i, cat = p.cat, retryable = i.code === 'assignment_failed' && i.nodeId && i.target;
     const explanation = cat?.explanation || i.detail || '';
     const specific = cat?.explanation && i.detail && i.detail !== cat.explanation ? i.detail : '';
-    const fix = cat?.fix?.length ? cat.fix.map(t => ({ t })) : (i.action ? [{ t: i.action }] : []);
+    const fix = model.fixSteps(i, cat);
     const factList = [['Since', i.since ? `${u.fmtFull(i.since)} UTC` : '—', i.since ? u.rel(i.since) : ''], ...(i.errorCode ? [['Error code', i.errorCode, '', true]] : []),
       ...(i.nodeName ? [['Machine', i.nodeName, '']] : []), ...(i.target ? [['Target', i.target, '', true]] : [])];
     const retrying = S.retrying.has(i.id);
@@ -44,6 +44,7 @@
     return `<article class="prob prob--${p.level}"><div class="prob-body">
       ${explanation ? `<p class="prob-expl">${u.md(explanation)}${specific ? ` <strong>${u.md(specific)}</strong>` : ''}</p>` : '<p class="prob-expl muted">The Server has no catalog entry for this problem yet.</p>'}
       <dl class="facts-row">${factList.map(([k, v, s, m]) => `<div><dt>${esc(k)}</dt><dd${m ? ' class="mono"' : ''}>${esc(v)}</dd>${s ? `<dd class="sub">${esc(s)}</dd>` : ''}</div>`).join('')}</dl>
+      ${i.code === 'assignment_failed' ? ui.failureDetail(i) : ''}
       <div class="prob-cols">
         <section class="fix" aria-label="How to fix"><h4>How to fix</h4>${fix.length ? ui.stepsList(fix) : '<p class="muted">No fix steps are published for this problem.</p>'}</section>
         <section class="why">${(i.commands || []).length ? `<h4>Run in a terminal</h4>${i.commands.map(c => u.cmdBlock(c)).join('')}` : '<h4>Run in a terminal</h4><p class="muted small">There is no CLI command for this problem.</p>'}</section>

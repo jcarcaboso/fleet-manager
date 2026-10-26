@@ -17,7 +17,51 @@
         "fleet nodes show studio-mini",
         "fleet explain ai_client_reconcile_failed",
         "fleet retry studio-mini ai-client/claude"
-      ]
+      ],
+      "diagnostic": "AI client configuration could not be written: settings.json is not valid JSON at line 12",
+      "path": ".claude/settings.json",
+      "step": "configure"
+    },
+    {
+      "id": "disk_space_low:00000000-0000-0000-0000-000000000001",
+      "code": "disk_space_low",
+      "severity": "warning",
+      "title": "studio-mini: disk is filling up",
+      "detail": "The home volume is 92.3% used, with 72.8 GB available of 994.7 GB. Measured at 2026-10-25 12:00:00Z.",
+      "action": "Find large Git worktrees and build caches, run `git worktree prune`, and remove stale worktrees, `target/` and `node_modules` directories and unused Docker images before the disk fills.",
+      "section": "nodes",
+      "errorCode": null,
+      "nodeId": "00000000-0000-0000-0000-000000000001",
+      "nodeName": "studio-mini",
+      "target": null,
+      "since": "2026-10-25T12:00:00Z",
+      "commands": [
+        "fleet nodes disk studio-mini",
+        "fleet nodes disk studio-mini --refresh"
+      ],
+      "diagnostic": null,
+      "path": null,
+      "step": null
+    },
+    {
+      "id": "agent_outdated:00000000-0000-0000-0000-000000000001",
+      "code": "agent_outdated",
+      "severity": "warning",
+      "title": "studio-mini: Agent is outdated",
+      "detail": "The Agent runs version 0.8.0; the latest version is 0.8.1. Reported at 2026-10-25 12:00:00Z.",
+      "action": "Upgrade with `brew upgrade fleet-agent`, then restart the service with `brew services restart fleet-agent`.",
+      "section": "nodes",
+      "errorCode": null,
+      "nodeId": "00000000-0000-0000-0000-000000000001",
+      "nodeName": "studio-mini",
+      "target": null,
+      "since": "2026-10-25T12:00:00Z",
+      "commands": [
+        "fleet nodes show studio-mini"
+      ],
+      "diagnostic": null,
+      "path": null,
+      "step": null
     },
     {
       "id": "source_not_scanned",
@@ -34,7 +78,10 @@
       "since": null,
       "commands": [
         "fleet source rescan"
-      ]
+      ],
+      "diagnostic": null,
+      "path": null,
+      "step": null
     }
   ]
 }

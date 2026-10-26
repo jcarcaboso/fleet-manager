@@ -77,9 +77,44 @@ pub fn read_json<T: DeserializeOwned>(path: &Path) -> Result<Option<T>> {
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
         Err(error) => Err(error.into()),
         Ok(_) => Ok(Some(
-            serde_json::from_slice(&read_bytes(path, MAX_JSON)?).context("invalid agent state")?,
+            serde_json::from_slice(&read_bytes(path, MAX_JSON)?).map_err(|error| {
+                anyhow::anyhow!("invalid agent state ({})", json_location(&error))
+            })?,
         )),
     }
+}
+
+/// Describes where and why JSON parsing failed without the offending content.
+///
+/// `serde_json` data errors quote the rejected value ("invalid type: string
+/// \"...\""), which may be a credential or file content. Diagnostics that leave
+/// the Node must use this instead of the error's own text.
+pub fn json_location(error: &serde_json::Error) -> String {
+    use serde_json::error::Category;
+    let kind = match error.classify() {
+        Category::Io => "read error",
+        Category::Syntax => "syntax error",
+        Category::Data => "unexpected value or field",
+        Category::Eof => "unexpected end of input",
+    };
+    format!("{kind} at line {} column {}", error.line(), error.column())
+}
+
+/// Returns the 1-based line and column of a byte offset in `text`.
+pub fn text_location(text: &str, offset: usize) -> (usize, usize) {
+    let end = offset.min(text.len());
+    let end = (0..=end)
+        .rev()
+        .find(|index| text.is_char_boundary(*index))
+        .unwrap_or(0);
+    let before = &text[..end];
+    let line = before.matches('\n').count() + 1;
+    let column = before
+        .rsplit('\n')
+        .next()
+        .map_or(0, |last| last.chars().count())
+        + 1;
+    (line, column)
 }
 
 pub fn write_json<T: Serialize>(path: &Path, value: &T) -> Result<()> {

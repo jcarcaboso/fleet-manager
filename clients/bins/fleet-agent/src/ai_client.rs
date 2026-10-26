@@ -5,6 +5,7 @@ use crate::{
     state,
 };
 use anyhow::{Context, Result, bail};
+use fleet_reconcile::Step;
 use reqwest::Url;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -26,6 +27,25 @@ const PROVIDER_NAME: &str = "fleet-cliproxy";
 pub struct Reconciler {
     home: PathBuf,
     state: PathBuf,
+}
+
+/// A failed reconciliation with the phase it failed in and, for failures about
+/// the client's own configuration, that file relative to the home directory.
+#[derive(Debug)]
+pub struct ReconcileFailure {
+    pub error: anyhow::Error,
+    pub step: Step,
+    pub config_path: Option<PathBuf>,
+}
+
+impl ReconcileFailure {
+    fn new(error: anyhow::Error, step: Step, config_path: Option<PathBuf>) -> Self {
+        Self {
+            error,
+            step,
+            config_path,
+        }
+    }
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -134,23 +154,47 @@ impl Reconciler {
         remove_state_file(&journal_path)
     }
 
-    pub async fn reconcile(&self, api: &Api, assignment: &AiClientAssignment) -> Result<()> {
-        self.validate_assignment(assignment)?;
-        self.recover(&assignment.client)?;
+    pub async fn reconcile(
+        &self,
+        api: &Api,
+        assignment: &AiClientAssignment,
+    ) -> std::result::Result<(), ReconcileFailure> {
+        let config_path = self.relative_config_path(&assignment.client);
+        let configure = |error| ReconcileFailure::new(error, Step::Configure, config_path.clone());
+        self.validate_assignment(assignment)
+            .map_err(|error| ReconcileFailure::new(error, Step::Validate, None))?;
+        self.recover(&assignment.client)
+            .map_err(|error| ReconcileFailure::new(error, Step::Recover, config_path.clone()))?;
         match assignment.mode.as_str() {
-            "native" => self.restore_native(&assignment.client),
+            "native" => self.restore_native(&assignment.client).map_err(configure),
             "cliproxy" => {
                 let base_url = assignment
                     .base_url
                     .as_deref()
-                    .context("missing CLIProxy URL")?;
+                    .context("missing CLIProxy URL")
+                    .map_err(|error| ReconcileFailure::new(error, Step::Validate, None))?;
                 let model = assignment.model.as_deref();
-                self.credential(api).await?;
-                let models = self.models(api, base_url, model).await?;
+                let fetch = |error| ReconcileFailure::new(error, Step::Download, None);
+                self.credential(api).await.map_err(fetch)?;
+                let models = self.models(api, base_url, model).await.map_err(fetch)?;
                 self.apply_proxy(&assignment.client, base_url, model, &models)
+                    .map_err(configure)
             }
-            _ => bail!("unsupported AI client mode"),
+            _ => Err(ReconcileFailure::new(
+                anyhow::anyhow!("unsupported AI client mode"),
+                Step::Validate,
+                None,
+            )),
         }
+    }
+
+    /// The managed client configuration file, relative to the home directory.
+    fn relative_config_path(&self, client: &str) -> Option<PathBuf> {
+        self.config_path(client)
+            .ok()?
+            .strip_prefix(&self.home)
+            .ok()
+            .map(Path::to_owned)
     }
 
     fn validate_assignment(&self, assignment: &AiClientAssignment) -> Result<()> {
@@ -344,7 +388,12 @@ fn parse_server_catalog(bytes: &[u8], base_url: &str) -> Result<ModelCache> {
         #[serde(default = "default_skip_claude_models")]
         skip_claude_models_for_other_clients: bool,
     }
-    let catalog: Catalog = serde_json::from_slice(bytes).context("invalid Server model catalog")?;
+    let catalog: Catalog = serde_json::from_slice(bytes).map_err(|error| {
+        anyhow::anyhow!(
+            "invalid Server model catalog ({})",
+            state::json_location(&error)
+        )
+    })?;
     if catalog.base_url != base_url || catalog.models.is_empty() {
         bail!("Server model catalog does not match the assignment");
     }
@@ -1318,6 +1367,119 @@ mod tests {
                 .is_err()
         );
         assert!(fs::read(&outside).unwrap().is_empty());
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    const SECRET: &str = "SECRET-TOKEN-4f9c";
+
+    fn chain(error: &anyhow::Error) -> String {
+        format!("{error:#} / {error:?}")
+    }
+
+    #[test]
+    fn config_parse_errors_never_quote_file_content() {
+        let root = temp_root();
+        let reconciler = disk_reconciler(&root);
+        let models = ["m".to_owned()];
+        let cases = [
+            ("codex", format!("token = \"{SECRET}\" trailing garbage\n")),
+            ("codex", format!("[a\nkey = '{SECRET}'\n")),
+            ("claude", format!("{{\"apiKey\": \"{SECRET}\" \"oops\"}}")),
+            ("claude", format!("{{\"apiKey\": \"{SECRET}")),
+            ("opencode", format!("{{\"apiKey\": \"{SECRET}\" \"oops\"}}")),
+            ("opencode", format!("{{\"apiKey\": '{SECRET}'")),
+        ];
+        for (client, content) in cases {
+            let adapter = Adapter::find(client).unwrap();
+            let error = adapter
+                .apply_proxy(
+                    &reconciler,
+                    Some(content.as_bytes()),
+                    None,
+                    "https://proxy.example/v1",
+                    None,
+                    &models,
+                )
+                .unwrap_err();
+            let text = chain(&error);
+            assert!(!text.contains(SECRET), "{client}: {text}");
+            assert!(!text.contains("oops"), "{client}: {text}");
+            assert!(text.contains("invalid"), "{client}: {text}");
+        }
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn toml_errors_report_only_the_position() {
+        let root = temp_root();
+        let reconciler = disk_reconciler(&root);
+        let error = Adapter::Codex
+            .apply_proxy(
+                &reconciler,
+                Some(format!("model = \"ok\"\ntoken = {SECRET}\n").as_bytes()),
+                None,
+                "https://proxy.example/v1",
+                None,
+                &["m".to_owned()],
+            )
+            .unwrap_err();
+        assert_eq!(error.to_string(), "invalid Codex TOML at line 2 column 9");
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn restore_errors_never_quote_file_content() {
+        let receipt = Receipt {
+            version: 1,
+            client: "codex".to_owned(),
+            config_existed: true,
+            original_model: None,
+            original_provider: None,
+            original_catalog: None,
+            expected_model: "m".to_owned(),
+            automatic_model: false,
+            expected_base_url: "https://proxy.example/v1".to_owned(),
+            expected_key_path: "/k".to_owned(),
+            expected_catalog_path: None,
+            expected_models: Vec::new(),
+            expected_reasoning_levels: BTreeMap::new(),
+            original_settings: BTreeMap::new(),
+        };
+        let broken = format!("password = \"{SECRET}\" oops\n");
+        let error = Adapter::Codex
+            .restore(Some(broken.as_bytes()), &receipt)
+            .unwrap_err();
+        assert!(!chain(&error).contains(SECRET));
+        let error = Adapter::Codex
+            .config_is_empty(broken.as_bytes())
+            .unwrap_err();
+        assert!(!chain(&error).contains(SECRET));
+    }
+
+    #[test]
+    fn state_and_catalog_data_errors_never_quote_values() {
+        let root = temp_root();
+        let path = root.join("receipt.json");
+        // A value of the wrong type makes serde quote it in its own message.
+        fs::write(&path, format!(r#"{{"version":"{SECRET}"}}"#)).unwrap();
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o600)).unwrap();
+        let error = state::read_json::<Receipt>(&path).unwrap_err();
+        assert!(!chain(&error).contains(SECRET), "{}", chain(&error));
+        let unknown = format!(r#"{{"{SECRET}":1}}"#);
+        fs::write(&path, unknown).unwrap();
+        let error = state::read_json::<Receipt>(&path).unwrap_err();
+        assert!(!chain(&error).contains(SECRET), "{}", chain(&error));
+
+        let catalog = format!(
+            r#"{{"baseUrl":"https://proxy.example/v1","models":[{{"id":"{SECRET}","reasoningLevels":"x"}}]}}"#
+        );
+        let error =
+            parse_server_catalog(catalog.as_bytes(), "https://proxy.example/v1").unwrap_err();
+        assert!(!chain(&error).contains(SECRET), "{}", chain(&error));
+        let catalog = format!(r#"{{"{SECRET}":1}}"#);
+        let error =
+            parse_server_catalog(catalog.as_bytes(), "https://proxy.example/v1").unwrap_err();
+        assert!(!chain(&error).contains(SECRET), "{}", chain(&error));
         fs::remove_dir_all(root).unwrap();
     }
 }

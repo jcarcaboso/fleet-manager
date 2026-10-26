@@ -125,9 +125,7 @@ impl Adapter {
             Self::Claude => Ok(serde_json::from_slice::<serde_json::Value>(bytes)?
                 .as_object()
                 .is_some_and(|object| object.is_empty())),
-            Self::Codex => Ok(std::str::from_utf8(bytes)?
-                .parse::<toml_edit::DocumentMut>()?
-                .is_empty()),
+            Self::Codex => Ok(codex::parse_document(std::str::from_utf8(bytes)?)?.is_empty()),
             Self::OpenCode => {
                 let root = jsonc_parser::cst::CstRootNode::parse(
                     std::str::from_utf8(bytes)?,

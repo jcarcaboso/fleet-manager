@@ -27,6 +27,16 @@
   const warningsFor = rev => S.warnings.filter(w => w.desiredRevisionId === rev.desiredRevisionId);
   const warnCallout = w => `<div class="callout callout--warning">${glyph('warning', 'bang')}<div><b>${esc(w.code)}</b><p>${esc(w.message)}</p>${(w.sourceLocations || []).length ? `<div class="loc-chips">${w.sourceLocations.map(l => `<span class="loc">${ic('folder')}<code>${esc(l)}</code></span>`).join('')}</div>` : ''}</div></div>`;
 
+  /* Failed attempts of a rollout with the step and a one-line diagnostic (phase 2 detail; both are null for older Agents). */
+  const FAILED_SHOWN = 20;
+  const failedList = items => {
+    const failed = items.filter(a => a.state === 'failed');
+    if (!failed.length) return '';
+    return `<p class="kv-label">Failed attempts <span class="cnt">${u.num(failed.length)}</span></p>
+      <ul class="attlist">${failed.slice(0, FAILED_SHOWN).map(a => `<li class="attitem"><div class="attitem-top"><span class="mono">${esc(u.shortId(a.attemptId))}</span>${a.errorCode ? `<code>${esc(a.errorCode)}</code>` : ''}${u.stepChip(a.step)}<time class="muted small" datetime="${esc(a.updatedAt)}">${esc(u.fmtFull(a.updatedAt))} UTC</time></div>${a.path ? `<p class="attitem-path small"><span class="muted">Path</span> <code>${esc(a.path)}</code></p>` : ''}${ui.diagLine(a.diagnostic, a.attemptId)}</li>`).join('')}</ul>
+      ${failed.length > FAILED_SHOWN ? `<p class="muted small">Showing ${FAILED_SHOWN} of ${u.num(failed.length)} failed attempts.</p>` : ''}`;
+  };
+
   const attemptsBlock = r => {
     const d = S.attempts.get(r.rolloutId);
     if (S.loadingAttempts.has(r.rolloutId)) return '<div class="skel skel-block"></div>';
@@ -38,6 +48,7 @@
     return `<p class="kv-label">Attempts in this rollout <span class="cnt">${u.num(d.items.length)}</span></p>
       ${u.legend(u.stateParts(byState, 'attempts'))}
       ${failed.size ? `<div class="tbl-wrap"><table class="tbl tbl--compact"><thead><tr><th>Error code</th><th>What it means</th><th class="num">Attempts</th></tr></thead><tbody>${[...failed].sort((a, b) => b[1] - a[1]).map(([code, c]) => `<tr><td><code>${esc(code)}</code></td><td>${esc(catalog.get(code)?.title || 'No catalog entry')}</td><td class="num">${c}</td></tr>`).join('')}</tbody></table></div>` : '<p class="muted small">No failed attempts.</p>'}
+      ${failedList(d.items)}
       ${d.truncated ? '<p class="muted small">Showing the first attempts only.</p>' : ''}`;
   };
 

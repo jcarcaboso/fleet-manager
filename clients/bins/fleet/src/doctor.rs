@@ -13,6 +13,9 @@ fn invalid_response() -> CliError {
 
 /// Builds the doctor document and reports whether any issue has severity `error`.
 ///
+/// Every issue is the Server's object plus `explanation`, so `diagnostic`, `path` and `step` (the phase 2 attempt detail of a
+/// failed Target) pass through unchanged. They are `null` when the Agent sent none and absent from a Server that predates phase 2.
+///
 /// `issues` is the `GET issues` response and `catalog` the `GET errors` response.
 pub(crate) fn report(issues: &Value, catalog: &Value) -> Result<(Value, bool), CliError> {
     let items = issues
@@ -95,6 +98,61 @@ mod tests {
         assert_eq!(doc["issues"][0]["id"], "1");
         assert_eq!(doc["issues"][1]["explanation"]["title"], "Silent");
         assert_eq!(doc["issues"][2]["explanation"], Value::Null);
+    }
+
+    #[test]
+    fn keeps_the_attempt_detail_of_an_issue() {
+        let issues = json!({"items": [
+            {"id": "1", "code": "assignment_failed", "severity": "error", "errorCode": "lock_failed",
+             "diagnostic": "lock is held by process 4121", "path": ".claude/settings.json", "step": "lock"},
+            {"id": "2", "code": "assignment_failed", "severity": "error", "errorCode": "lock_failed",
+             "diagnostic": null, "path": null, "step": null},
+            {"id": "3", "code": "node_not_contacting", "severity": "warning", "errorCode": null}
+        ]});
+        let (doc, _) = report(&issues, &catalog()).unwrap();
+        let first = &doc["issues"][0];
+        assert_eq!(first["diagnostic"], "lock is held by process 4121");
+        assert_eq!(first["path"], ".claude/settings.json");
+        assert_eq!(first["step"], "lock");
+        assert_eq!(first["explanation"]["title"], "Locked");
+        let second = doc["issues"][1].as_object().unwrap();
+        for key in ["diagnostic", "path", "step"] {
+            assert_eq!(second.get(key), Some(&Value::Null), "{key}");
+        }
+        // Nothing is invented for an issue (or a Server) that has no detail.
+        let third = doc["issues"][2].as_object().unwrap();
+        for key in ["diagnostic", "path", "step"] {
+            assert!(!third.contains_key(key), "{key}");
+        }
+    }
+
+    #[test]
+    fn passes_an_outdated_agent_issue_through() {
+        let catalog = json!({"items": [
+            {"code": "agent_outdated", "source": "issue", "title": "Agent is out of date", "explanation": "e4", "fix": ["upgrade"]}
+        ]});
+        let issues = json!({"items": [
+            {"id": "agent_outdated:n1", "code": "agent_outdated", "severity": "warning", "errorCode": null,
+             "title": "studio-mini: Agent 0.8.1 is out of date", "detail": "Agent 0.8.1 is running; 0.9.0 is the latest release.",
+             "action": "Upgrade the Agent with `brew upgrade fleet-agent`, then restart its service.",
+             "nodeId": "n1", "nodeName": "studio-mini", "target": null, "since": "2026-10-26T08:00:00Z",
+             "commands": ["fleet nodes show studio-mini"]}
+        ]});
+        let (doc, failed) = report(&issues, &catalog).unwrap();
+        // A warning: the document is ok and the command exits 0.
+        assert!(!failed);
+        assert_eq!(doc["ok"], true);
+        assert_eq!(doc["summary"], json!({"errors": 0, "warnings": 1}));
+        let issue = &doc["issues"][0];
+        assert_eq!(issue["code"], "agent_outdated");
+        assert_eq!(issue["explanation"]["title"], "Agent is out of date");
+        assert_eq!(issue["commands"], json!(["fleet nodes show studio-mini"]));
+        assert_eq!(
+            issue["action"],
+            "Upgrade the Agent with `brew upgrade fleet-agent`, then restart its service."
+        );
+        assert_eq!(issue["detail"], issues["items"][0]["detail"]);
+        assert_eq!(issue["since"], "2026-10-26T08:00:00Z");
     }
 
     #[test]

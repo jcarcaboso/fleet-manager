@@ -3,12 +3,14 @@
    Replaces window.fetch for /dashboard/api/* with an in-memory fake of docs/technical-design/operator-api.md.
    Data comes from artifacts/dashboard-prototypes/data.js (window.FLEET), restricted to fields the contract defines.
    Query switches (harness.html?...): scope=read|operate|admin, signedout=1, empty=1, fail=<path prefix>,
-   forbid=1 (403 on every POST), slow=<ms>, pagesize=<n>, diag=1 (non-null diagnostics), enroll=0 (no simulated enrollment), enroll=link (the link is consumed but the machine never checks in),
+   forbid=1 (403 on every POST), slow=<ms>, pagesize=<n>, diag=0 (no attempt detail at all, like a Server or Agents before phase 2), xss=1 (hostile diagnostic and path on every failure that has detail), enroll=0 (no simulated enrollment), enroll=link (the link is consumed but the machine never checks in),
    weirdalias=1 (one machine is named "rack/A 100%" to exercise path-segment encoding),
    delay=<alias or id>:<ms>[,...] (delays responses for that machine's /nodes/{node} routes: used to reproduce overlapping loads),
    expiry=<seconds> (links created by the wizard expire after this many seconds instead of the requested time),
    lag=<text>:<ms>[,...] (a POST whose path contains <text> does its work at once but answers <ms> later: used to complete a mutation after the user has moved on),
-   hang=<path prefix> (GET routes under the prefix never answer; only the caller's abort ends them).
+   hang=<path prefix> (GET routes under the prefix never answer; only the caller's abort ends them),
+   agent=0 (no Node carries the agent property, like a Server before phase 3),
+   diskdelay=<ms> (a refreshed Agent answers this long after POST nodes/{node}/disk-usage/refresh; default 7000; agents before 0.9.0 and offline machines never answer).
    Mutations follow the Server: PostgresFleetCoordinator and Transport/OperatorApi.cs, including their order of checks and their error codes.
    window.__FIXTURE.calls records every call with settled (the response was delivered or the call was aborted) and aborted (the caller's signal fired). */
 (function () {
@@ -18,9 +20,9 @@
   const cfg = {
     scope: params.get('scope') || 'admin', signedOut: params.has('signedout'), empty: params.has('empty'),
     fail: params.get('fail'), forbid: params.has('forbid'), slow: +(params.get('slow') || 0), pageSize: +(params.get('pagesize') || 100),
-    diag: params.has('diag'), enroll: params.get('enroll') !== '0', consumeOnly: params.get('enroll') === 'link', weirdAlias: params.has('weirdalias'),
+    diag: params.get('diag') !== '0', xss: params.has('xss'), noAgent: params.get('agent') === '0', enroll: params.get('enroll') !== '0', consumeOnly: params.get('enroll') === 'link', weirdAlias: params.has('weirdalias'),
     delay: Object.fromEntries((params.get('delay') || '').split(',').filter(Boolean).map(x => { const i = x.lastIndexOf(':'); return [x.slice(0, i), +x.slice(i + 1)]; })),
-    expiry: +(params.get('expiry') || 0), hang: params.get('hang'),
+    expiry: +(params.get('expiry') || 0), hang: params.get('hang'), diskDelay: +(params.get('diskdelay') || 7000),
     lag: Object.fromEntries((params.get('lag') || '').split(',').filter(Boolean).map(x => { const i = x.lastIndexOf(':'); return [x.slice(0, i), +x.slice(i + 1)]; })),
   };
   const realFetch = window.fetch.bind(window);
@@ -66,14 +68,125 @@
   const currentRevision = n => n.revokedAt ? null : n.targets.map(t => desiredOf(n, t)).filter(Boolean).sort((a, b) => Date.parse(b.acceptedAt) - Date.parse(a.acceptedAt))[0]?.sourceRevision || null;
   const credNotAfter = n => n.revokedAt ? null : tm(n, n.credential.notAfter);
 
+  /* Disk usage (docs/technical-design/operator-api.md, "Disk usage"). Each Node keeps the latest report only: n._disk = { measuredAt, volumes } or null
+     (never reported), n._diskReq = pending refresh request time or null. Percentages are used / (used + available), like df; the filesystem keeps 3% back. */
+  const GIB = 1024 ** 3;
+  const XSS_LABEL = '<img src=x onerror=alert(1)>"><script>alert(5)</script>';
+  const vol = (label, totalGiB, pct) => {
+    const fit = Math.round(totalGiB * GIB * 0.97), used = Math.round(fit * pct / 100);
+    return { label, totalBytes: Math.round(totalGiB * GIB), usedBytes: used, availableBytes: fit - used };
+  };
+  /* alias -> [measured ago in minutes, volumes]. Missing aliases never reported. kitchen-mini is an Agent before 0.9.0: it never reports and never answers a refresh. */
+  const DISK = {
+    'mbp-joan': [130, [vol('home', 926, 62.4)]],
+    'studio-mini': [60, [vol('home', 1863, 78.2)]],
+    'homelab-nuc': [52, [vol(cfg.xss ? XSS_LABEL : 'home', 954, 96.4), vol('state', 476, 41.3)]],
+    'fedora-ws': [185, [vol('home', 476, 88.7)]],
+    'build-runner-01': [90, [vol('home', 233, 34.9)]],
+    'build-runner-03': [192, [vol('home', 233, 72.0)]],
+    'mba-travel': [3000, [vol('home', 233, 55.1)]],
+    'design-imac': [40, [vol('home', 1863, 83.9)]],
+    'gpu-box': [15, [vol('home', 1863, 85.0)]],
+    'laptop-ana': [200, [vol('home', 466, 29.6)]],
+  };
+  const NO_DISK_AGENT = new Set(['kitchen-mini']);
+  nodes.forEach(n => {
+    const d = !cfg.empty && !n.revokedAt && DISK[n.alias];
+    n._disk = d ? { measuredAt: new Date(Date.now() - d[0] * 60e3).toISOString(), volumes: d[1].map(v => ({ ...v })) } : null;
+    n._diskReq = null;
+  });
+  const pctOf = v => Math.round(v.usedBytes / (v.usedBytes + v.availableBytes) * 1000) / 10;
+  const volOut = v => ({ label: v.label, totalBytes: v.totalBytes, usedBytes: v.usedBytes, availableBytes: v.availableBytes, usedPercent: pctOf(v) });
+  const fullest = n => n._disk && n._disk.volumes.slice().sort((a, b) => pctOf(b) - pctOf(a))[0];
+  const listDisk = n => { const v = n._disk && fullest(n); return v ? { ...volOut(v), measuredAt: n._disk.measuredAt } : null; };
+  const detailDisk = n => n._disk || n._diskReq ? { measuredAt: n._disk ? n._disk.measuredAt : null, refreshRequestedAt: n._diskReq, volumes: n._disk ? n._disk.volumes.map(volOut) : [] } : null;
+  const GIBTXT = b => (b / GIB).toFixed(1) + ' GiB';
+
+
+  /* Agent and machine information (docs/technical-design/operator-api.md, "Phase 3: Agent and machine information"). Each Node keeps the latest report only:
+     n._agent = { version, os: { name, version, kernel }, arch, hostname, user, installMethod, serviceManager, stateDirectory, reportedAt } or null (never reported).
+     latestVersion is the Server's own version and outdated compares versions under semantic versioning, where a prerelease sorts below its release.
+     Only Agents from 0.9.0 report, so a reporting Agent is 0.9.0 or a prerelease of it, never 0.8.x: kitchen-mini (an Agent before 0.9.0) and lab-vm-07 (never polled) report nothing.
+     data.js predates phase 3: its OS strings, hostnames, users and install methods are mapped to the contract's fields (os name and version apart, "archive" and "systemd" become "binary"). */
+  const LATEST = '0.9.0';
+  const semver = v => { const m = /^(\d+)\.(\d+)\.(\d+)(?:-([0-9A-Za-z.-]+))?$/.exec(v); return m ? { n: [+m[1], +m[2], +m[3]], pre: m[4] ? m[4].split('.') : null } : null; };
+  const semverLess = (a, b) => {
+    const x = semver(a), y = semver(b);
+    for (let i = 0; i < 3; i++) if (x.n[i] !== y.n[i]) return x.n[i] < y.n[i];
+    if (!x.pre || !y.pre) return !!x.pre && !y.pre; // a prerelease sorts below its release
+    for (let i = 0; i < Math.max(x.pre.length, y.pre.length); i++) {
+      const p = x.pre[i], q = y.pre[i];
+      if (p === undefined || q === undefined) return p === undefined && q !== undefined;
+      if (p === q) continue;
+      const pn = /^\d+$/.test(p), qn = /^\d+$/.test(q);
+      return pn && qn ? +p < +q : pn ? true : qn ? false : p < q;
+    }
+    return false;
+  };
+  const XSS_AGENT = { hostname: '<img src=x onerror=alert(1)>.lab', user: '"><script>alert(6)</script>', osName: '<svg onload=alert(7)> Linux', stateDirectory: '~/<img src=x onerror=alert(8)>' };
+  const STATE_DIR = '~/.local/state/fleet-agent';
+  /* alias -> [os name, os version, kernel, arch, hostname, user, Agent version, install method, service manager, reported minutes ago]. Missing aliases never reported. */
+  const AGENTS = {
+    'mbp-joan': ['macOS', '15.1', '24.1.0', 'aarch64', 'Joans-MacBook-Pro', 'joan', '0.9.0', 'homebrew', 'launchd', 130],
+    'studio-mini': ['macOS', '15.0', '24.0.0', 'aarch64', 'studio-mini.lan', 'joan', '0.9.0', 'homebrew', 'launchd', 60],
+    'homelab-nuc': ['Fedora Linux', '44', '7.2.11-200.fc44.x86_64', 'x86_64', 'nuc.lab.internal', 'ops', '0.9.0', 'homebrew', 'systemd', 52],
+    'fedora-ws': ['Fedora Linux', '44', '7.2.11-200.fc44.x86_64', 'x86_64', 'fedora-ws', 'joan', '0.9.0-rc.2', 'binary', 'systemd', 185],
+    'build-runner-01': ['Ubuntu', '24.04', '6.8.0-48-generic', 'x86_64', 'runner-01', 'ci', '0.9.0', 'binary', 'systemd', 90],
+    'build-runner-02': ['Ubuntu', '24.04', '6.8.0-48-generic', 'x86_64', 'runner-02', 'ci', '0.9.0', 'binary', 'systemd', 45],
+    'build-runner-03': ['Ubuntu', '24.04', '6.8.0-48-generic', 'x86_64', 'runner-03', 'ci', '0.9.0-rc.1', 'binary', 'none', 192],
+    'mba-travel': ['macOS', '14.6', '23.6.0', 'x86_64', 'Joans-MacBook-Air', 'joan', '0.9.0-rc.1', 'homebrew', 'launchd', 3000],
+    'design-imac': ['macOS', '15.1', '24.1.0', 'aarch64', 'design-imac', 'mika', '0.9.0', 'homebrew', 'launchd', 40],
+    /* Arch Linux has no VERSION_ID in os-release, so the version is null. */
+    'gpu-box': ['Arch Linux', null, '6.17.4-arch2-1', 'x86_64', 'gpu-box', 'joan', '0.9.0', 'binary', 'none', 15],
+    'laptop-ana': ['macOS', '15.1', '24.1.0', 'aarch64', 'Anas-MacBook-Pro', 'ana', '0.9.0-beta.4', 'cargo', 'launchd', 200],
+    /* A revoked Node keeps its last report; it is outdated but gets no issue. */
+    'old-laptop': ['macOS', '14.2', '23.2.0', 'x86_64', 'old-laptop', 'joan', '0.9.0-beta.2', 'homebrew', 'launchd', 21600],
+  };
+  const agentOfSpec = (a, ago) => ({ version: a[6], os: { name: a[0], version: a[1], kernel: a[2] }, arch: a[3], hostname: a[4], user: a[5], installMethod: a[7], serviceManager: a[8], stateDirectory: STATE_DIR, reportedAt: new Date(Date.now() - ago * 60e3).toISOString() });
+  nodes.forEach(n => {
+    const a = !cfg.empty && AGENTS[n.alias];
+    n._agent = a ? agentOfSpec(a, a[9]) : null;
+    if (n._agent && cfg.xss && n.alias === 'homelab-nuc') {
+      n._agent.hostname = XSS_AGENT.hostname; n._agent.user = XSS_AGENT.user; n._agent.os.name = XSS_AGENT.osName; n._agent.stateDirectory = XSS_AGENT.stateDirectory;
+    }
+  });
+  const outdatedOf = n => !!n._agent && semverLess(n._agent.version, LATEST);
+  const listAgent = n => n._agent ? { version: n._agent.version, outdated: outdatedOf(n), os: { name: n._agent.os.name, version: n._agent.os.version }, arch: n._agent.arch, hostname: n._agent.hostname } : null;
+  const detailAgent = n => n._agent ? { version: n._agent.version, latestVersion: LATEST, outdated: outdatedOf(n), os: { ...n._agent.os }, arch: n._agent.arch, hostname: n._agent.hostname, user: n._agent.user,
+    installMethod: n._agent.installMethod, serviceManager: n._agent.serviceManager, stateDirectory: n._agent.stateDirectory, reportedAt: n._agent.reportedAt } : null;
+  /* The action names the upgrade command for the install method, like OperatorIssues. */
+  const upgradeAction = n => n._agent.installMethod === 'homebrew' ? 'Upgrade with `brew upgrade fleet-agent`, then restart the service with `brew services restart fleet-agent`.'
+    : n._agent.installMethod === 'cargo' ? `Reinstall with Cargo from the release tag v${LATEST}: \`cargo install --locked --force --git https://github.com/jcarcaboso/fleet-manager --tag v${LATEST} fleet fleet-agent\`, then restart the service (see cli-installation.md).`
+      : 'Replace the binary with the one from the release archive, then restart the Agent service (see cli-installation.md).';
+
   const listItem = n => ({
     nodeId: n.id, name: n.alias, revoked: !!n.revokedAt, lastContactAt: tm(n, n.lastContactAt), freshness: freshnessOfAbs(n),
-    platform: n.platform, enrolledAt: tm(n, n.enrolledAt), revokedAt: tm(n, n.revokedAt), credentialNotAfter: credNotAfter(n), targets: counts(n), currentRevision: currentRevision(n),
+    platform: n.platform, enrolledAt: tm(n, n.enrolledAt), revokedAt: tm(n, n.revokedAt), credentialNotAfter: credNotAfter(n), targets: counts(n), currentRevision: currentRevision(n), disk: listDisk(n), ...(cfg.noAgent ? {} : { agent: listAgent(n) }),
   });
   const freshnessOfAbs = n => !n.lastContactAt ? 'never_contacted' : Date.now() - Date.parse(n.lastContactAt) > 300e3 ? 'stale' : 'fresh';
 
+  /* Phase 2 attempt detail (docs/technical-design/operator-api.md, "Phase 2: attempt detail"): diagnostic, path (relative to the Target base, never
+     starting with "/"), step. Only a failed Attempt reported by an Agent that sends detail has any; everything else is null. The diagnostics come from
+     data.js. data.js predates phase 2, so the fixture picks path and step by error code and Target, and treats the Nodes in OLD_AGENT as Agents
+     that send only the error code. */
+  const OLD_AGENT = new Set(['kitchen-mini', 'fedora-ws']);
+  const XSS = { diagnostic: 'bad <img src=x onerror=alert(1)> and "><script>alert(2)</script> \'x\' & done', path: '"><script>alert(3)</script>/<img src=x onerror=alert(4)>.md', step: 'verify' };
+  const detailOf = (n, t, a) => {
+    const none = { diagnostic: null, path: null, step: null };
+    if (!cfg.diag || a.state !== 'failed' || !a.diagnostic || OLD_AGENT.has(n.alias)) return none;
+    if (cfg.xss) return { ...XSS };
+    const dir = t.path || '';
+    const byCode = {
+      ai_client_reconcile_failed: { path: `${dir}/settings.json`, step: 'configure' },
+      ownership_conflict: { path: '.agents/skills/postgres-migrations', step: 'stage' },
+      bundle_digest_mismatch: { path: '.agents/skills/postgres-migrations', step: 'verify' },
+      /* The lock file is outside the Target base, so there is no path; the agent-file Target also reports the file it was about to write. */
+      lock_failed: { path: t.kind === 'agent-file' ? `${dir}/${t.file}` : null, step: 'lock' },
+    }[a.errorCode] || { path: null, step: null };
+    return { diagnostic: a.diagnostic, ...byCode };
+  };
   const attemptOf = (n, t, a) => ({ attemptId: a.id, assignmentId: guid(n.id + t.name), rolloutId: F.rollouts.find(r => r.shortSha === a.revision)?.id || F.rollouts[0].id, targetName: t.name,
-    sourceRevision: revBySha(a.revision)?.sourceRevision || a.revision, state: a.state, errorCode: a.errorCode, diagnostic: cfg.diag ? a.diagnostic : null, updatedAt: tm(n, a.finishedAt || a.startedAt) });
+    sourceRevision: revBySha(a.revision)?.sourceRevision || a.revision, state: a.state, errorCode: a.errorCode, ...detailOf(n, t, a), updatedAt: tm(n, a.finishedAt || a.startedAt) });
   const allAttempts = n => n.targets.flatMap(t => [...(targetAttempts.get(n.id + ':' + t.name) || []), ...t.attempts.map(a => attemptOf(n, t, a))]).sort((a, b) => Date.parse(b.updatedAt) - Date.parse(a.updatedAt));
 
   const targetDetail = (n, t) => {
@@ -83,7 +196,7 @@
     return {
       name: t.name, kind, base: t.base, path: t.path, assignmentId: guid(n.id + t.name), state: t.state, assignedAt: tm(n, t.updatedAt) || nowIso(),
       desiredRevision: desiredOf(n, t), lastSucceededRevision: applied ? applied.sourceRevision : null,
-      latestAttempt: latest && { attemptId: latest.attemptId, state: latest.state, errorCode: latest.errorCode, diagnostic: latest.diagnostic, updatedAt: latest.updatedAt },
+      latestAttempt: latest && { attemptId: latest.attemptId, state: latest.state, errorCode: latest.errorCode, diagnostic: latest.diagnostic ?? null, path: latest.path ?? null, step: latest.step ?? null, updatedAt: latest.updatedAt },
       failedAttempts: t.state === 'failed' ? (t.failure?.retries || 1) : 0, firstFailedAt: t.state === 'failed' && t.failure ? tm(n, t.failure.firstSeenAt) : null,
       skills: kind === 'skills' ? (t.skills || []).map(name => ({ name, bundleDigest: skillDigest(name) })) : [],
       file: kind === 'agent-file' ? { name: t.file, bundleDigest: 'sha256:' + hex('file:' + n.id + t.name, 64) } : null,
@@ -95,7 +208,7 @@
     return {
       nodeId: n.id, name: n.alias, platform: n.platform, enrolledAt: tm(n, n.enrolledAt), lastContactAt: tm(n, n.lastContactAt), freshness: listItem(n).freshness, revoked: !!n.revokedAt, revokedAt: tm(n, n.revokedAt),
       credential: { credentialId: guid('cred:' + n.id), notBefore: tm(n, n.credential.notBefore), notAfter: tm(n, n.credential.notAfter), revokedAt: tm(n, n.credential.revokedAt), revokedBy: n.revokedAt ? n.revokedBy : null, renewals: n.credential.renewals },
-      targets, summary: counts(n),
+      targets, summary: counts(n), disk: detailDisk(n), ...(cfg.noAgent ? {} : { agent: detailAgent(n) }),
     };
   };
   const findNode = key => nodes.find(n => n.id === key) || nodes.find(n => n.alias === key);
@@ -140,6 +253,15 @@
     cat('cliproxy_key_missing', 'issue', 'CLIProxy API key is missing', 'Nodes are assigned to CLIProxy, but the Server cannot retrieve or distribute their models.', ['Set `Fleet:CliProxyApiKey` in the Server’s private configuration, recreate the Server, then refresh models.']),
     cat('cliproxy_discovery_pending', 'issue', 'Model discovery has not completed', 'The Server has not fetched the model catalog of a CLIProxy endpoint yet.', ['Refresh models or wait for the next discovery check.']),
     cat('cliproxy_refresh_failed', 'issue', 'CLIProxy model refresh failed', 'The Server could not fetch the model catalog from a CLIProxy endpoint. Agents keep the last valid catalog, so AI clients keep working, but new models will not arrive.', ['Check that CLIProxy accepts the dedicated Fleet key.', 'Rotate the Fleet CLIProxy key on the Server if it changed.', 'Refresh models to confirm the fix.']),
+    cat('disk_space_low', 'issue', 'Disk is filling up', 'The disk that holds the user’s home directory on this machine is 85% full or more. Git worktrees, caches and build output are the usual cause. When a disk is full, the Agent can no longer write Skills, agent files or AI-client settings.',
+      ['Run `fleet nodes disk <node>` to see how much space is used and available.', 'Ask the person who uses the machine to remove Git worktrees, caches and build output they no longer need. Fleet never deletes files for you.', 'Run `fleet nodes disk <node> --refresh` to measure again.']),
+    cat('disk_space_critical', 'issue', 'Disk is nearly full', 'The disk that holds the user’s home directory on this machine is 95% full or more. Writes can start failing at any moment, including the Agent’s own.',
+      ['Run `fleet nodes disk <node>` to see how much space is left.', 'Ask the person who uses the machine to free space now: remove Git worktrees (`git worktree list`, `git worktree remove`), caches and build output. Fleet never deletes files for you.', 'Run `fleet nodes disk <node> --refresh` to measure again.']),
+    cat('agent_outdated', 'issue', 'A Node runs an older Agent', 'The Agent on the Node reported a version lower than the Server’s. Server and Agent releases share version numbers, so the Agent is older than the release the Server runs.',
+      ['Run `fleet nodes show <node>` to see the running and the latest version and how the Agent was installed.', 'Homebrew: run `brew upgrade fleet-agent` on the Node and restart the service with `brew services restart fleet-agent`.',
+        'Cargo: reinstall from the release tag with `cargo install --locked --force --git https://github.com/jcarcaboso/fleet-manager --tag <tag> fleet fleet-agent`, then restart the service. See docs/technical-design/cli-installation.md.',
+        'Binary: download and verify the release archive, replace the binary at the same path and restart the service. See docs/technical-design/cli-installation.md.',
+        'docs/technical-design/client-updates.md describes staged updates and rollback. The issue clears when the Agent reports the new version, which it does shortly after it restarts.']),
     cat('source_not_configured', 'issue', 'No repository is configured', 'The Server cannot publish new assignments from Git.', ['Set `Source:Remote`, then sync the repository.']),
     cat('source_sync_failed', 'issue', 'Repository sync failed', 'The last repository scan was rejected or failed. Existing assignments remain active.', ['Check repository access and fleet.yml validation in the Server logs, then sync the repository again.']),
     cat('source_not_scanned', 'issue', 'Repository has not been synced', 'No source scan has been recorded.', ['Sync the repository to validate configuration and publish assignments.']),
@@ -160,13 +282,26 @@
         detail: last ? `The last contact was at ${stamp(last)}.` : `The Node has not contacted the Server since it enrolled at ${stamp(enrolled)}.`,
         action: 'Check the Agent service, its running version, network connection and certificate. Restart the service after upgrading the binary.',
         section: 'nodes', errorCode: null, nodeId: n.id, nodeName: n.alias, target: null, since: last || enrolled, commands: [`fleet nodes show ${alias}`, `fleet nodes checkins ${alias}`] });
+      const worst = fullest(n);
+      if (worst && pctOf(worst) >= 85) {
+        const crit = pctOf(worst) >= 95, code = crit ? 'disk_space_critical' : 'disk_space_low';
+        out.push({ id: `${code}:${n.id}`, code, severity: crit ? 'error' : 'warning', title: `${n.alias}: disk is ${pctOf(worst)}% full`,
+          detail: `The ${worst.label} volume is ${pctOf(worst)}% used: ${GIBTXT(worst.availableBytes)} available of ${GIBTXT(worst.totalBytes)}.`,
+          action: 'Free space by removing Git worktrees, caches and build output that are no longer needed, then refresh the disk usage.',
+          section: 'nodes', errorCode: null, nodeId: n.id, nodeName: n.alias, target: null, since: n._disk.measuredAt, commands: [`fleet nodes disk ${alias}`, `fleet nodes disk ${alias} --refresh`] });
+      }
+      if (outdatedOf(n) && !cfg.noAgent) out.push({ id: `agent_outdated:${n.id}`, code: 'agent_outdated', severity: 'warning', title: `${n.alias}: Agent is outdated`,
+        detail: `The Agent runs version ${n._agent.version}; the latest version is ${LATEST}. Reported at ${stamp(n._agent.reportedAt)}.`, action: upgradeAction(n),
+        section: 'nodes', errorCode: null, nodeId: n.id, nodeName: n.alias, target: null, since: n._agent.reportedAt, commands: [`fleet nodes show ${alias}`] });
       for (const t of n.targets) if (t.state === 'failed') {
         const code = (allAttempts(n).find(a => a.targetName === t.name && a.errorCode) || {}).errorCode || t.failure?.code || null;
+        const failedAttempt = allAttempts(n).find(a => a.targetName === t.name && a.state === 'failed');
         const known = code && catalogItems().find(x => x.code === code);
         out.push({ id: `assignment_failed:${n.id}:${t.name}`, code: 'assignment_failed', severity: 'error', title: `${n.alias}: ${t.name} failed`,
           detail: code ? `The Agent reported ${code}${known ? ` (${known.title})` : ''} for this current assignment.` : 'The Agent reported a failure for this current assignment.',
           action: known ? known.fix[0] : 'Check Agent logs for permissions, ownership conflicts or download failures.',
           section: 'nodes', errorCode: code, nodeId: n.id, nodeName: n.alias, target: t.name, since: t.failure ? tm(n, t.failure.firstSeenAt) : null,
+          diagnostic: failedAttempt?.diagnostic ?? null, path: failedAttempt?.path ?? null, step: failedAttempt?.step ?? null,
           commands: [`fleet nodes show ${alias}`, ...(code ? [`fleet explain ${quote(code)}`] : []), `fleet retry ${alias} ${quote(t.name)}`] });
       }
     }
@@ -181,7 +316,7 @@
       detail: `The last scan at ${stamp(last.observedAt)} was ${last.outcome}. Existing assignments remain active.`, action: 'Check repository access and fleet.yml validation in the Server logs, then sync the repository again.',
       section: 'repository', errorCode: null, nodeId: null, nodeName: null, target: null, since: last.observedAt, commands: ['fleet source rescan'] });
     /* Errors first, then Node name (issues without a Node first), Target, code and ID. */
-    return out.sort((a, b) => (a.severity === 'error' ? 0 : 1) - (b.severity === 'error' ? 0 : 1) || cmpNull(a.nodeName, b.nodeName) || cmpNull(a.target, b.target) || cmpNull(a.code, b.code) || cmpNull(a.id, b.id)).slice(0, 200);
+    return out.map(i => ({ diagnostic: null, path: null, step: null, ...i })).sort((a, b) => (a.severity === 'error' ? 0 : 1) - (b.severity === 'error' ? 0 : 1) || cmpNull(a.nodeName, b.nodeName) || cmpNull(a.target, b.target) || cmpNull(a.code, b.code) || cmpNull(a.id, b.id)).slice(0, 200);
   };
 
   /* ---------------------------------------------------------------- CLIProxy */
@@ -264,6 +399,8 @@
       const now = nowIso(), mac = link._platform !== 'linux';
       const n = { id: guid('new:' + link.alias + Date.now()), alias: link.alias, platform: mac ? 'macos' : 'linux', enrolledAt: now, lastContactAt: cfg.consumeOnly ? null : now, freshness: cfg.consumeOnly ? 'never_contacted' : 'fresh', revokedAt: null, revokedBy: null, _abs: true,
         credential: { notBefore: now, notAfter: new Date(Date.now() + 7 * DAY).toISOString(), renewals: 0, revokedAt: null }, targets: [] };
+      n._agent = cfg.consumeOnly ? null : agentOfSpec(mac ? AGENTS['mbp-joan'] : AGENTS['build-runner-01'], 0);
+      if (n._agent) { n._agent.hostname = link.alias; n._agent.version = LATEST; }
       nodes.unshift(n); link.nodeId = n.id;
     }, 9000);
   };
@@ -308,9 +445,9 @@
       if (path === 'rollouts') return listOf(cfg.empty ? [] : F.rollouts.map(r => ({ rolloutId: r.id, desiredRevisionId: r.revisionId, createdAt: T(r.createdAt), ...pickCounts(r.assignments) })), q, 'rolloutId', 'createdAt');
       if ((m = /^rollouts\/([^/]+)\/attempts$/.exec(path))) {
         const r = F.rollouts.find(x => x.id === seg(m[1])); if (!r) return err(404, 'invalid_request', 'No rollout has that ID.');
-        /* AttemptStatus: exactly these six fields. */
+        /* AttemptStatus: exactly these eight fields. */
         return paged(nodes.flatMap(n => allAttempts(n)).filter(a => a.rolloutId === r.id)
-          .map(a => ({ attemptId: a.attemptId, assignmentId: a.assignmentId, state: a.state, errorCode: a.errorCode, diagnostic: a.diagnostic, updatedAt: a.updatedAt })), q);
+          .map(a => ({ attemptId: a.attemptId, assignmentId: a.assignmentId, state: a.state, errorCode: a.errorCode, diagnostic: a.diagnostic ?? null, path: a.path ?? null, step: a.step ?? null, updatedAt: a.updatedAt })), q);
       }
       if (path === 'warnings') return paged(cfg.empty ? [] : F.revisions.flatMap(r => r.warnings.map(w => ({ desiredRevisionId: r.id, code: w.code, message: w.message, sourceLocations: w.sourceLocations }))), q);
       if (path === 'audit') {
@@ -330,7 +467,7 @@
     }
     /* POST routes and their scopes */
     const scopeFor = { 'nodes/rename': 'admin', 'enrollment-links': 'admin', 'source/rescan': 'operate', 'cliproxy/refresh': 'operate', 'cliproxy/selection': 'operate' };
-    let level = scopeFor[path] || (/^nodes\/[^/]+\/retry$/.test(path) ? 'operate' : /^(nodes\/[^/]+\/(revoke|remove)|enrollment-links\/[^/]+\/revoke)$/.test(path) ? 'admin' : 'admin');
+    let level = scopeFor[path] || (/^nodes\/[^/]+\/(retry|disk-usage\/refresh)$/.test(path) ? 'operate' : /^(nodes\/[^/]+\/(revoke|remove)|enrollment-links\/[^/]+\/revoke)$/.test(path) ? 'admin' : 'admin');
     if (!need(level)) return err(403, 'insufficient_scope', `This operation needs the ${level} scope.`);
     if ((m = /^nodes\/([^/]+)\/retry$/.exec(path))) {
       /* OperatorApi rejects a blank target before it looks for the Node; the coordinator bounds it at 100 characters. */
@@ -341,10 +478,27 @@
       const t = n.targets.find(x => x.name === body.target); if (!t) return err(404, 'target_not_found');
       if (t.state !== 'failed') return err(409, 'target_not_failed');
       t.state = 'pending'; t.failure = null;
-      const a = { attemptId: guid('retry' + Date.now()), state: 'pending', errorCode: null, diagnostic: null, updatedAt: nowIso() };
+      const a = { attemptId: guid('retry' + Date.now()), state: 'pending', errorCode: null, diagnostic: null, path: null, step: null, updatedAt: nowIso() };
       targetAttempts.set(n.id + ':' + t.name, [{ ...a, assignmentId: guid(n.id + t.name), rolloutId: F.rollouts[0].id, targetName: t.name, sourceRevision: F.revisions[0].sourceRevision }, ...(targetAttempts.get(n.id + ':' + t.name) || [])]);
       addAudit('assignment.retry_requested', { nodeId: n.id, subject: n.alias });
       return json({ assignmentId: guid(n.id + t.name), attemptId: a.attemptId, state: 'pending' });
+    }
+    if ((m = /^nodes\/([^/]+)\/disk-usage\/refresh$/.exec(path))) {
+      /* Scope operate, then the Node (404 node_not_found), then a revoked Node (409 node_revoked). A repeated request keeps the original time until the Agent answers.
+         An Agent before 0.9.0, or a machine that is not checking in, never answers. */
+      const n = findNode(seg(m[1])); if (!n) return err(404, 'node_not_found');
+      if (n.revokedAt) return err(409, 'node_revoked');
+      /* Only a new request is audited (node.disk_refresh_requested, with the Node ID); a repeat keeps the time and records nothing, like the Server. */
+      if (!n._diskReq) { n._diskReq = nowIso(); addAudit('node.disk_refresh_requested', { nodeId: n.id, subject: n.alias }); }
+      if (!NO_DISK_AGENT.has(n.alias) && freshnessOfAbs(n) === 'fresh' && !n._diskTimer) {
+        n._diskTimer = setTimeout(() => {
+          n._diskTimer = null;
+          const old = n._disk;
+          n._disk = { measuredAt: nowIso(), volumes: old ? old.volumes.map(v => { const step = Math.round((v.usedBytes + v.availableBytes) * 0.003); return { ...v, usedBytes: v.usedBytes + step, availableBytes: v.availableBytes - step }; }) : [vol('home', 464, 38.2)] };
+          n._diskReq = null;
+        }, cfg.diskDelay);
+      }
+      return json({ refreshRequestedAt: n._diskReq }, 202);
     }
     if (path === 'nodes/rename') {
       /* RenameNodeAliasAsOperatorAsync: both aliases are validated first (invalid_node_alias), then the Node is looked up by its exact
