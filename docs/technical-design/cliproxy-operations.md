@@ -202,21 +202,22 @@ secret manager. Then recreate the Server:
 docker compose up -d --no-deps --force-recreate server
 ```
 
-## Dashboard diagnostics
+## Problems
 
-The dashboard's **Issues to resolve** section checks current assignments and
-Server records. It identifies missing CLIProxy credentials only when active
-Nodes require them, initial discovery still waiting, failed upstream refreshes,
-missing or failed repository sync, stale Node check-ins, and failed current
-Assignments. Each issue includes a recovery step and a link to the relevant
-section. Revoked Nodes and historical assignment failures are excluded.
+The dashboard's **Problems** page, `GET issues` in the
+[Operator API](operator-api.md) and `fleet doctor` list the same issues. They
+check current assignments and Server records. They identify missing CLIProxy
+credentials only when active Nodes require them, initial discovery still
+waiting, failed upstream refreshes, missing or failed repository sync, stale
+Node check-ins, and failed current Assignments. Each issue includes a recovery
+step and the `fleet` commands that inspect or fix it. Revoked Nodes and
+historical assignment failures are excluded.
 
-Use **Check again** after correcting configuration. Repository and model refresh
-actions also recheck diagnostics. A failed diagnostics request leaves an explicit
-warning rather than showing an all-clear result. The endpoint requires a signed-in
-dashboard session and never returns secret values or raw error bodies. It cannot
-inspect a remote secret manager or determine a running Agent's version; those
-checks still require service logs on the affected machine.
+The list is read again after correcting configuration and after repository and
+model refresh actions. A failed request shows an explicit error rather than an
+all-clear result. The route requires Operator authentication and never returns
+secret values or raw error bodies. It cannot inspect a remote secret manager;
+that check still requires service logs on the affected machine.
 
 ## Diagnose a missing client configuration
 
@@ -258,7 +259,7 @@ release. It makes real model requests and may incur provider cost.
 - Exercise key overlap and rotation, proxy outage, malformed model data,
   concurrent edits, interrupted writes, and Node revocation.
 - Search the source tree, generated Assignments, Bundles, PostgreSQL dump,
-  diagnostics, and logs for a unique test-key marker. It must be absent.
+  issue responses, and logs for a unique test-key marker. It must be absent.
 - Confirm that native restoration leaves Codex `auth.json` and OpenCode's
   credential store byte-for-byte unchanged.
 - Back up the deployment's private configuration according to local policy and

@@ -119,7 +119,6 @@ public static partial class DashboardEndpoints
             return Results.Ok(new { actor, scope = scope.Name() });
         }).RequireRateLimiting("enrollment");
         var authenticated = api.MapGroup("").RequireAuthorization(Scheme);
-        authenticated.MapGet("/diagnostics", DashboardDiagnostics.ReadAsync);
         authenticated.MapGet("/session", (HttpContext http) => Results.Ok(new
         {
             actor = Actor(http),

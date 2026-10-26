@@ -47,8 +47,10 @@ origin from `FLEET_HOSTNAME` and `FLEET_PORT`; set `FLEET_PUBLIC_URL` when the
 public HTTPS origin differs. The browser must trust the Server CA.
 
 Open `https://YOUR_SERVER/dashboard` and sign in with an Operator token. The
-dashboard lists Nodes, changes aliases, creates enrollment links, and revokes
-those links. Each link is bound to its chosen alias, includes the public CA, and
+dashboard shows each machine with its Targets, problems, check-ins, disk usage
+and Agent details, lists deployments and their progress, and manages aliases,
+enrollment links, CLIProxy models and the audit log. **Add machine** creates an
+enrollment link. Each link is bound to its chosen alias, includes the public CA, and
 expires after 15 minutes by default, with a maximum lifetime of one hour. It can be revoked
 before use. Treat it as a secret until it expires or enrollment succeeds. The
 [dashboard enrollment guide](docs/plans/enrollment-dashboard.md) explains its
