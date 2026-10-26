@@ -11,6 +11,12 @@ const MAX_JSON_BYTES: usize = 1024 * 1024;
 const MAX_BUNDLE_BYTES: usize = 16 * 1024 * 1024;
 const MAX_CLIPROXY_CREDENTIAL_BYTES: usize = 4096;
 const MAX_DETAIL_REQUEST_BYTES: usize = 16 * 1024;
+const MAX_DISK_USAGE_REQUEST_BYTES: usize = 4 * 1024;
+const DISK_USAGE_TIMEOUT: Duration = Duration::from_secs(10);
+/// Tells the Server which optional features this Agent understands. Only then
+/// may the poll response carry the matching fields.
+const CAPABILITIES_HEADER: &str = "x-fleet-agent-capabilities";
+const CAPABILITIES: &str = "disk-usage";
 
 #[derive(Debug)]
 pub enum ProtocolError {
@@ -145,8 +151,14 @@ impl Api {
     }
 
     pub async fn poll(&self) -> Result<PollResponse, ProtocolError> {
-        self.json::<(), _>(self.authenticated()?, Method::POST, "agent/v1/poll", None)
+        let response = self
+            .authenticated()?
+            .post(self.endpoint("agent/v1/poll")?)
+            .header(CAPABILITIES_HEADER, CAPABILITIES)
+            .send()
             .await
+            .map_err(ProtocolError::Transport)?;
+        decode(response).await
     }
 
     pub async fn cliproxy_credential(&self) -> Result<Vec<u8>, ProtocolError> {
@@ -291,6 +303,28 @@ impl Api {
         Ok(())
     }
 
+    /// Sends the latest disk usage. Best effort: the response body is never
+    /// read, and the caller decides when to try again.
+    pub async fn disk_usage(&self, report: &DiskUsageReport) -> Result<(), ProtocolError> {
+        let body = serde_json::to_vec(report).map_err(|_| ProtocolError::Json)?;
+        if body.len() > MAX_DISK_USAGE_REQUEST_BYTES {
+            return Err(ProtocolError::RequestTooLarge {
+                limit: MAX_DISK_USAGE_REQUEST_BYTES,
+            });
+        }
+        let response = self
+            .authenticated()?
+            .put(self.endpoint("agent/v1/disk-usage")?)
+            .header(CONTENT_TYPE, "application/json")
+            .timeout(DISK_USAGE_TIMEOUT)
+            .body(body)
+            .send()
+            .await
+            .map_err(ProtocolError::Transport)?;
+        success(response)?;
+        Ok(())
+    }
+
     /// A client for loopback tests that speaks plain HTTP to a mock Server.
     #[cfg(test)]
     pub fn for_loopback_test(base: &str) -> Self {
@@ -353,9 +387,13 @@ impl Api {
             request = request.json(body);
         }
         let response = request.send().await.map_err(ProtocolError::Transport)?;
-        let bytes = read_bounded(success(response)?, MAX_JSON_BYTES).await?;
-        serde_json::from_slice(&bytes).map_err(|_| ProtocolError::Json)
+        decode(response).await
     }
+}
+
+async fn decode<T: DeserializeOwned>(response: Response) -> Result<T, ProtocolError> {
+    let bytes = read_bounded(success(response)?, MAX_JSON_BYTES).await?;
+    serde_json::from_slice(&bytes).map_err(|_| ProtocolError::Json)
 }
 
 fn success(response: Response) -> Result<Response, ProtocolError> {
@@ -413,6 +451,9 @@ pub struct PollResponse {
     pub node_id: Uuid,
     pub assignment: Option<Assignment>,
     pub next_poll_seconds: u64,
+    /// Set by the Server only for Agents that sent the disk-usage capability.
+    #[serde(default)]
+    pub disk_usage_requested: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -517,6 +558,21 @@ pub struct AttemptDetail {
     pub step: Option<fleet_reconcile::Step>,
 }
 
+/// Body of `PUT agent/v1/disk-usage`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct DiskUsageReport {
+    pub volumes: Vec<DiskVolume>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DiskVolume {
+    pub label: &'static str,
+    pub total_bytes: u64,
+    pub used_bytes: u64,
+    pub available_bytes: u64,
+}
+
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 struct EnrollmentRequest<'a> {
@@ -615,5 +671,111 @@ mod tests {
         assert!(!protocol_error.to_string().contains(secret));
         assert!(format!("{protocol_error:?}").contains("Json"));
         assert!(error.to_string().contains(secret));
+    }
+
+    const POLL: &str = r#"{"workspaceId":"00000000-0000-0000-0000-000000000001","nodeId":"00000000-0000-0000-0000-000000000002","assignment":null,"nextPollSeconds":30}"#;
+    const POLL_REQUESTED: &str = r#"{"workspaceId":"00000000-0000-0000-0000-000000000001","nodeId":"00000000-0000-0000-0000-000000000002","assignment":null,"nextPollSeconds":30,"diskUsageRequested":true}"#;
+
+    #[test]
+    fn poll_response_parses_with_and_without_disk_usage_requested() {
+        let without: PollResponse = serde_json::from_str(POLL).unwrap();
+        assert!(!without.disk_usage_requested);
+        let with: PollResponse = serde_json::from_str(POLL_REQUESTED).unwrap();
+        assert!(with.disk_usage_requested);
+        let explicit_false = POLL_REQUESTED.replace("true", "false");
+        let off: PollResponse = serde_json::from_str(&explicit_false).unwrap();
+        assert!(!off.disk_usage_requested);
+        // Other unknown fields are still rejected.
+        let unknown = POLL.replace("}", r#","somethingElse":1}"#);
+        assert!(serde_json::from_str::<PollResponse>(&unknown).is_err());
+    }
+
+    #[tokio::test]
+    async fn every_poll_request_advertises_the_disk_usage_capability() {
+        let server =
+            crate::detail::testing::MockServer::start(vec![(200, POLL), (200, POLL_REQUESTED)]);
+        let client = Api::for_loopback_test(&server.url());
+        assert!(!client.poll().await.unwrap().disk_usage_requested);
+        assert!(client.poll().await.unwrap().disk_usage_requested);
+        let requests = server.requests();
+        assert_eq!(requests.len(), 2);
+        for request in requests {
+            assert_eq!(
+                (request.method.as_str(), request.path.as_str()),
+                ("POST", "/agent/v1/poll")
+            );
+            assert_eq!(
+                request.header("x-fleet-agent-capabilities"),
+                Some("disk-usage")
+            );
+        }
+    }
+
+    fn sample_report() -> DiskUsageReport {
+        DiskUsageReport {
+            volumes: vec![
+                DiskVolume {
+                    label: "home",
+                    total_bytes: 994662584320,
+                    used_bytes: 871203905536,
+                    available_bytes: 72818462720,
+                },
+                DiskVolume {
+                    label: "state",
+                    total_bytes: 10,
+                    used_bytes: 4,
+                    available_bytes: 6,
+                },
+            ],
+        }
+    }
+
+    #[test]
+    fn disk_usage_body_has_the_wire_shape() {
+        assert_eq!(
+            serde_json::to_value(sample_report()).unwrap(),
+            serde_json::json!({"volumes":[
+                {"label":"home","totalBytes":994662584320u64,"usedBytes":871203905536u64,"availableBytes":72818462720u64},
+                {"label":"state","totalBytes":10,"usedBytes":4,"availableBytes":6}
+            ]})
+        );
+    }
+
+    #[tokio::test]
+    async fn disk_usage_is_put_and_the_response_body_is_ignored() {
+        let server = crate::detail::testing::MockServer::start(vec![(204, ""), (200, "not json")]);
+        let client = Api::for_loopback_test(&server.url());
+        client.disk_usage(&sample_report()).await.unwrap();
+        client.disk_usage(&sample_report()).await.unwrap();
+        let requests = server.requests();
+        assert_eq!(requests[0].method, "PUT");
+        assert_eq!(requests[0].path, "/agent/v1/disk-usage");
+        assert_eq!(requests[0].header("content-type"), Some("application/json"));
+        let body: serde_json::Value = serde_json::from_str(&requests[0].body).unwrap();
+        assert_eq!(body["volumes"][0]["label"], "home");
+    }
+
+    #[tokio::test]
+    async fn disk_usage_failures_are_errors_not_panics() {
+        let server = crate::detail::testing::MockServer::start(vec![(404, ""), (429, "")]);
+        let client = Api::for_loopback_test(&server.url());
+        for expected in [StatusCode::NOT_FOUND, StatusCode::TOO_MANY_REQUESTS] {
+            let error = client.disk_usage(&sample_report()).await.unwrap_err();
+            assert!(matches!(error, ProtocolError::Http(status) if status == expected));
+        }
+    }
+
+    #[tokio::test]
+    async fn oversized_disk_usage_requests_are_not_sent() {
+        let server = crate::detail::testing::MockServer::start(vec![(204, "")]);
+        let client = Api::for_loopback_test(&server.url());
+        let report = DiskUsageReport {
+            volumes: vec![sample_report().volumes[0].clone(); 200],
+        };
+        assert!(matches!(
+            client.disk_usage(&report).await,
+            Err(ProtocolError::RequestTooLarge { .. })
+        ));
+        assert!(server.requests().is_empty());
     }
 }

@@ -1,6 +1,6 @@
 'use strict';
 /* Fleet dashboard: Machines gallery.
-   API: GET nodes, GET issues, GET errors, GET source/status, GET desired-revisions?order=newest&limit=1, GET cliproxy/status,
+   API: GET nodes (with disk), GET issues, GET errors, GET source/status, GET desired-revisions?order=newest&limit=1, GET cliproxy/status,
    GET enrollment-links, and GET nodes/{id}/checkins?hours=24 for the strip of each card that is on screen. */
 (function () {
   const Fleet = window.Fleet = window.Fleet || {};
@@ -34,6 +34,18 @@
   };
   const stripTotal = n => { const d = strips.get(n.id); return d && d.buckets ? u.num(Fleet.charts.total(d.buckets)) : n.revoked ? '—' : '…'; };
 
+  /* Compact disk meter: the fullest volume the Agent reported. The state is a glyph and a word as well as a colour. */
+  const diskBlock = n => {
+    if (n.revoked) return '';
+    const d = n.disk;
+    if (!d) return `<div class="diskm diskm--none"><div class="diskm-top"><span class="diskm-k">Disk</span><span class="diskm-state">${glyph('neutral', 'minus')}<span>No disk data</span></span></div></div>`;
+    const lv = model.diskLevel(d.usedPercent), pct = d.usedPercent.toFixed(1), free = u.bytes(d.availableBytes), total = u.bytes(d.totalBytes);
+    const age = u.ms(d.measuredAt) !== null && u.now() - u.ms(d.measuredAt) > 5 * u.HOUR ? ` · measured ${u.rel(d.measuredAt)}` : '';
+    return `<div class="diskm diskm--${lv.key}"><div class="diskm-top"><span class="diskm-k">Disk <b>${esc(pct)}% used</b></span><span class="diskm-state t-${lv.level}">${glyph(lv.level, lv.kind)}<span>${esc(lv.label)}</span></span></div>
+        <div class="meter meter--thin m-${lv.key}" role="img" aria-label="${esc(`Disk ${pct}% used, ${lv.label}`)}"><span data-w="${Math.min(100, d.usedPercent).toFixed(1)}"></span></div>
+        <p class="diskm-sub"${u.ms(d.measuredAt) !== null ? ` data-tip="${esc(`Measured ${u.rel(d.measuredAt)}|${u.fmtFull(d.measuredAt)} UTC`)}"` : ''}>${esc(free)} free of ${esc(total)}${d.label !== 'home' ? ` · ${esc(d.label)} volume` : ''}${esc(age)}</p></div>`;
+  };
+
   const card = n => {
     const h = healthOf(n), url = `#/nodes/${enc(n.alias)}`;
     const toProblems = model.isAttention(h) && h.key === 'failing';
@@ -48,6 +60,7 @@
       <p class="card-sub">${esc(u.platformLabel(n.platform))} · enrolled ${esc(u.fmtDay(n.enrolledAt))}</p>
       <a class="reason reason--${h.level} z" href="${url}${toProblems ? '/problems' : ''}">${glyph(h.level, h.kind)}<span>${esc(h.reason)}${h.extra ? `<span class="reason-extra"> · ${esc(h.extra)}</span>` : ''}</span>${ic('chevR', 'rchev')}</a>
       ${flag ? `<div class="flags"><span class="flag">${glyph(flag.level, flag.kind)}${esc(flag.text)}</span></div>` : ''}
+      ${diskBlock(n)}
       <div class="vitals">
         <div class="vital"><div class="vital-top"><span>Check-ins, 24 h</span><b data-strip-total="${esc(n.id)}">${stripTotal(n)}</b></div><div class="strip-slot" ${n.revoked ? '' : `data-strip-slot="${esc(n.id)}"`}>${stripSlot(n)}</div></div>
         <div class="vital"><div class="vital-top"><span>Certificate</span><b>${esc(model.certText(n))}</b></div></div>
@@ -58,8 +71,15 @@
   };
 
   /* ---------------------------------------------------------------- list, sort, group */
+  /* A disk at 85% or more counts as needing attention: a critical disk ranks with failures, a warning one just below offline machines. */
+  const attentionRank = n => {
+    const r = healthOf(n).rank, d = model.diskOf(n);
+    return !d || d.key === 'good' ? r : Math.min(r, d.key === 'critical' ? 0.5 : 1.5);
+  };
+  const needsAttention = n => model.isAttention(healthOf(n)) || model.diskHot(n);
   const SORTS = {
-    attention: (a, b) => healthOf(a).rank - healthOf(b).rank || a.alias.localeCompare(b.alias),
+    attention: (a, b) => attentionRank(a) - attentionRank(b) || a.alias.localeCompare(b.alias),
+    disk: (a, b) => (b.disk?.usedPercent ?? -1) - (a.disk?.usedPercent ?? -1) || a.alias.localeCompare(b.alias),
     name: (a, b) => a.alias.localeCompare(b.alias),
     seen: (a, b) => (u.ms(b.lastContactAt) || 0) - (u.ms(a.lastContactAt) || 0) || a.alias.localeCompare(b.alias),
   };
@@ -75,9 +95,9 @@
     }
     const rev = newestRev();
     return [
-      { key: 'attention', title: 'Needs attention', sub: 'Fix these first. The most serious problems are at the top.', nodes: nodes.filter(n => model.isAttention(healthOf(n))) },
-      { key: 'updating', title: 'Updating', sub: 'Receiving new assignments right now. No action needed.', nodes: nodes.filter(n => healthOf(n).key === 'updating') },
-      { key: 'ok', title: 'Up to date', sub: rev ? `Every assigned Target is in sync. Latest published revision: ${u.shortSha(rev.sourceRevision)}.` : 'Every assigned Target is in sync.', nodes: nodes.filter(n => healthOf(n).key === 'ok') },
+      { key: 'attention', title: 'Needs attention', sub: 'Fix these first. The most serious problems are at the top. A disk that is 85% full or more is listed here too.', nodes: nodes.filter(needsAttention) },
+      { key: 'updating', title: 'Updating', sub: 'Receiving new assignments right now. No action needed.', nodes: nodes.filter(n => !needsAttention(n) && healthOf(n).key === 'updating') },
+      { key: 'ok', title: 'Up to date', sub: rev ? `Every assigned Target is in sync. Latest published revision: ${u.shortSha(rev.sourceRevision)}.` : 'Every assigned Target is in sync.', nodes: nodes.filter(n => !needsAttention(n) && healthOf(n).key === 'ok') },
     ].filter(s => s.nodes.length);
   };
 
@@ -117,7 +137,9 @@
     ].map(p => ({ ...p, unit: p.value === 1 ? 'machine' : 'machines', tip: names(p.key) }));
     const counts = u.emptyCounts(); live.forEach(n => u.addCounts(counts, n.counts));
     const total = u.countTotal(counts), rev = newestRev(), scan = S.source;
-    const sentence = [c.updating ? `${c.updating} ${c.updating === 1 ? 'is' : 'are'} updating` : null, attention ? `${attention} need${attention === 1 ? 's' : ''} your attention` : null].filter(Boolean);
+    const fullDisks = live.filter(model.diskHot).length;
+    const sentence = [c.updating ? `${c.updating} ${c.updating === 1 ? 'is' : 'are'} updating` : null, attention ? `${attention} need${attention === 1 ? 's' : ''} your attention` : null,
+      fullDisks ? `${fullDisks} ${fullDisks === 1 ? 'has' : 'have'} a disk that is ${model.DISK_WARN}% full or more` : null].filter(Boolean);
     const scanOk = scan && (scan.outcome === 'accepted' || scan.outcome === 'unchanged');
     const badCats = (S.proxy?.catalogs || []).filter(x => x.outcome === 'failed').length;
     const active = (S.links || []).filter(l => l.state === 'active').sort((a, b) => u.ms(a.expiresAt) - u.ms(b.expiresAt));
@@ -150,7 +172,7 @@
   const toolbar = () => `<div class="toolbar" role="search">
     <label class="search">${ic('search')}<span class="sr">Search machines</span><input id="q" type="search" autocomplete="off" placeholder="Search by name, platform or status" value="${esc(S.q)}"></label>
     <div class="seg-ctl" role="group" aria-label="Group by"><span class="seg-lbl">Group by</span>${[['status', 'Status'], ['platform', 'Platform']].map(([k, l]) => `<button type="button" data-act="group" data-v="${k}" aria-pressed="${S.groupBy === k}">${l}</button>`).join('')}</div>
-    <label class="sel"><span>Sort</span><select id="sort">${[['attention', 'Attention first'], ['name', 'Name'], ['seen', 'Last seen']].map(([k, l]) => `<option value="${k}" ${S.sort === k ? 'selected' : ''}>${l}</option>`).join('')}</select>${ic('chevD', 'sel-chev')}</label>
+    <label class="sel"><span>Sort</span><select id="sort">${[['attention', 'Attention first'], ['disk', 'Fullest disk first'], ['name', 'Name'], ['seen', 'Last seen']].map(([k, l]) => `<option value="${k}" ${S.sort === k ? 'selected' : ''}>${l}</option>`).join('')}</select>${ic('chevD', 'sel-chev')}</label>
   </div>`;
 
   const paint = () => `<div class="wrap">${S.nodes.length ? header() + toolbar() : ''}<div id="gallery-body">${body()}</div></div>`;

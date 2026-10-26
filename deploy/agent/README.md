@@ -81,6 +81,17 @@ Agent deletes it once sent, when the Server rejects it, or after 24 hours, and
 `fleet-agent status` shows `"pendingDetail": true` while it exists. It is safe to
 delete.
 
+Every few hours (4 hours after the last attempt, after a restart, or when an
+Operator asks for a refresh) the Agent reports the size, used space and free
+space of the disk holding your home directory, and of the Agent state directory
+if it is on another disk. It is one `statvfs` or `statfs` call per disk. The
+Agent does not scan directories and sends no file names. The call runs on one
+background thread with a time limit, so a hung network mount cannot stall the
+Agent; if it never returns, the Agent stops measuring until it restarts. A
+Server that predates this feature answers 404; the Agent ignores that and asks
+again at the next slot. See the values on the machine's dashboard page or with
+`fleet nodes disk <alias>`.
+
 ## Publish and verify Skills
 
 Configure this Node's alias in the source repository:

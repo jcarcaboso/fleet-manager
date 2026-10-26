@@ -127,5 +127,18 @@
     "succeeded": 2,
     "failed": 1,
     "superseded": 0
+  },
+  "disk": {
+    "measuredAt": "2026-10-25T12:00:00Z",
+    "refreshRequestedAt": null,
+    "volumes": [
+      {
+        "label": "home",
+        "totalBytes": 994662584320,
+        "usedBytes": 871203905536,
+        "availableBytes": 72818462720,
+        "usedPercent": 92.3
+      }
+    ]
   }
 }

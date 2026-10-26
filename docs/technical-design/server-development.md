@@ -112,7 +112,9 @@ The following defaults are implementation choices pending measured budgets:
 | HTTP request body | 16 KiB |
 | Concurrent HTTP requests | 128, no waiting queue |
 | Enrollment and renewal requests per source address | 20 per minute |
-| Attempt detail requests per Node | Burst of 30, then 1 every 2 seconds (30 per minute), no queue |
+| Attempt detail and disk usage requests per Node (one shared limit) | Burst of 30, then 1 every 2 seconds (30 per minute), no queue |
+| Disk usage warning threshold (`disk_space_low`) | 85.0% used, from the fullest reported volume |
+| Disk usage critical threshold (`disk_space_critical`) | 95.0% used, from the fullest reported volume |
 | Database command timeout | 15 seconds |
 | Collection page size | 100, maximum 200 |
 

@@ -12,6 +12,7 @@
     id: raw.nodeId, alias: raw.name, platform: raw.platform || null, revoked: !!raw.revoked, revokedAt: raw.revokedAt || null,
     lastContactAt: raw.lastContactAt || null, freshness: raw.freshness, enrolledAt: raw.enrolledAt || null,
     notAfter: raw.credentialNotAfter || null, counts: { ...u.emptyCounts(), ...(raw.targets || {}) }, currentRevision: raw.currentRevision || null,
+    disk: model.diskVolume(raw.disk),
   });
   /* GET nodes/{node} -> view model with Targets and credential. */
   model.fromDetail = raw => {
@@ -22,8 +23,36 @@
       lastContactAt: raw.lastContactAt || null, freshness: raw.freshness, enrolledAt: raw.enrolledAt || null,
       notAfter: raw.credential?.notAfter || null, credential: raw.credential || null, targets,
       counts: { ...u.emptyCounts(), ...(raw.summary || {}) }, currentRevision: newest?.sourceRevision || null, currentAcceptedAt: newest?.acceptedAt || null,
+      disk: model.diskDetail(raw.disk),
     };
   };
+  /* ---------------------------------------------------------------- Disk (operator-api.md, "Disk usage") */
+  const byteCount = v => { const x = Number(v); return Number.isFinite(x) && x >= 0 ? x : 0; };
+  const round1 = x => Math.round(x * 10) / 10;
+  /* One volume: { label, usedPercent, usedBytes, availableBytes, totalBytes, measuredAt? }. usedPercent is recomputed when the Server omits it. */
+  model.diskVolume = raw => {
+    if (!raw || typeof raw !== 'object') return null;
+    const used = byteCount(raw.usedBytes), avail = byteCount(raw.availableBytes), total = byteCount(raw.totalBytes);
+    const given = Number(raw.usedPercent);
+    const pct = Number.isFinite(given) ? given : used + avail > 0 ? round1(used / (used + avail) * 100) : 0;
+    return { label: String(raw.label ?? 'home'), usedPercent: Math.max(0, pct), usedBytes: used, availableBytes: avail, totalBytes: total, measuredAt: raw.measuredAt || null };
+  };
+  const VOLUME_ORDER = { home: 0, state: 1 };
+  /* GET nodes/{node}.disk: { measuredAt, refreshRequestedAt, volumes }. A pending refresh on a Node that never reported has no volumes. */
+  model.diskDetail = raw => {
+    if (!raw || typeof raw !== 'object') return null;
+    const volumes = (Array.isArray(raw.volumes) ? raw.volumes : []).map(model.diskVolume).filter(Boolean)
+      .sort((a, b) => (VOLUME_ORDER[a.label] ?? 9) - (VOLUME_ORDER[b.label] ?? 9) || a.label.localeCompare(b.label));
+    return { measuredAt: raw.measuredAt || null, refreshRequestedAt: raw.refreshRequestedAt || null, volumes };
+  };
+  /* Thresholds from the Server's issues: warning from 85% used, error from 95%. Colour always comes with an icon and a word. */
+  model.DISK_WARN = 85; model.DISK_CRIT = 95;
+  model.diskLevel = pct => pct >= model.DISK_CRIT ? { key: 'critical', level: 'critical', kind: 'x', label: 'Nearly full' }
+    : pct >= model.DISK_WARN ? { key: 'warning', level: 'warning', kind: 'bang', label: 'Filling up' }
+      : { key: 'good', level: 'good', kind: 'check', label: 'Enough space' };
+  /* The state of a machine's disk for grouping and sorting; null when it never reported or is revoked. */
+  model.diskOf = n => n.disk && !n.revoked ? model.diskLevel(n.disk.usedPercent) : null;
+  model.diskHot = n => { const d = model.diskOf(n); return !!d && d.key !== 'good'; };
   model.total = n => u.countTotal(n.counts);
 
   /* ---------------------------------------------------------------- Health */

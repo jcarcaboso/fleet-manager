@@ -70,7 +70,7 @@ public static class FleetServerHosting
                 context.Connection.RemoteIpAddress?.ToString() ?? "unknown",
                 _ => new FixedWindowRateLimiterOptions { PermitLimit = 20, Window = TimeSpan.FromMinutes(1), QueueLimit = 0 }));
         });
-        builder.Services.AddSingleton(AttemptDetailRateLimit.Create());
+        builder.Services.AddSingleton(NodeRequestRateLimit.Create());
         builder.Services.AddOpenApi("agent", options => options.ShouldInclude = description => description.GroupName == "agent");
         builder.Services.AddOpenApi("operator", options => options.ShouldInclude = description => description.GroupName == "operator");
     }

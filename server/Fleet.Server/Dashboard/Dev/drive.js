@@ -583,6 +583,29 @@
       const revoked = F.nodes.find(n => n.revokedAt), live = F.nodes.filter(n => !n.revokedAt);
       const [a, b] = live;
       const guidNone = '00000000-0000-4000-8000-000000000000';
+      /* disk usage: nothing is revoked or removed yet, so the machines named here exist. */
+      const nuc = F.nodes.find(n => n.alias === 'homelab-nuc'), fresh = F.nodes.find(n => n.alias === 'build-runner-02'), olda = F.nodes.find(n => n.alias === 'kitchen-mini');
+      const detailOf = async n => (await get('nodes/' + n.id)).body, listOf = async n => (await get('nodes')).body.items.find(i => i.nodeId === n.id);
+      const dn = (await detailOf(nuc)).disk, ln = (await listOf(nuc)).disk;
+      expect(dn.volumes.length === 2 && dn.volumes.every(v => Math.abs(v.usedPercent - Math.round(v.usedBytes / (v.usedBytes + v.availableBytes) * 1000) / 10) < 0.05 && v.usedBytes + v.availableBytes <= v.totalBytes), 'GET nodes/{node}: usedPercent is used / (used + available) and used + available fit the total');
+      expect(ln.label === 'home' && ln.usedPercent === Math.max(...dn.volumes.map(v => v.usedPercent)) && Object.keys(ln).sort().join() === 'availableBytes,label,measuredAt,totalBytes,usedBytes,usedPercent', 'GET nodes: the fullest volume with exactly the six contract fields');
+      expect((await detailOf(fresh)).disk === null && (await listOf(fresh)).disk === null, 'a machine that never reported has disk: null');
+      expect(Object.keys(dn).sort().join() === 'measuredAt,refreshRequestedAt,volumes' && dn.refreshRequestedAt === null, 'disk has measuredAt, refreshRequestedAt (null unless pending) and volumes');
+      is(await post('nodes/nobody-here/disk-usage/refresh'), 404, 'node_not_found', 'refreshing an unknown machine');
+      const r1 = await post('nodes/' + olda.id + '/disk-usage/refresh');
+      is(r1, 202, null, 'refreshing a machine'); expect(Object.keys(r1.body).join() === 'refreshRequestedAt' && !isNaN(Date.parse(r1.body.refreshRequestedAt)), 'the 202 body is { refreshRequestedAt }');
+      const r2 = await post('nodes/' + olda.id + '/disk-usage/refresh');
+      expect(r2.body.refreshRequestedAt === r1.body.refreshRequestedAt, 'a repeated request keeps the original time until the Agent answers');
+      is(await post('nodes/' + revoked.id + '/disk-usage/refresh'), 409, 'node_revoked', 'refreshing a revoked machine');
+      const diskAudit = () => F.audit.filter(e => e.action === 'node.disk_refresh_requested' && e.nodeId === olda.id);
+      expect(diskAudit().length === 1 && diskAudit()[0].actor === F.state.actor, 'a new refresh request is audited once as node.disk_refresh_requested with the Node ID and the actor; the repeat and the refused requests add nothing (' + diskAudit().length + ')');
+      expect(F.audit.filter(e => e.action === 'node.disk_refresh_requested').length === 1, 'no audit event for the unknown or revoked machine');
+      expect((await get('audit?node=' + olda.id + '&order=newest')).body.items.some(e => e.action === 'node.disk_refresh_requested' && e.nodeId === olda.id), 'GET audit lists it for the machine');
+      const pending = (await detailOf(olda)).disk;
+      expect(pending && pending.measuredAt === null && pending.refreshRequestedAt === r1.body.refreshRequestedAt && pending.volumes.length === 0, 'a pending refresh on a machine that never reported: disk with no volumes and the request time');
+      const issuesNow = (await get('issues')).body.items.filter(i => /^disk_space_/.test(i.code));
+      expect(issuesNow.length === 3 && issuesNow.find(i => i.nodeName === 'homelab-nuc')?.code === 'disk_space_critical' && issuesNow.find(i => i.nodeName === 'homelab-nuc').severity === 'error' && issuesNow.filter(i => i.code === 'disk_space_low').every(i => i.severity === 'warning'), 'issues: one per machine, critical from 95% as error, low from 85% as warning');
+      expect(issuesNow.every(i => i.since === F.nodes.find(n => n.id === i.nodeId)._disk.measuredAt && i.commands.length === 2 && i.commands[1].endsWith(' --refresh')), 'issue since is measuredAt and commands are `fleet nodes disk <alias>` and `... --refresh`');
       /* rename */
       is(await post('nodes/rename', { currentAlias: revoked.alias, alias: 'whatever' }), 409, 'node_revoked', 'renaming a revoked machine');
       const auditBefore = F.audit.length;
@@ -751,6 +774,248 @@
         expect(hasText(), label + ': hostile text is visible as text');
         expect(bad() === 0, label + ': no injected element (' + bad() + ')');
       }
+      await wait(300);
+      expect(alerts === 0, 'alert was never called');
+    },
+
+    /* ---- Node disk usage (operator-api.md, "Disk usage"). Fixture: homelab-nuc 96.4% (critical, plus a state volume), fedora-ws 88.7% and gpu-box 85.0% (warning),
+       design-imac 83.9% (fine), build-runner-02 and lab-vm-07 never reported, kitchen-mini is an Agent before 0.9.0 (never reports, never answers a refresh). */
+    /* Gallery cards. Open: ?drive=diskGallery#/nodes */
+    async diskGallery() {
+      await until(() => $('.card'), 'cards');
+      const cardOf = alias => [...document.querySelectorAll('.card')].find(c => c.querySelector('h3')?.textContent === alias);
+      const meterOf = alias => cardOf(alias)?.querySelector('.diskm');
+      const nuc = meterOf('homelab-nuc'), fed = meterOf('fedora-ws'), mbp = meterOf('mbp-joan');
+      expect(nuc?.classList.contains('diskm--critical') && /96\.4% used/.test(nuc.textContent) && /Nearly full/.test(nuc.textContent), 'homelab-nuc: critical meter with "96.4% used" and the word "Nearly full"');
+      expect(nuc?.querySelector('.diskm-state svg.g') && nuc.querySelector('.meter.m-critical > span')?.style.width === '96.4%', 'critical: an icon next to the label, and a bar 96.4% wide in the critical colour');
+      expect(/GiB free of .*GiB/.test(nuc?.textContent || '') && /33\.3 GiB free of 954\.0 GiB/.test(nuc.textContent), 'the card says "33.3 GiB free of 954.0 GiB" (binary units, one decimal) (' + nuc?.querySelector('.diskm-sub')?.textContent + ')');
+      expect(fed?.classList.contains('diskm--warning') && /Filling up/.test(fed.textContent) && fed.querySelector('.meter.m-warning'), 'fedora-ws (88.7%): warning state, label and colour');
+      expect(mbp?.classList.contains('diskm--good') && /Enough space/.test(mbp.textContent) && mbp.querySelector('.meter.m-good'), 'mbp-joan (62.4%): good state');
+      expect(meterOf('gpu-box')?.classList.contains('diskm--warning'), 'exactly 85.0% is a warning');
+      expect(meterOf('design-imac')?.classList.contains('diskm--good'), '83.9% is still fine');
+      expect(meterOf('build-runner-02')?.textContent.includes('No disk data') && !meterOf('build-runner-02').querySelector('.meter'), 'a machine that never reported says "No disk data" and has no bar');
+      expect(meterOf('kitchen-mini')?.textContent.includes('No disk data'), 'an Agent before 0.9.0 says "No disk data"');
+      expect(!cardOf('old-laptop')?.querySelector('.diskm'), 'a revoked machine has no disk meter');
+      expect([...document.querySelectorAll('.diskm')].every(m => m.querySelector('svg.g')), 'every meter has an icon, so colour is never the only signal');
+      const section = id => document.getElementById(id);
+      const inAttention = alias => section('sec-attention')?.contains(cardOf(alias));
+      expect(inAttention('homelab-nuc') && inAttention('fedora-ws') && inAttention('gpu-box'), 'machines with a disk at 85% or more are in "Needs attention", even though their Targets are in sync');
+      expect(!section('sec-ok')?.contains(cardOf('homelab-nuc')) && !inAttention('mbp-joan'), 'and a healthy disk does not move a machine there');
+      expect(/3 have a disk that is 85% full or more/.test($('.health-sub')?.textContent || ''), 'the banner counts the full disks (' + $('.health-sub')?.textContent.trim().slice(0, 140) + ')');
+      const order = [...section('sec-attention').querySelectorAll('.card h3')].map(h => h.textContent);
+      expect(order.indexOf('homelab-nuc') < order.indexOf('build-runner-03') && order.indexOf('build-runner-03') < order.indexOf('gpu-box'), 'a critical disk ranks with the failures, a disk warning below the offline machines (' + order.join(', ') + ')');
+      const sel = $('#sort'); expect([...sel.options].some(o => o.value === 'disk' && o.textContent === 'Fullest disk first'), 'the sort has "Fullest disk first"');
+      type(sel, 'disk'); await wait(100);
+      const att = [...section('sec-attention').querySelectorAll('.card')].map(c => ({ n: c.querySelector('h3').textContent, p: parseFloat(c.querySelector('.diskm-k b')?.textContent) }));
+      expect(att[0].n === 'homelab-nuc' && att.filter(x => !isNaN(x.p)).every((x, i, a) => !i || a[i - 1].p >= x.p), 'sorted by the fullest disk first (' + att.map(x => x.n + ':' + x.p).join(', ') + ')');
+      expect(isNaN(att[att.length - 1].p), 'machines without data come last');
+    },
+    /* Node page, Overview. Open: ?drive=diskNode#/nodes/homelab-nuc */
+    async diskNode() {
+      await until(() => $('#disk-panel .dvol'), 'disk panel');
+      const rows = [...document.querySelectorAll('#disk-panel .dvol')];
+      expect(rows.length === 2 && rows[0].dataset.volume === 'home' && rows[1].dataset.volume === 'state', 'two volumes, home first then state');
+      const home = rows[0], state = rows[1];
+      expect(home.classList.contains('dvol--critical') && /96\.4%/.test(home.textContent) && /Nearly full/.test(home.textContent) && home.querySelector('.dvol-state svg.g'), 'home is critical: percent, word and icon');
+      expect(home.querySelector('.meter.m-critical > span')?.style.width === '96.4%', 'the bar is 96.4% wide');
+      const nums = Object.fromEntries([...home.querySelectorAll('.dvol-nums > div')].map(d => [d.querySelector('dt').textContent, d.querySelector('dd').textContent]));
+      expect(nums.Total === '954.0 GiB' && /^\d+\.\d GiB$/.test(nums.Used) && nums.Available === '33.3 GiB', 'used, available and total are in GiB with one decimal (' + JSON.stringify(nums) + ')');
+      expect(state.classList.contains('dvol--good') && /41\.3%/.test(state.textContent) && /476\.0 GiB/.test(state.textContent), 'the state volume is fine');
+      expect(/Measured .* ago/.test($('#disk-panel .disk-measured')?.textContent || ''), 'measuredAt is shown as relative time (' + $('#disk-panel .disk-measured')?.textContent + ')');
+      const btn = $('#disk-panel [data-act=disk-refresh]');
+      expect(btn && !btn.disabled && btn.textContent.trim() === 'Refresh', 'a Refresh button for operators');
+      expect([...document.querySelectorAll('.hchecks b')].some(b => b.textContent === 'Disk is nearly full'), 'Health checks mention the disk');
+      expect($('.nhero-actions .btn-primary')?.textContent.includes('Fix 1 problem'), 'the disk issue counts as a problem to fix');
+      const f = window.__FIXTURE;
+      expect(f.calls.some(c => c.method === 'GET' && /^nodes\/[^/]+$/.test(c.path)), 'disk comes from GET nodes/{node}');
+    },
+    /* Refresh answered. Open: ?drive=diskRefreshAnswered#/nodes/build-runner-02 */
+    async diskRefreshAnswered() {
+      const F = window.__FIXTURE, node = F.nodes.find(n => n.alias === 'build-runner-02');
+      await until(() => $('#disk-panel'), 'disk panel');
+      expect(/No disk data yet/.test($('#disk-body').textContent) && !$('.dvol'), 'a machine that never reported shows an explanation, no volumes');
+      click($('[data-act=disk-refresh]'));
+      await until(() => /Refresh requested/.test($('#disk-status').textContent), 'status after the click', 2000);
+      expect($('#disk-status').textContent.trim() === 'Refresh requested — the Agent answers on its next check-in.', 'status: "Refresh requested — the Agent answers on its next check-in." (' + $('#disk-status').textContent.trim() + ')');
+      expect($('#disk-status').getAttribute('role') === 'status' && $('[data-act=disk-refresh]').disabled, 'the status is a live region and the button is disabled while waiting');
+      const post = F.calls.find(c => c.method === 'POST' && c.path === `nodes/${node.id}/disk-usage/refresh`);
+      expect(post, 'POST nodes/{id}/disk-usage/refresh was sent');
+      const t0 = post.at;
+      await until(() => $('#disk-panel .dvol'), 'the Agent answered', 40000);
+      expect(/Disk usage updated/.test($('#disk-status').textContent) && $('#disk-panel .dvol'), 'the volume appears and the status says it was updated (' + $('#disk-status').textContent.trim() + ')');
+      expect(!$('[data-act=disk-refresh]').disabled, 'the button is enabled again');
+      const polls = F.calls.filter(c => c.method === 'GET' && c.path === `nodes/${node.id}` && c.at > t0).sort((a, b) => a.at - b.at);
+      const gaps = polls.slice(0, 3).map((c, i, a) => i ? c.at - a[i - 1].at : c.at - t0);
+      expect(polls.length >= 2 && gaps.slice(0, 2).every(g => g >= 4500 && g <= 7500), 'GET nodes/{node} every 5 s while waiting (gaps ' + gaps.join(', ') + ' ms)');
+      const settled = F.calls.filter(c => c.method === 'GET' && c.path === `nodes/${node.id}`).length;
+      await wait(30000);
+      expect(F.calls.filter(c => c.method === 'GET' && c.path === `nodes/${node.id}`).length === settled, 'polling stops once the Agent answered');
+      expect(!document.querySelector('.disk-status--warning, .disk-status--critical'), 'no error shown');
+    },
+    /* Refresh never answered (Agent before 0.9.0). Open: ?drive=diskRefreshUnanswered#/nodes/kitchen-mini with --virtual-time-budget=400000 */
+    async diskRefreshUnanswered() {
+      const F = window.__FIXTURE, node = F.nodes.find(n => n.alias === 'kitchen-mini');
+      await until(() => $('#disk-panel'), 'disk panel');
+      click($('[data-act=disk-refresh]'));
+      await until(() => /Refresh requested/.test($('#disk-status').textContent), 'waiting status', 2000);
+      const t0 = Date.now();
+      await wait(60000);
+      expect(/Refresh requested/.test($('#disk-status').textContent) && $('[data-act=disk-refresh]').disabled, 'after a minute it is still waiting');
+      await until(() => /No answer yet/.test($('#disk-status').textContent), 'the time-out message', 140000);
+      const waited = Date.now() - t0;
+      expect($('#disk-status').textContent.trim() === 'No answer yet. Agents before 0.9.0 do not report disk usage.', 'status: "No answer yet. Agents before 0.9.0 do not report disk usage." (' + $('#disk-status').textContent.trim() + ')');
+      expect(waited >= 140000 && waited <= 160000, 'it stops waiting after about 2.5 minutes (' + Math.round(waited / 1000) + ' s after the first minute started)');
+      expect(!$('[data-act=disk-refresh]').disabled, 'the button is enabled again, so the user can try once more');
+      const polls = F.calls.filter(c => c.method === 'GET' && c.path === `nodes/${node.id}` && c.at > t0 - 61000).length;
+      expect(polls >= 25 && polls <= 32, 'the number of polls is bounded (' + polls + ')');
+      await wait(30000);
+      expect(F.calls.filter(c => c.method === 'GET' && c.path === `nodes/${node.id}` && c.at > t0 - 61000).length === polls, 'no polling after the time-out');
+    },
+    /* Leaving the machine stops the polling. Open: ?drive=diskNavAway#/nodes/kitchen-mini */
+    async diskNavAway() {
+      const F = window.__FIXTURE, node = F.nodes.find(n => n.alias === 'kitchen-mini');
+      const reads = () => F.calls.filter(c => c.method === 'GET' && c.path === `nodes/${node.id}`).length;
+      await until(() => $('#disk-panel'), 'disk panel');
+      click($('[data-act=disk-refresh]'));
+      await until(() => /Refresh requested/.test($('#disk-status').textContent), 'waiting status', 2000);
+      await wait(12000);
+      const during = reads(); expect(during >= 2, 'it polls every 5 s while the user stays (' + during + ')');
+      location.hash = '#/nodes/studio-mini';
+      await until(() => $('.nhero h1')?.textContent === 'studio-mini', 'another machine', 4000);
+      const atLeave = reads();
+      await wait(20000);
+      expect(reads() <= atLeave + 1, 'no further reads of the first machine after navigating to another one (' + (reads() - atLeave) + ' extra)');
+      expect(!/Refresh requested/.test($('#disk-status')?.textContent || '') && $('[data-act=disk-refresh]') && !$('[data-act=disk-refresh]').disabled, 'the other machine does not inherit the waiting state');
+      location.hash = '#/nodes/kitchen-mini'; await until(() => $('.nhero h1')?.textContent === 'kitchen-mini', 'back to the first machine', 4000);
+      const back = reads(); await wait(12000);
+      expect(!$('[data-act=disk-refresh]').disabled && reads() === back, 'coming back does not resume the polling (the Server still lists the pending request)');
+      expect(/A refresh was requested .* ago/.test($('#disk-status').textContent), 'the pending request from the Server is mentioned (' + $('#disk-status').textContent.trim() + ')');
+    },
+    /* A read that never answers cannot hold Refresh forever. Open: ?drive=diskRefreshHang#/nodes/kitchen-mini with --virtual-time-budget=400000
+       The scenario switches the fixture's hang= on for this machine's detail once the refresh is waiting, so the page itself loaded normally. */
+    async diskRefreshHang() {
+      const F = window.__FIXTURE, node = F.nodes.find(n => n.alias === 'kitchen-mini');
+      const reads = () => F.calls.filter(c => c.method === 'GET' && c.path === `nodes/${node.id}`);
+      await until(() => $('#disk-panel'), 'disk panel');
+      const base = reads().length;
+      click($('[data-act=disk-refresh]'));
+      await until(() => /Refresh requested/.test($('#disk-status').textContent), 'waiting status', 2000);
+      const t0 = Date.now();
+      F.cfg.hang = `nodes/${node.id}`;
+      const hung = await until(() => reads().length > base && reads()[reads().length - 1], 'the first poll', 8000);
+      expect(hung && !hung.settled && !hung.aborted, 'the poll is in flight and does not answer');
+      await wait(60000);
+      expect(/Refresh requested/.test($('#disk-status').textContent) && $('[data-act=disk-refresh]').disabled, 'after a minute it is still waiting');
+      expect(reads().length === base + 1 && !hung.settled, 'only the one read is out (a new poll does not start before the last one ended)');
+      await until(() => /No answer yet/.test($('#disk-status').textContent), 'the deadline ends the wait without the read answering', 120000);
+      const waited = Date.now() - t0;
+      expect(waited >= 150000 && waited <= 154000, 'the deadline is 2.5 minutes after the request was accepted (' + Math.round(waited / 1000) + ' s)');
+      expect($('#disk-status').textContent.trim() === 'No answer yet. Agents before 0.9.0 do not report disk usage.', 'status: the no-answer text (' + $('#disk-status').textContent.trim() + ')');
+      expect(hung.aborted && hung.settled, 'the read that hung was aborted');
+      expect(!$('[data-act=disk-refresh]').disabled && !$('[data-act=disk-refresh]').hasAttribute('aria-busy'), 'Refresh is enabled again');
+      expect(!document.querySelector('.toast') && !document.querySelector('.disk-status--critical'), 'the abort is not shown as an error');
+      const count = F.calls.length;
+      await wait(30000);
+      expect(F.calls.length === count, 'no request after the deadline');
+      /* Refresh works again once the Server answers. */
+      F.cfg.hang = null;
+      click($('[data-act=disk-refresh]'));
+      await until(() => /Refresh requested/.test($('#disk-status').textContent), 'a new refresh waits again', 2000);
+      expect($('[data-act=disk-refresh]').disabled, 'and the button is busy again');
+    },
+    /* Leaving the machine aborts a read that is in flight. Open: ?drive=diskNavHang#/nodes/kitchen-mini with --virtual-time-budget=200000 */
+    async diskNavHang() {
+      const F = window.__FIXTURE, node = F.nodes.find(n => n.alias === 'kitchen-mini');
+      const reads = () => F.calls.filter(c => c.method === 'GET' && c.path === `nodes/${node.id}`);
+      await until(() => $('#disk-panel'), 'disk panel');
+      const base = reads().length;
+      click($('[data-act=disk-refresh]'));
+      await until(() => /Refresh requested/.test($('#disk-status').textContent), 'waiting status', 2000);
+      F.cfg.hang = `nodes/${node.id}`;
+      const hung = await until(() => reads().length > base && reads()[reads().length - 1], 'the first poll', 8000);
+      expect(hung && !hung.settled && !hung.aborted, 'the poll is in flight and does not answer');
+      location.hash = '#/nodes/studio-mini';
+      await until(() => $('.nhero h1')?.textContent === 'studio-mini', 'another machine', 4000);
+      expect(hung.aborted && hung.settled, 'navigating away aborted the read');
+      const atLeave = reads().length;
+      await wait(30000);
+      expect(reads().length === atLeave, 'no further reads of the first machine');
+      expect(!document.querySelector('.toast') && !document.querySelector('.disk-status--critical') && !document.querySelector('.disk-status--warning'), 'the abort is not shown as an error, and the other machine has no refresh state');
+      expect($('[data-act=disk-refresh]') && !$('[data-act=disk-refresh]').disabled, 'the other machine can refresh');
+      /* Coming back (the Server still lists the request) does not resume anything, and the page is not stuck. */
+      F.cfg.hang = null;
+      location.hash = '#/nodes/kitchen-mini'; await until(() => $('.nhero h1')?.textContent === 'kitchen-mini', 'back to the first machine', 4000);
+      const back = reads().length; await wait(12000);
+      expect(reads().length === back && !$('[data-act=disk-refresh]').disabled, 'coming back does not resume the polling');
+    },
+    /* A read token cannot refresh. Open: ?drive=diskReadScope&scope=read#/nodes/homelab-nuc */
+    async diskReadScope() {
+      const F = window.__FIXTURE;
+      await until(() => $('#disk-panel .dvol'), 'disk panel');
+      const btn = $('#disk-panel [data-act=locked]');
+      expect(btn && btn.getAttribute('aria-disabled') === 'true' && /operate scope/.test(btn.dataset.tip || ''), 'Refresh is locked, aria-disabled, with a tooltip that names the scope (' + btn?.dataset.tip + ')');
+      expect(!$('#disk-panel [data-act=disk-refresh]'), 'there is no live Refresh button');
+      expect(/operate scope/.test($('#disk-panel .lock-note')?.textContent || ''), 'a visible note explains why');
+      expect($('#disk-panel .dvol'), 'the data is still shown');
+      click(btn); await wait(100);
+      expect(/Needs the operate scope/.test($('#toasts').textContent), 'clicking explains');
+      expect(!F.calls.some(c => c.method === 'POST' && /disk-usage/.test(c.path)), 'no request was sent');
+    },
+    /* 403 and 409 answers. Open: ?drive=diskRefreshForbidden&forbid=1#/nodes/studio-mini */
+    async diskRefreshForbidden() {
+      await until(() => $('#disk-panel [data-act=disk-refresh]'), 'refresh button');
+      click($('[data-act=disk-refresh]'));
+      await until(() => $('.disk-status--warning'), 'the 403 message', 2000);
+      expect(/scope does not allow/.test($('#disk-status').textContent) && !$('[data-act=disk-refresh]').disabled, '403 insufficient_scope is explained inline and the button is usable again (' + $('#disk-status').textContent.trim() + ')');
+      await wait(15000);
+      expect(window.__FIXTURE.calls.filter(c => c.method === 'GET' && /^nodes\/[^/]+$/.test(c.path)).length === 1, 'no polling after a refused request');
+    },
+    /* Open: ?drive=diskRefreshRevoked#/nodes/studio-mini */
+    async diskRefreshRevoked() {
+      const F = window.__FIXTURE, node = F.nodes.find(n => n.alias === 'studio-mini');
+      await until(() => $('#disk-panel [data-act=disk-refresh]'), 'refresh button');
+      const r = await fetch(`/dashboard/api/nodes/${node.id}/revoke`, { method: 'POST', headers: { 'X-Fleet-CSRF': F.state.csrf, 'Content-Type': 'application/json' }, body: '{}' });
+      expect(r.status === 200, 'another operator revokes the machine meanwhile');
+      click($('[data-act=disk-refresh]'));
+      await until(() => $('.disk-status--critical'), 'the 409 message', 2000);
+      expect(/revoked/.test($('#disk-status').textContent) && !$('[data-act=disk-refresh]').disabled, '409 node_revoked is explained inline (' + $('#disk-status').textContent.trim() + ')');
+      await wait(15000);
+      expect(F.calls.filter(c => c.method === 'GET' && /^nodes\/[^/]+$/.test(c.path)).length === 1, 'no polling after a refused request');
+    },
+    /* Disk issues on Problems and on the machine. Open: ?drive=diskProblems#/problems */
+    async diskProblems() {
+      await until(() => $('.prow'), 'problem rows');
+      document.querySelectorAll('.prow').forEach(d => { d.open = true; });
+      await wait(100);
+      const rows = [...document.querySelectorAll('.prow')];
+      const crit = rows.find(r => /homelab-nuc: disk is 96\.4% full/.test(r.textContent)), low = rows.find(r => /fedora-ws: disk is 88\.7% full/.test(r.textContent));
+      expect(crit && low, 'one issue per machine with a full disk');
+      expect(crit.classList.contains('prow--critical') && /Error/.test(crit.querySelector('summary').textContent) && low.classList.contains('prow--warning') && /Warning/.test(low.querySelector('summary').textContent), '96.4% is an error, 88.7% a warning');
+      expect(/95% full or more/.test(crit.querySelector('.prob-expl').textContent) && /85% full or more/.test(low.querySelector('.prob-expl').textContent), 'each shows the catalog explanation');
+      expect(crit.querySelectorAll('.fix li').length >= 3 && /Fleet never deletes files/.test(crit.querySelector('.fix').textContent), 'and the catalog fix steps');
+      const cmds = [...crit.querySelectorAll('.cmd code')].map(c => c.textContent);
+      expect(cmds.includes('fleet nodes disk homelab-nuc') && cmds.includes('fleet nodes disk homelab-nuc --refresh'), 'with the CLI commands (' + cmds.join(' | ') + ')');
+      expect(crit.querySelector('a.btn')?.getAttribute('href') === '#/nodes/homelab-nuc/problems', 'linking to the machine');
+      expect(![...rows].filter(r => /disk is/.test(r.textContent)).some(r => r.querySelector('[data-act=issue-retry]')), 'a disk issue has no Retry button');
+      location.hash = '#/nodes/homelab-nuc/problems'; await until(() => $('.nhero .tabs, .tabs') && $('.nhero h1') && $('.prob'), 'machine problems');
+      const card = [...document.querySelectorAll('.prob')].find(p => /Disk|disk/.test(p.querySelector('h3').textContent));
+      expect(card && /95% full or more/.test(card.querySelector('.prob-expl').textContent) && [...card.querySelectorAll('.cmd code')].some(c => c.textContent === 'fleet nodes disk homelab-nuc --refresh'), 'the machine\'s Problems tab shows the same explanation and commands');
+    },
+    /* Hostile volume label. Open: ?drive=diskXss&xss=1#/nodes */
+    async diskXss() {
+      let alerts = 0; window.alert = () => { alerts++; };
+      const bad = () => document.querySelectorAll('#root img, #root script, #root [onerror], #root [onclick], #root [onload]').length;
+      const hostile = () => document.body.textContent.includes('<img src=x onerror=alert(1)>');
+      await until(() => $('.diskm'), 'gallery meters');
+      expect(hostile() && bad() === 0, 'gallery: the label shows as text, no injected element (' + bad() + ')');
+      location.hash = '#/nodes/homelab-nuc'; await until(() => $('#disk-panel .dvol'), 'node page');
+      expect(hostile() && bad() === 0, 'machine Overview: the label shows as text (' + bad() + ')');
+      expect([...document.querySelectorAll('#disk-panel .dvol-name b')].some(b => b.textContent.includes('<img src=x onerror=alert(1)>')), 'in the volume title');
+      location.hash = '#/problems'; await until(() => $('.prow'), 'problems');
+      document.querySelectorAll('.prow').forEach(d => { d.open = true; }); await wait(100);
+      expect(hostile() && bad() === 0, 'Problems: the label in the issue text shows as text (' + bad() + ')');
+      location.hash = '#/nodes/homelab-nuc/problems'; await until(() => $('.prob'), 'machine problems'); await wait(100);
+      expect(bad() === 0, 'machine Problems tab: no injected element (' + bad() + ')');
       await wait(300);
       expect(alerts === 0, 'alert was never called');
     },

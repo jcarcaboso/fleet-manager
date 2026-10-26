@@ -729,3 +729,109 @@ fn legacy_after_is_rejected_for_other_node_commands() {
     assert_eq!(run.code, 2);
     assert!(server.requests().is_empty());
 }
+
+fn disk_json() -> Value {
+    json!({
+        "measuredAt": "2026-10-26T09:48:00Z", "refreshRequestedAt": null,
+        "volumes": [{
+            "label": "home", "totalBytes": 994_662_584_320_u64, "usedBytes": 871_203_905_536_u64,
+            "availableBytes": 72_818_462_720_u64, "usedPercent": 92.3
+        }]
+    })
+}
+
+#[test]
+fn nodes_disk_reads_the_node_and_prints_only_its_alias_and_disk() {
+    let with_disk = mock(|line| {
+        assert!(
+            line.starts_with("GET /operator/v1/nodes/studio%20mini%2F1 "),
+            "{line}"
+        );
+        let mut node: Value = serde_json::from_str(&node_json()).unwrap();
+        node["disk"] = disk_json();
+        (200, node.to_string())
+    });
+    let run = fleet_at(&with_disk.url, &["nodes", "disk", "studio mini/1"]);
+    assert_eq!(run.code, 0, "{}", run.stderr);
+    assert_eq!(
+        run.out(),
+        json!({"node": "studio mini/1", "disk": disk_json()})
+    );
+    assert_eq!(with_disk.requests().len(), 1);
+
+    // A node that never reported (or an Agent before 0.9.0) has no disk: null, not an error.
+    for body in [
+        node_json(),
+        json!({"nodeId": NODE_ID, "name": "old", "disk": null}).to_string(),
+    ] {
+        let name = serde_json::from_str::<Value>(&body).unwrap()["name"].clone();
+        let server = mock(move |_| (200, body.clone()));
+        let run = fleet_at(&server.url, &["nodes", "disk", "x"]);
+        assert_eq!(run.code, 0, "{}", run.stderr);
+        assert_eq!(run.out(), json!({"node": name, "disk": null}));
+    }
+}
+
+#[test]
+fn nodes_disk_refresh_posts_the_request_and_prints_the_202_reply() {
+    let server = mock(|line| {
+        if line.starts_with("POST /operator/v1/nodes/studio%20mini%2F1/disk-usage/refresh ") {
+            (
+                202,
+                json!({"refreshRequestedAt": "2026-10-26T10:00:00Z"}).to_string(),
+            )
+        } else {
+            (500, String::new())
+        }
+    });
+    let run = fleet_at(
+        &server.url,
+        &["nodes", "disk", "studio mini/1", "--refresh"],
+    );
+    assert_eq!(run.code, 0, "{}", run.stderr);
+    assert_eq!(
+        run.out(),
+        json!({"refreshRequestedAt": "2026-10-26T10:00:00Z"})
+    );
+    // Exactly one request: the refresh is not preceded by a read, and nothing is polled.
+    assert_eq!(server.requests().len(), 1);
+}
+
+#[test]
+fn nodes_disk_refresh_reports_a_low_scope_and_a_revoked_node_with_their_exit_codes() {
+    let denied = mock(|_| {
+        (
+            403,
+            json!({"code": "insufficient_scope", "message": "Server wording"}).to_string(),
+        )
+    });
+    let run = fleet_at(&denied.url, &["nodes", "disk", "studio-mini", "--refresh"]);
+    assert_eq!(run.stdout, "");
+    assert_eq!(run.code, 3);
+    let error = run.err();
+    assert_eq!(error["error"]["code"], "insufficient_scope");
+    assert_eq!(
+        error["error"]["message"],
+        "operator token scope does not allow this command"
+    );
+    assert!(!run.stderr.contains("Server wording"));
+    // A revoked node and an unknown node are the Server's answers; the CLI maps them to their exit codes.
+    let revoked = mock(|_| {
+        (
+            409,
+            json!({"code": "node_revoked", "message": "x"}).to_string(),
+        )
+    });
+    let run = fleet_at(&revoked.url, &["nodes", "disk", "studio-mini", "--refresh"]);
+    assert_eq!(run.code, 5);
+    assert_eq!(run.err()["error"]["code"], "node_revoked");
+    let missing = mock(|_| {
+        (
+            404,
+            json!({"code": "node_not_found", "message": "x"}).to_string(),
+        )
+    });
+    let run = fleet_at(&missing.url, &["nodes", "disk", "nobody"]);
+    assert_eq!(run.code, 4);
+    assert_eq!(run.err()["error"]["code"], "node_not_found");
+}

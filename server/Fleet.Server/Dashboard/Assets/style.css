@@ -293,6 +293,42 @@ input[disabled]{background:var(--surface-2);color:var(--muted)}
 .m-warning{--mf:var(--warning);--mt:#fdeac0}
 .m-critical{--mf:var(--critical);--mt:#f5d2d2}
 .m-neutral{--mf:var(--neutral);--mt:#e9e5de}
+/* Disk usage: card meter, then the Disk panel on the machine page. The bar colour repeats a glyph and a word, never colour alone. */
+.meter--thin{height:5px;border-radius:3px}
+.diskm{display:flex;flex-direction:column;gap:6px;padding:10px 12px;border-radius:12px;background:var(--surface-2);box-shadow:inset 0 0 0 1px var(--line)}
+.diskm--warning{background:var(--warning-bg);box-shadow:inset 0 0 0 1px rgba(250,178,25,.45)}
+.diskm--critical{background:var(--critical-bg);box-shadow:inset 0 0 0 1px rgba(208,59,59,.35)}
+.diskm-top{display:flex;justify-content:space-between;align-items:center;gap:8px;font-size:12.5px;color:var(--muted);white-space:nowrap}
+.diskm-k{display:flex;gap:8px;align-items:baseline;min-width:0}
+.diskm-k b{color:var(--ink);font-weight:680;font-variant-numeric:tabular-nums}
+.diskm-state{display:inline-flex;align-items:center;gap:5px;font-weight:650;color:var(--ink-2)}
+.diskm-state .g{width:14px;height:14px}
+.diskm--warning .diskm-state{color:var(--warning-ink)}
+.diskm--critical .diskm-state{color:var(--critical-ink)}
+.diskm--none .diskm-state{font-weight:550;color:var(--muted)}
+.diskm-sub{font-size:12.5px;color:var(--ink-2);font-variant-numeric:tabular-nums;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.dvols{list-style:none;margin:0;padding:0;display:grid;grid-template-columns:repeat(auto-fit,minmax(300px,1fr));gap:14px}
+.dvol{display:flex;flex-direction:column;gap:10px;padding:14px 16px;border-radius:14px;background:var(--surface-2);box-shadow:inset 0 0 0 1px var(--line);min-width:0}
+.dvol--warning{background:var(--warning-bg);box-shadow:inset 0 0 0 1px rgba(250,178,25,.45)}
+.dvol--critical{background:var(--critical-bg);box-shadow:inset 0 0 0 1px rgba(208,59,59,.35)}
+.dvol-top{display:flex;justify-content:space-between;align-items:flex-start;gap:10px}
+.dvol-name{display:flex;flex-direction:column;min-width:0}
+.dvol-name b{font-weight:680;overflow-wrap:anywhere}
+.dvol-pct{font-size:24px;font-weight:720;letter-spacing:-.02em;line-height:1.1;font-variant-numeric:tabular-nums}
+.dvol-state{display:inline-flex;align-items:center;gap:5px;font-size:12.5px;font-weight:650;color:var(--ink-2);white-space:nowrap}
+.dvol-state .g{width:14px;height:14px}
+.dvol--warning .dvol-state{color:var(--warning-ink)}
+.dvol--critical .dvol-state{color:var(--critical-ink)}
+.dvol .meter{height:8px;border-radius:4px}
+.dvol-nums{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:8px;margin:0}
+.dvol-nums dt{font-size:12px;color:var(--muted);font-weight:600}
+.dvol-nums dd{margin:1px 0 0;font-size:14px;font-weight:650;font-variant-numeric:tabular-nums}
+.disk-measured{margin-top:12px;font-size:12.5px;color:var(--muted)}
+.disk-status{display:flex;align-items:flex-start;gap:8px;margin-top:12px;font-size:13.5px;font-weight:560;color:var(--ink-2)}
+.disk-status:empty{margin:0}
+.disk-status .g,.disk-status .ic{margin-top:2px}
+.disk-status--warning{color:var(--warning-ink)}
+.disk-status--critical{color:var(--critical-ink)}
 .chips{display:flex;flex-wrap:wrap;gap:6px}
 .retired{margin-top:8px;border-radius:var(--r-lg);background:rgba(29,27,24,.028);box-shadow:inset 0 0 0 1px var(--line)}
 .retired>summary{display:flex;align-items:center;gap:12px;padding:14px 18px;cursor:pointer;list-style:none;border-radius:var(--r-lg)}

@@ -57,6 +57,8 @@ public static partial class OperatorIssues
                 [$"fleet nodes show {alias}", $"fleet nodes checkins {alias}"]));
         }
 
+        issues.AddRange(await DiskIssuesAsync(db, nodes, ct));
+
         var failed = from assignment in db.Assignments.AsNoTracking()
                      join node in nodes on assignment.NodeId equals node.Id
                      where assignment.IsCurrent && assignment.State == (int)ConvergenceState.Failed
@@ -104,6 +106,54 @@ public static partial class OperatorIssues
                     "Run `fleet nodes list` to see the failed counts for every Node.", "nodes", null, null, null, null, null, ["fleet nodes list"])]);
         }
         return ordered;
+    }
+
+    /// <summary>Used-space percentage (of used + available, one decimal) from which a Node's fullest volume raises disk_space_low.</summary>
+    public const double DiskLowPercent = 85.0;
+
+    /// <summary>Used-space percentage from which a Node's fullest volume raises disk_space_critical instead.</summary>
+    public const double DiskCriticalPercent = 95.0;
+
+    private sealed record DiskRow(Guid NodeId, string NodeName, string Label, long TotalBytes, long UsedBytes, long AvailableBytes,
+        DateTimeOffset MeasuredAt);
+
+    // One issue per Node from its fullest volume, for Nodes that are not revoked. At most two rows per Node are read.
+    private static async Task<IEnumerable<OperatorIssue>> DiskIssuesAsync(FleetDbContext db, IQueryable<NodeRow> nodes, CancellationToken ct)
+    {
+        var rows = await (from disk in db.NodeDiskUsages.AsNoTracking()
+                          join node in nodes on disk.NodeId equals node.Id
+                          select new DiskRow(node.Id, node.Name, disk.Label, disk.TotalBytes, disk.UsedBytes, disk.AvailableBytes, disk.MeasuredAt))
+            .ToListAsync(ct);
+        var issues = new List<OperatorIssue>();
+        foreach (var group in rows.GroupBy(x => x.NodeId))
+        {
+            var fullest = group.Select(x => (Row: x, Percent: DiskUsageRules.UsedPercent(x.UsedBytes, x.AvailableBytes)))
+                .OrderByDescending(x => x.Percent).ThenBy(x => x.Row.Label, StringComparer.Ordinal).First();
+            if (fullest.Percent < DiskLowPercent) continue;
+            var (row, percent) = fullest;
+            var critical = percent >= DiskCriticalPercent;
+            var code = critical ? "disk_space_critical" : "disk_space_low";
+            var alias = Quote(row.NodeName);
+            issues.Add(new($"{code}:{row.NodeId:D}", code, critical ? "error" : "warning",
+                $"{row.NodeName}: {(critical ? "disk is almost full" : "disk is filling up")}",
+                string.Create(System.Globalization.CultureInfo.InvariantCulture,
+                    $"The {row.Label} volume is {percent:0.0}% used, with {FormatBytes(row.AvailableBytes)} available of {FormatBytes(row.TotalBytes)}. Measured at {row.MeasuredAt:u}."),
+                critical
+                    ? "Free space now: reconciliation and the Agent can fail on a full disk. Find large Git worktrees and build caches, run `git worktree prune`, and remove stale worktrees and build output."
+                    : "Find large Git worktrees and build caches, run `git worktree prune`, and remove stale worktrees, `target/` and `node_modules` directories and unused Docker images before the disk fills.",
+                "nodes", null, row.NodeId, row.NodeName, null, row.MeasuredAt,
+                [$"fleet nodes disk {alias}", $"fleet nodes disk {alias} --refresh"]));
+        }
+        return issues;
+    }
+
+    private static string FormatBytes(long bytes)
+    {
+        string[] units = ["B", "KB", "MB", "GB", "TB", "PB"];
+        var value = (double)bytes;
+        var unit = 0;
+        while (value >= 1000 && unit < units.Length - 1) { value /= 1000; unit++; }
+        return string.Create(System.Globalization.CultureInfo.InvariantCulture, $"{(unit == 0 ? value.ToString("0") : value.ToString("0.0"))} {units[unit]}");
     }
 
     /// <summary>Repository and CLIProxy issues. They do not depend on a Node.</summary>

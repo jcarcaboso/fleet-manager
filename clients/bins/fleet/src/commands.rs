@@ -27,7 +27,7 @@ Exit codes:
   scope that is too low)   4 not found   5 conflict (409)   6 other server or transport error
   10 `fleet doctor` found error-severity issues (its JSON is still printed on stdout)
 
-Token scopes: read (every list/show command), operate (retry, source rescan, models select and
+Token scopes: read (every list/show command), operate (retry, nodes disk --refresh, source rescan, models select and
 refresh), admin (enrollment, rename, revoke, remove). Destructive commands need --yes.
 Help does not require FLEET_SERVER_URL or FLEET_OPERATOR_TOKEN.";
 
@@ -146,7 +146,7 @@ impl NewestArgs {
 
 #[derive(Debug, Args)]
 #[command(
-    after_help = "Examples:\n  fleet nodes list\n  fleet nodes show studio-mini\n  fleet nodes attempts studio-mini --target skills\n  fleet nodes checkins studio-mini --hours 24\n  fleet nodes rename old-alias new-alias\n  fleet nodes revoke studio-mini --dry-run\n\n<node> is an exact, case-sensitive alias or a node UUID. Quote aliases that contain spaces."
+    after_help = "Examples:\n  fleet nodes list\n  fleet nodes show studio-mini\n  fleet nodes attempts studio-mini --target skills\n  fleet nodes checkins studio-mini --hours 24\n  fleet nodes disk studio-mini\n  fleet nodes rename old-alias new-alias\n  fleet nodes revoke studio-mini --dry-run\n\n<node> is an exact, case-sensitive alias or a node UUID. Quote aliases that contain spaces."
 )]
 pub(crate) struct NodesArgs {
     #[command(subcommand)]
@@ -194,6 +194,17 @@ enum NodesSubcommand {
         /// How many past hours to return, 1 to 168. The Server default is 168.
         #[arg(long, value_parser = clap::value_parser!(u16).range(1..=168))]
         hours: Option<u16>,
+    },
+    /// Show a node's disk usage: used, available and total bytes per volume, or null if it never reported.
+    #[command(
+        after_help = "Without --refresh this only reads. With --refresh it asks the Agent to measure again (needs scope operate); the Agent answers on its next poll.\nExamples:\n  fleet nodes disk studio-mini\n  fleet nodes disk studio-mini --refresh\n\nOutput: {\"node\": <alias>, \"disk\": {\"measuredAt\", \"refreshRequestedAt\", \"volumes\": [{\"label\", \"totalBytes\", \"usedBytes\", \"availableBytes\", \"usedPercent\"}]} or null}.\nWith --refresh it prints the 202 reply: {\"refreshRequestedAt\": <time>}. Run `fleet nodes disk <node>` again after the Agent's next poll and compare measuredAt with refreshRequestedAt.\nAgents before 0.9.0 never report disk usage and never answer a refresh."
+    )]
+    Disk {
+        /// Node alias (exact, case-sensitive) or node ID (UUID).
+        node: String,
+        /// Ask the Agent to measure now instead of reading the last measurement. Needs scope operate.
+        #[arg(long)]
+        refresh: bool,
     },
     /// Change a node's alias. Update the alias in the source `fleet.yml` afterwards.
     #[command(after_help = "Needs scope admin. Example:\n  fleet nodes rename old-alias new-alias")]
@@ -829,6 +840,18 @@ async fn node_command(api: &Api, command: NodesSubcommand) -> Result<Value, CliE
             let query: Vec<(&str, &str)> =
                 hours.as_deref().map(|h| ("hours", h)).into_iter().collect();
             api.get(&["nodes", &node, "checkins"], &query).await
+        }
+        NodesSubcommand::Disk { node, refresh } => {
+            if refresh {
+                return api
+                    .post(&["nodes", &node, "disk-usage", "refresh"], None)
+                    .await;
+            }
+            let detail = api.get(&["nodes", &node], &[]).await?;
+            Ok(json!({
+                "node": detail.get("name").cloned().unwrap_or_else(|| json!(node)),
+                "disk": detail.get("disk").cloned().unwrap_or(Value::Null),
+            }))
         }
         NodesSubcommand::Rename {
             current_alias,

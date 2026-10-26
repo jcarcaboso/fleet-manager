@@ -145,7 +145,11 @@ public sealed record AgentAssignment(
     [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] AssignmentFile? File = null,
     [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] AiClientAssignment? AiClient = null);
 
-public sealed record PollResult(AgentAssignment? Assignment);
+/// <summary>
+/// What a poll found. <paramref name="DiskUsageRequested"/> is true while an Operator's disk refresh request is pending;
+/// the route only tells Agents that sent the <c>disk-usage</c> capability.
+/// </summary>
+public sealed record PollResult(AgentAssignment? Assignment, bool DiskUsageRequested = false);
 
 public sealed record AttemptReport(
     AttemptId AttemptId,
@@ -189,7 +193,8 @@ public sealed record NodeStatus(
     DateTimeOffset? RevokedAt,
     DateTimeOffset? CredentialNotAfter,
     TargetStateCounts Targets,
-    string? CurrentRevision);
+    string? CurrentRevision,
+    NodeDiskSummary? Disk = null);
 
 public sealed record NodeCredentialStatus(
     CredentialId CredentialId,
@@ -238,7 +243,8 @@ public sealed record NodeDetail(
     DateTimeOffset? RevokedAt,
     NodeCredentialStatus? Credential,
     IReadOnlyList<NodeTargetStatus> Targets,
-    TargetStateCounts Summary);
+    TargetStateCounts Summary,
+    NodeDisk? Disk = null);
 
 public sealed record NodeAttemptStatus(
     AttemptId AttemptId,
@@ -252,6 +258,22 @@ public sealed record NodeAttemptStatus(
     string? Path,
     string? Step,
     DateTimeOffset UpdatedAt);
+
+/// <summary>One measured volume as an Agent reports it. <c>Label</c> is <c>home</c> or <c>state</c>.</summary>
+public sealed record DiskVolume(string Label, long TotalBytes, long UsedBytes, long AvailableBytes);
+
+public sealed record DiskUsageReport(IReadOnlyList<DiskVolume> Volumes);
+
+public sealed record NodeDiskVolume(string Label, long TotalBytes, long UsedBytes, long AvailableBytes, double UsedPercent);
+
+/// <summary>The fullest volume of a Node, shown in the Node list.</summary>
+public sealed record NodeDiskSummary(string Label, double UsedPercent, long UsedBytes, long AvailableBytes, long TotalBytes,
+    DateTimeOffset MeasuredAt);
+
+/// <summary>Latest disk report and pending refresh request of a Node. <c>MeasuredAt</c> is null until the Agent reports.</summary>
+public sealed record NodeDisk(DateTimeOffset? MeasuredAt, DateTimeOffset? RefreshRequestedAt, IReadOnlyList<NodeDiskVolume> Volumes);
+
+public sealed record DiskRefreshRequested(DateTimeOffset RefreshRequestedAt);
 
 public sealed record CheckinBucket(DateTimeOffset Hour, int Polls);
 

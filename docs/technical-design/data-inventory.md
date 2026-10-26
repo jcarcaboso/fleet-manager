@@ -9,7 +9,7 @@ paths.
 | Record | Stored fields and purpose |
 |---|---|
 | Workspace | Stable ID and administrative name bind one database to one installation. |
-| Node | ID, Workspace ID, chosen name, platform, enrollment time, revocation time, and last authenticated contact support identity, compatibility, and freshness. The Server does not collect the local home path. |
+| Node | ID, Workspace ID, chosen name, platform, enrollment time, revocation time, and last authenticated contact support identity, compatibility, and freshness. The Server does not collect the local home path. A nullable disk refresh request time records that an Operator asked for a fresh disk report; the Node's next disk report clears it. |
 | Enrollment authorization | ID, Workspace ID, token digest, creator, expiry, retry duration, consumption time, retry deadline, CSR digest, issued Node/credential IDs, and public delivery response provide atomic enrollment and response recovery. The raw token and private key are never stored. |
 | Node credential | ID, Node ID, certificate SHA-256, validity interval, revocation time and actor support per-request authorization and revocation. Certificates are public data. Issuing and Node private keys are absent. |
 | Bundle | SHA-256 digest, schema, byte count, complete opaque bytes, and creation time support immutable delivery. Bytes may contain sensitive author-provided content. |
@@ -22,6 +22,7 @@ paths.
 | Assignment File | Assignment ID, destination filename, and optional content digest describe one Managed file or its removal. |
 | Attempt | ID, Assignment/Rollout/Node IDs, convergence state, error code, bounded diagnostic and update time retain accepted reports. Report requests accept stable error codes only. A failed Attempt can also hold failure detail sent by its own Node on `POST /agent/v1/attempts/{attemptId}/detail`: a control-character-free diagnostic of at most 2048 characters (in `Diagnostic`), an optional relative path of at most 512 characters (`FailurePath`) and an optional step name of at most 32 characters from a fixed list (`FailureStep`). The Agent keeps file contents, credentials and environment values out of the detail and replaces its home directory with `~`; the Server only enforces the limits, so treat the diagnostic as Node-supplied text. The detail follows the Attempt's retention and backups, and a newer detail replaces the earlier one. |
 | Node check-in | Node ID, UTC hour and the number of successful polls in that hour. Maintenance deletes rows older than seven days; they feed the Node activity chart. |
+| Node disk usage | Node ID, volume label (`home` or `state`), total, used and available bytes, and the time the Server received the report, from `PUT /agent/v1/disk-usage`. At most two rows per Node, only the latest report: each report replaces all volumes of the Node and nothing keeps history. Rows are deleted with the Node. Byte counts describe the filesystem as a whole; no file names or directory sizes are collected. Backups contain them. |
 | Audit event | ID, Workspace ID, timestamp, action, actor and optional Node/credential IDs record security-relevant transitions without request bodies. |
 
 Maintenance clears expired enrollment delivery responses and prunes check-in counters in bounded batches,

@@ -7,6 +7,7 @@ public sealed class FleetDbContext(DbContextOptions<FleetDbContext> options) : D
     public DbSet<WorkspaceRow> Workspaces => Set<WorkspaceRow>();
     public DbSet<NodeRow> Nodes => Set<NodeRow>();
     public DbSet<NodeCheckinRow> NodeCheckins => Set<NodeCheckinRow>();
+    public DbSet<NodeDiskUsageRow> NodeDiskUsages => Set<NodeDiskUsageRow>();
     public DbSet<CredentialRow> Credentials => Set<CredentialRow>();
     public DbSet<EnrollmentRow> Enrollments => Set<EnrollmentRow>();
     public DbSet<BundleRow> Bundles => Set<BundleRow>();
@@ -34,6 +35,9 @@ public sealed class FleetDbContext(DbContextOptions<FleetDbContext> options) : D
         model.Entity<NodeCheckinRow>().ToTable("node_checkins").HasKey(x => new { x.NodeId, x.Hour });
         model.Entity<NodeCheckinRow>().HasIndex(x => x.Hour);
         model.Entity<NodeCheckinRow>().HasOne<NodeRow>().WithMany().HasForeignKey(x => x.NodeId).OnDelete(DeleteBehavior.Cascade);
+        model.Entity<NodeDiskUsageRow>().ToTable("node_disk_usage").HasKey(x => new { x.NodeId, x.Label });
+        model.Entity<NodeDiskUsageRow>().Property(x => x.Label).HasMaxLength(16);
+        model.Entity<NodeDiskUsageRow>().HasOne<NodeRow>().WithMany().HasForeignKey(x => x.NodeId).OnDelete(DeleteBehavior.Cascade);
         model.Entity<CredentialRow>().ToTable("node_credentials").HasKey(x => x.Id);
         model.Entity<CredentialRow>().HasIndex(x => x.CertificateSha256).IsUnique();
         model.Entity<CredentialRow>().HasIndex(x => new { x.NodeId, x.RevokedAt });
@@ -103,6 +107,18 @@ public sealed class NodeRow
     public DateTimeOffset EnrolledAt { get; set; }
     public DateTimeOffset? RevokedAt { get; set; }
     public DateTimeOffset? LastContactAt { get; set; }
+    // Set by an Operator's disk refresh request, cleared by the next disk report. Poll reads it from the Node row it already loads.
+    public DateTimeOffset? DiskUsageRefreshRequestedAt { get; set; }
+}
+// The latest report only: one row per Node and volume label, replaced as a whole by each report.
+public sealed class NodeDiskUsageRow
+{
+    public Guid NodeId { get; set; }
+    public required string Label { get; set; }
+    public long TotalBytes { get; set; }
+    public long UsedBytes { get; set; }
+    public long AvailableBytes { get; set; }
+    public DateTimeOffset MeasuredAt { get; set; }
 }
 public sealed class NodeCheckinRow
 {

@@ -32,7 +32,8 @@ Query switches go before the `#`:
 | `slow=<ms>` | Delay every response. Shows the loading skeletons. |
 | `pagesize=<n>` | Cap page size to exercise cursors and "load more". |
 | `diag=0` | Attempts carry no phase 2 detail at all (`diagnostic`, `path` and `step` are `null`), like a Server or Agents before phase 2. |
-| `xss=1` | Every failed Attempt that has detail carries a hostile `diagnostic` and `path` (`<img src=x onerror=alert(1)>`, `"><script>`) so the escaping can be checked. |
+| `xss=1` | Every failed Attempt that has detail carries a hostile `diagnostic` and `path` (`<img src=x onerror=alert(1)>`, `"><script>`) so the escaping can be checked. The fullest volume of `homelab-nuc` also gets a hostile `label`. |
+| `diskdelay=<ms>` | How long a refreshed Agent takes to answer `POST nodes/{node}/disk-usage/refresh` (default 7000). Agents before 0.9.0 and machines that are not checking in never answer. |
 | `enroll=0` | The wizard's simulated enrollment never happens. |
 | `enroll=link` | The link is consumed and the Node exists, but the Agent never checks in. |
 | `expiry=<seconds>` | Links created in the wizard expire after this many seconds, whatever was requested. |
@@ -68,6 +69,42 @@ The excerpts in `data.js` are not part of the contract and are not served.
 
 Run each on `harness.html` and `harness-csp.html`; the CSP harness must log no violation.
 
+## Disk usage
+
+The fixture follows `docs/technical-design/operator-api.md`, "Disk usage": `disk` on `GET nodes` items (the fullest volume) and on `GET nodes/{node}`
+(`measuredAt`, `refreshRequestedAt`, `volumes`), `POST nodes/{node}/disk-usage/refresh` (scope `operate`, 202 `{ refreshRequestedAt }`, 404 `node_not_found`,
+409 `node_revoked`; a repeated request keeps the first time until the Agent answers; only a new request records the `node.disk_refresh_requested` audit event), and the `disk_space_low` / `disk_space_critical` issues with catalog entries.
+`usedPercent` is `used / (used + available)` to one decimal, the filesystem keeps 3% back, and `measuredAt` is when the fixture "received" the report.
+
+| Machine | Disk |
+|---|---|
+| `homelab-nuc` | `home` 96.4% (critical issue) and `state` 41.3% |
+| `fedora-ws`, `gpu-box` | 88.7% and exactly 85.0% (`disk_space_low`) |
+| `design-imac` | 83.9% (no issue) |
+| `mbp-joan`, `studio-mini`, `build-runner-01`, `build-runner-03`, `mba-travel`, `laptop-ana` | 29.6% to 78.2% |
+| `build-runner-02`, `lab-vm-07` | never reported (`disk` is `null`); `build-runner-02` answers a refresh after `diskdelay` |
+| `kitchen-mini` | an Agent before 0.9.0: never reports, never answers a refresh |
+| `old-laptop` (revoked) | `null` |
+
+| Scenario | Open |
+|---|---|
+| `diskGallery` | `?drive=diskGallery#/nodes` (meter with percent, free of total, icon and word per state; "No disk data"; Needs attention; banner count; "Fullest disk first") |
+| `diskNode` | `?drive=diskNode#/nodes/homelab-nuc` (Disk panel: volumes, bars, GiB with one decimal, measured time, Refresh; health check; problem count) |
+| `diskRefreshAnswered` | `?drive=diskRefreshAnswered#/nodes/build-runner-02` (status text, button disabled, a read every 5 s, volume appears, polling stops) |
+| `diskRefreshUnanswered` | `?drive=diskRefreshUnanswered#/nodes/kitchen-mini` with `--virtual-time-budget=400000` (stops after 2.5 minutes with "No answer yet. Agents before 0.9.0 do not report disk usage."; bounded reads) |
+| `diskNavAway` | `?drive=diskNavAway#/nodes/kitchen-mini` with `--virtual-time-budget=200000` (leaving the machine stops the polling; coming back does not resume it) |
+| `diskRefreshHang` | `?drive=diskRefreshHang#/nodes/kitchen-mini` with `--virtual-time-budget=400000` (the scenario turns `hang=` on for this machine's detail once the refresh waits: the read that never answers is aborted by the 2.5 minute deadline, "No answer yet…" appears, Refresh is enabled, no error) |
+| `diskNavHang` | `?drive=diskNavHang#/nodes/kitchen-mini` with `--virtual-time-budget=200000` (navigating away while a read hangs aborts it: the fixture call has `aborted` set, no further reads, no error) |
+| `diskReadScope` | `?drive=diskReadScope&scope=read#/nodes/homelab-nuc` (Refresh is locked and explained; no request) |
+| `diskRefreshForbidden` | `?drive=diskRefreshForbidden&forbid=1#/nodes/studio-mini` (403 `insufficient_scope` shown inline, no polling) |
+| `diskRefreshRevoked` | `?drive=diskRefreshRevoked#/nodes/studio-mini` (revoked meanwhile: 409 `node_revoked` shown inline, no polling) |
+| `diskProblems` | `?drive=diskProblems#/problems` (error and warning issues with catalog explanation, fix steps and the `fleet nodes disk` commands, here and on the machine's Problems tab) |
+| `diskXss` | `?drive=diskXss&xss=1#/nodes` (hostile volume label is text on the gallery, the machine page and Problems; no injected element, no `alert`) |
+
+Run each on `harness.html` and `harness-csp.html`; the CSP harness must log no violation.
+The gallery cards are taller with the disk meter, so the scenarios that need the first row of strips on screen under `iostub=1` (`stripsScroll`, `stripsRetry`,
+`stripsAway`) need a window at least 1100 px high (`--window-size=1440,1100`).
+
 ## Fixture and the Server
 
 The fixture's mutations are checked against the Server, not against the contract's prose. What differs from a naive fake:
@@ -95,7 +132,7 @@ The `fixtureContract` scenario asserts these.
 Add `--enable-logging=stderr --v=0 --dump-dom` to see console messages and the DOM. With `?drive=scan#/route` the
 page appends a PASS/FAIL log (stray `undefined`/`NaN` text, `h1`, horizontal overflow) to the DOM dump.
 Other scenarios: `login`, `logout`, `retry`, `revoke`, `revokeConfirm`, `remove`, `removeConfirm`, `rename`, `wizard`,
-`wizardStep2`, `wizardStep3`, `revokeLink`, `scopeRead`, `models`, `sync`, `range`, `search`, `expire`, `forbid`, `fixtureContract`, and the phase 2 `detail*` scenarios below.
+`wizardStep2`, `wizardStep3`, `revokeLink`, `scopeRead`, `models`, `sync`, `range`, `search`, `expire`, `forbid`, `fixtureContract`, the phase 2 `detail*` scenarios and the `disk*` scenarios below.
 
 Scenarios that need switches and a route:
 

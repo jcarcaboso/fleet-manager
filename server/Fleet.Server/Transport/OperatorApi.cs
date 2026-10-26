@@ -104,6 +104,11 @@ public static partial class OperatorApi
             return await coordinator.RetryAssignmentAsync(
                 new(await ResolveNodeAsync(http, node, coordinator, false, ct), request.Target, Actor(http)), ct);
         }).Scope(OperatorScope.Operate);
+        // Records the request; the Agent answers on its next poll if it supports disk usage. Repeats keep the first timestamp.
+        api.MapPost("/nodes/{node}/disk-usage/refresh", async (string node, HttpContext http, IFleetCoordinator coordinator,
+            CancellationToken ct) =>
+            Results.Json(await coordinator.RequestDiskUsageRefreshAsync(await ResolveNodeAsync(http, node, coordinator, false, ct), Actor(http), ct),
+                statusCode: StatusCodes.Status202Accepted)).Scope(OperatorScope.Operate);
         api.MapPost("/nodes/rename", async (OperatorRenameAliasRequest request, HttpContext http,
             IFleetCoordinator coordinator, CancellationToken ct) =>
             await coordinator.RenameNodeAliasAsOperatorAsync(new(request.CurrentAlias, request.Alias, Actor(http)), ct))

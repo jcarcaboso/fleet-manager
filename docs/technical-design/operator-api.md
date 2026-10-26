@@ -362,3 +362,67 @@ These fields are added; nothing is removed.
 
 All three are `null` when the Agent did not send detail. Agents before phase 2
 never send it.
+
+## Disk usage
+
+Agents report the disk usage of the filesystem holding the user's home
+directory, so Operators can see machines filling up (for example with Git
+worktrees) before reconciliation fails. A measurement is one `statvfs` call
+on Linux or `statfs` on macOS. It never walks directories.
+
+### Agent behaviour
+
+- The Agent measures the volume holding the home directory (`home`). If the
+  Agent state directory is on a different device, it also measures that volume
+  (`state`).
+- It reports after its first successful poll, then every 4 hours, and in the
+  cycle after the Server sets `diskUsageRequested`. The schedule is kept in
+  memory only, so a restart sends a new report. A failed report is retried at
+  the next 4-hour slot, or on the next request.
+- Every poll request carries `X-Fleet-Agent-Capabilities: disk-usage`. Only
+  then may the Server add `"diskUsageRequested": true` to the poll response.
+  Agents without the header never receive the field, because they reject
+  unknown fields. A new Agent accepts the poll response with or without it.
+- HTTP 404 from the report route means the Server predates this feature. The
+  Agent tries again at the next 4-hour slot.
+
+### `PUT /agent/v1/disk-usage` (Node mTLS)
+
+```json
+{ "volumes": [
+  { "label": "home", "totalBytes": 994662584320, "usedBytes": 871203905536, "availableBytes": 72818462720 }
+] }
+```
+
+- One or two volumes with distinct labels, `home` and/or `state`.
+- Byte values are non-negative integers. `usedBytes` is
+  `(blocks - free blocks) * fragment size`. `availableBytes` is the space
+  available to the user (`f_bavail`). `totalBytes` is the filesystem size.
+  `usedBytes + availableBytes` must not exceed `totalBytes`.
+- 204 on success. 400 `invalid_request`. 429 `rate_limited` from the
+  per-Node limiter that also covers attempt detail. The Server stores only the
+  latest report per Node, sets `measuredAt` to the time it received the report,
+  and clears a pending refresh request.
+
+### Operator API
+
+`usedPercent` is `usedBytes / (usedBytes + availableBytes) * 100`, rounded to
+one decimal, which is how `df` computes it.
+
+- `GET nodes` items gain `disk`: the volume with the highest `usedPercent`, as
+  `{ "label", "usedPercent", "usedBytes", "availableBytes", "totalBytes", "measuredAt" }`,
+  or `null` if the Node never reported.
+- `GET nodes/{node}` gains `disk`:
+  `{ "measuredAt", "refreshRequestedAt", "volumes": [{ "label", "totalBytes", "usedBytes", "availableBytes", "usedPercent" }] }`,
+  or `null` if the Node has never reported and no refresh is pending.
+  `refreshRequestedAt` is `null` unless a refresh is pending.
+- `POST nodes/{node}/disk-usage/refresh` (scope `operate`) records a request
+  and returns 202 `{ "refreshRequestedAt": "…" }`. The Agent answers on its
+  next poll. Agents without disk-usage support never answer; the dashboard
+  explains that after two poll intervals. A revoked Node returns 409
+  `node_revoked`. Repeated requests keep the original timestamp until the
+  Agent answers.
+- `GET issues` adds `disk_space_low` (warning, 85% used or more) and
+  `disk_space_critical` (error, 95% used or more), one per Node, using the
+  fullest volume. `since` is `measuredAt`. `commands` include
+  `fleet nodes disk <alias>` and `fleet nodes disk <alias> --refresh`.

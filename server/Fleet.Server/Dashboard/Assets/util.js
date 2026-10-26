@@ -222,5 +222,14 @@
   u.digestShort = d => { const h = String(d || '').replace(/^sha256:/, ''); return h.length > 14 ? `${h.slice(0, 8)}…${h.slice(-4)}` : h; };
   u.copyBtn = (text, label, aria) => `<button type="button" class="copy copy--icon" data-act="copy" data-copy="${u.esc(text)}" aria-label="${u.esc(aria || 'Copy to clipboard')}">${u.ic('copy')}${label ? `<span>${u.esc(label)}</span>` : ''}</button>`;
   u.cmdBlock = (cmd, label = 'Copy', cls = '') => `<div class="cmd ${cls}"><pre><code>${u.esc(cmd)}</code></pre><button type="button" class="copy" data-act="copy" data-copy="${u.esc(cmd)}" aria-label="Copy to clipboard">${u.ic('copy')}<span>${u.esc(label)}</span></button></div>`;
+  /* Binary units with one decimal (the Agent measures in bytes with statvfs/statfs, df -h style). */
+  u.bytes = n => {
+    const v = Number(n);
+    if (!Number.isFinite(v) || v < 0) return '—';
+    const units = ['B', 'KiB', 'MiB', 'GiB', 'TiB', 'PiB'];
+    let x = v, i = 0;
+    while (i < units.length - 1 && (i === 0 ? x : Math.round(x * 10) / 10) >= 1024) { x /= 1024; i++; }
+    return i === 0 ? `${x} B` : `${x.toFixed(1)} ${units[i]}`;
+  };
   u.avatar = (name, cls = '') => `<span class="av ${u.avatarClass(name)} ${cls}" aria-hidden="true">${u.esc(u.initial(name))}</span>`;
 })();

@@ -409,11 +409,40 @@ namespace Fleet.Server.Persistence.Migrations
                     b.ToTable("node_checkins", (string)null);
                 });
 
+            modelBuilder.Entity("Fleet.Server.Persistence.NodeDiskUsageRow", b =>
+                {
+                    b.Property<Guid>("NodeId")
+                        .HasColumnType("uuid");
+
+                    b.Property<string>("Label")
+                        .HasMaxLength(16)
+                        .HasColumnType("character varying(16)");
+
+                    b.Property<long>("AvailableBytes")
+                        .HasColumnType("bigint");
+
+                    b.Property<DateTimeOffset>("MeasuredAt")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.Property<long>("TotalBytes")
+                        .HasColumnType("bigint");
+
+                    b.Property<long>("UsedBytes")
+                        .HasColumnType("bigint");
+
+                    b.HasKey("NodeId", "Label");
+
+                    b.ToTable("node_disk_usage", (string)null);
+                });
+
             modelBuilder.Entity("Fleet.Server.Persistence.NodeRow", b =>
                 {
                     b.Property<Guid>("Id")
                         .ValueGeneratedOnAdd()
                         .HasColumnType("uuid");
+
+                    b.Property<DateTimeOffset?>("DiskUsageRefreshRequestedAt")
+                        .HasColumnType("timestamp with time zone");
 
                     b.Property<DateTimeOffset>("EnrolledAt")
                         .HasColumnType("timestamp with time zone");
@@ -669,6 +698,15 @@ namespace Fleet.Server.Persistence.Migrations
                 });
 
             modelBuilder.Entity("Fleet.Server.Persistence.NodeCheckinRow", b =>
+                {
+                    b.HasOne("Fleet.Server.Persistence.NodeRow", null)
+                        .WithMany()
+                        .HasForeignKey("NodeId")
+                        .OnDelete(DeleteBehavior.Cascade)
+                        .IsRequired();
+                });
+
+            modelBuilder.Entity("Fleet.Server.Persistence.NodeDiskUsageRow", b =>
                 {
                     b.HasOne("Fleet.Server.Persistence.NodeRow", null)
                         .WithMany()
