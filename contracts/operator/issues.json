@@ -20,7 +20,11 @@
       ],
       "diagnostic": "AI client configuration could not be written: settings.json is not valid JSON at line 12",
       "path": ".claude/settings.json",
-      "step": "configure"
+      "step": "configure",
+      "state": "acknowledged",
+      "stateBy": "joan",
+      "stateAt": "2026-10-25T13:30:00Z",
+      "snoozedUntil": null
     },
     {
       "id": "disk_space_low:00000000-0000-0000-0000-000000000001",
@@ -41,7 +45,11 @@
       ],
       "diagnostic": null,
       "path": null,
-      "step": null
+      "step": null,
+      "state": "snoozed",
+      "stateBy": "joan",
+      "stateAt": "2026-10-25T13:35:00Z",
+      "snoozedUntil": "2026-10-26T13:35:00Z"
     },
     {
       "id": "agent_outdated:00000000-0000-0000-0000-000000000001",
@@ -61,7 +69,11 @@
       ],
       "diagnostic": null,
       "path": null,
-      "step": null
+      "step": null,
+      "state": "open",
+      "stateBy": null,
+      "stateAt": null,
+      "snoozedUntil": null
     },
     {
       "id": "source_not_scanned",
@@ -81,7 +93,11 @@
       ],
       "diagnostic": null,
       "path": null,
-      "step": null
+      "step": null,
+      "state": "open",
+      "stateBy": null,
+      "stateAt": null,
+      "snoozedUntil": null
     }
   ]
 }

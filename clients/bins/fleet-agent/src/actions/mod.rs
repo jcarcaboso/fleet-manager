@@ -95,11 +95,13 @@ impl<'a> Registry<'a> {
         }
     }
 
+    /// Applies the Assignment and returns the paths of owned files that had
+    /// drifted and were repaired (see `fleet_reconcile::ReconcileOutcome`).
     pub async fn apply(
         &self,
         api: &Api,
         assignment: &Assignment,
-    ) -> std::result::Result<(), ActionError> {
+    ) -> std::result::Result<Vec<String>, ActionError> {
         let result = match registered(assignment).map_err(ActionError::invalid_assignment) {
             Ok(ActionKind::Skills) => skills::apply(self.content, assignment, self.cache),
             Ok(ActionKind::ManagedFile) => {
@@ -343,8 +345,20 @@ mod tests {
             generate_simple_self_signed(vec!["fleet.example".to_owned()]).unwrap();
         let api = Api::new("https://fleet.example", cert.pem().as_bytes(), None).unwrap();
 
-        registry.apply(&api, &assignment).await.unwrap();
+        assert!(registry.apply(&api, &assignment).await.unwrap().is_empty());
 
+        assert_eq!(
+            std::fs::read(home.join(".codex/AGENTS.md")).unwrap(),
+            content
+        );
+
+        // Drift repaired by a later apply is surfaced as a Home-relative path.
+        assert!(registry.apply(&api, &assignment).await.unwrap().is_empty());
+        std::fs::write(home.join(".codex/AGENTS.md"), b"edited").unwrap();
+        assert_eq!(
+            registry.apply(&api, &assignment).await.unwrap(),
+            [".codex/AGENTS.md"]
+        );
         assert_eq!(
             std::fs::read(home.join(".codex/AGENTS.md")).unwrap(),
             content
@@ -381,7 +395,11 @@ mod tests {
             }
         }
 
-        async fn apply(&self, api: &Api, assignment: &Assignment) -> Result<(), ActionError> {
+        async fn apply(
+            &self,
+            api: &Api,
+            assignment: &Assignment,
+        ) -> Result<Vec<String>, ActionError> {
             Registry::new(&self.content, &self.ai, &self.cache)
                 .apply(api, assignment)
                 .await

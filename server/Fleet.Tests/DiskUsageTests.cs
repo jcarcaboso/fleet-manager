@@ -168,6 +168,7 @@ public sealed class DiskUsageTests(OperatorApiFixture fixture) : IClassFixture<O
     {
         var noisy = await fixture.EnrollAsync("disk-noisy");
         var calm = await fixture.EnrollAsync("disk-calm");
+        fixture.FreezeRateLimit(noisy);
         var results = await Task.WhenAll(Enumerable.Range(0, NodeRequestRateLimit.Burst + 40)
             .Select(_ => PutAsync(noisy, new { volumes = new[] { Volume("home", 1000, 100, 800) } })));
         Assert.Contains(results, x => x.Status == 204);
@@ -179,7 +180,7 @@ public sealed class DiskUsageTests(OperatorApiFixture fixture) : IClassFixture<O
             Assert.False(string.IsNullOrWhiteSpace(x.Body.GetProperty("message").GetString()));
         });
         Assert.All(results, x => Assert.True(x.Status is 204 or 429, x.Status.ToString()));
-        Assert.True(results.Count(x => x.Status == 204) <= NodeRequestRateLimit.Burst + 5);
+        Assert.Equal(NodeRequestRateLimit.Burst, results.Count(x => x.Status == 204));
 
         // The same bucket also limits attempt detail (an unlimited request would be a 404 for the unknown Attempt).
         var detail = await fixture.SendNodeAsync($"/agent/v1/attempts/{Guid.NewGuid()}/detail", noisy.Certificate, new { diagnostic = "x" });

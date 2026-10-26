@@ -21,6 +21,10 @@ public sealed record TelemetryRequest([property: JsonRequired] string? AgentVers
     [property: JsonRequired] string? Arch, [property: JsonRequired] string? Hostname, [property: JsonRequired] string? User,
     [property: JsonRequired] string? InstallMethod, [property: JsonRequired] string? ServiceManager,
     [property: JsonRequired] string? StateDirectory);
+// Both properties are required (a missing one is a 400); unknown members are rejected.
+public sealed record DriftRequest([property: JsonRequired] string? Target, [property: JsonRequired] List<string?>? Files);
+public sealed record IssueStateRequest([property: JsonRequired] string? Id, [property: JsonRequired] string? Action,
+    [property: JsonNumberHandling(JsonNumberHandling.Strict)] int? Hours);
 public sealed record ReportRequest(Guid AttemptId, ConvergenceState State, string? ErrorCode = null);
 
 public sealed class IdentifierJsonConverter<T>(Func<Guid, T> create, Func<T, Guid> value) : JsonConverter<T>

@@ -5,7 +5,7 @@ It is **not** embedded in the Server assembly (the project embeds `Dashboard/Ass
 
 | File | Purpose |
 |---|---|
-| `harness.html` | Loads the fixture, then the real files from `../Assets/` by relative path. Works from `file://`. |
+| `harness.html` | Loads the fixture, then the real files from `../Assets/` by relative path (every script that `Assets/index.html` loads, including `view-revision.js`). Works from `file://`. |
 | `harness-csp.html` | Same page plus the Server's CSP (`default-src 'none'; script-src 'self'; style-src 'self'; connect-src 'self'`) as a `<meta>` tag. Any inline style or script is blocked and logged to the console. |
 | `fixture.js` | Replaces `window.fetch` for `/dashboard/api/*` with an in-memory fake of `docs/technical-design/operator-api.md`. It derives its data from `artifacts/dashboard-prototypes/data.js` and returns only fields the contract defines. Mutations (retry, rename, revoke, remove, enrollment links, model selection, rescan) change the in-memory state and follow the Server (`PostgresFleetCoordinator`, `Transport/OperatorApi.cs`, `CliProxySelectionStore`): same order of checks, same error codes, same audit events (see "Fixture and the Server" below). Creating an enrollment link simulates the machine enrolling a few seconds later. |
 | `drive.js` | Optional scripted clicks (`?drive=<scenario>`) that print PASS/FAIL lines. Used for smoke tests. |
@@ -17,7 +17,7 @@ Open the harness in a browser (no server needed):
     file:///.../server/Fleet.Server/Dashboard/Dev/harness.html#/nodes
 
 Routes are the dashboard's own: `#/nodes`, `#/nodes/<alias>/<overview|installed|problems|activity|security|settings>`,
-`#/problems`, `#/deployments`, `#/repository`, `#/models`, `#/enrollment`, `#/audit`, `#/add`.
+`#/problems`, `#/deployments`, `#/deployments/<revisionId>`, `#/repository`, `#/models`, `#/enrollment`, `#/audit`, `#/add`.
 The harness starts signed in. Any token of 32 or more characters signs in, like the Server (shorter tokens, and tokens starting with `bad`, are rejected).
 
 Query switches go before the `#`:
@@ -42,12 +42,16 @@ Query switches go before the `#`:
 | `delay=<alias or id>:<ms>[,...]` | Delays `GET nodes/{node}...` for that machine, to reproduce overlapping loads. |
 | `lag=<text>:<ms>[,...]` | A POST whose path contains `<text>` (`rename`, `remove`, `revoke`, `retry`, `enrollment-links`, `cliproxy/selection`, `cliproxy/refresh`, `rescan`) does its work at once but answers `<ms>` later. Reproduces a mutation that completes after the user has moved on. |
 | `hang=<path prefix>` | `GET` routes under the prefix never answer. Only the caller's abort ends them. |
+| `commit=0` | No revision has commit metadata (`commit` is `null` everywhere), like a Server before phase 4. Without it only the oldest revision has `commit: null`. |
+| `norollout=1` | `GET desired-revisions/{id}` returns `rolloutId: null` for every revision. |
+| `drift=0` | `GET nodes/{node}` has no `drift` property, like a Server before phase 4. |
+| `states=1` | Two issues start in a state, so the Problems tabs have content: the outdated Agent of `laptop-ana` is acknowledged by `ana`, the `disk_space_low` of `fedora-ws` is snoozed by `joan` for a bit over 3 hours. With `xss=1` the acknowledging Operator's name is hostile. |
 | `iostub=1` | Drive scenarios only: replace `IntersectionObserver` with a polling stand-in (headless Chrome renders no frames after load under `--virtual-time-budget`, so the real one stops reporting). |
 
 The fixture follows the contract's conventions: lists accept `limit` (1 to 100) and `after`, `desired-revisions`, `rollouts` and `audit`
 accept `order=newest` (the default is ID order, so a client that forgets `order` sees scrambled revisions), a cursor is valid only with the
 order it came from, `{node}` is one percent-encoded path segment decoded once (never the whole path), and every error is `{ code, message }`.
-`window.__FIXTURE.calls` records every API call (`method`, `path`, `query`, `at`, `settled`, `aborted`) so scenarios can assert on requests: `aborted` is set when the caller's `AbortController` fired, and `settled` when the response was delivered or the call was aborted (so the calls with `settled === false` are the requests in flight).
+`window.__FIXTURE.calls` records every API call (`method`, `path`, `query`, `body`, `at`, `settled`, `aborted`) so scenarios can assert on requests: `aborted` is set when the caller's `AbortController` fired, and `settled` when the response was delivered or the call was aborted (so the calls with `settled === false` are the requests in flight).
 
 ## Attempt detail (phase 2)
 
@@ -143,6 +147,51 @@ Run each on `harness.html` and `harness-csp.html`; the CSP harness must log no v
 Cards are taller with the Agent lines. Run `stripsDrop` and `stripsCancel` in the 3000 px window as before and do not run many Chrome instances at once:
 `stripsDrop` is timing-sensitive under load.
 
+## Deployments, drift and issue state (phase 4)
+
+The fixture follows `docs/technical-design/operator-api.md`, "Phase 4: deployments, drift and issue state":
+
+- `commit` (`subject`, `author`, `committedAt`) on `GET desired-revisions` items, from the messages and authors in `data.js`; the oldest revision has `commit: null`
+  (accepted before phase 4). `committedAt` is four minutes before acceptance. No email is ever present.
+- `GET desired-revisions/{id}` with `previous` (the revision accepted just before, `null` for the first), `rolloutId`, `skills` (`added`, `changed`, `removed`,
+  sorted) and `targets` (`added`, `changed`, `removed`, `nodes`). The diffs are the fixture's own (`DIFFS`); `data.js` has no contract-shaped equivalent. Removed Target counts stay zero, matching the Server's retained Assignments.
+  404 `revision_not_found`.
+- `GET rollouts/{id}` with `summary` and per-Node `state` (the worst Target state), `firstAttemptAt`, `lastAttemptAt` and `targets[].errorCode`. The newest
+  rollout covers every live Node in its current state, the second is derived from the Attempts each Target made for it, the older ones spread the rollout's
+  counts over its Nodes. 404 `rollout_not_found`.
+- `drift` on `GET nodes/{node}` (newest first): `homelab-nuc` has a repair of one file 47 minutes ago (the `incident-runbook` Skill, as in `data.js`) and one of two
+  files 30 hours ago; `studio-mini` has one 6 hours ago. Everything else has `[]`.
+- `state`, `stateBy`, `stateAt` and `snoozedUntil` on every `GET issues` item, and `POST issues/state` (scope `operate`; 400 `invalid_request` for an empty or over-300-character `id`,
+  `action` or `hours` before 404 `issue_not_found` (including whitespace-only IDs); `hours` is required for `snooze` (1 to 168) and refused otherwise). An acknowledgement stores the issue's
+  `since` and stops applying when `since` differs (for example after a disk refresh measures again); a snooze applies until its time passes. Each change is
+  audited as `issue.acknowledged`, `issue.snoozed` or `issue.reopened`.
+
+| Scenario | Open |
+|---|---|
+| `depCommit` | `?drive=depCommit#/deployments` (hero title, author and time; every revision with subject and author; the oldest falls back to its publication time; links by revision ID) |
+| `depGallery` | `?drive=depGallery#/nodes` (the deployment tile and the Up to date section name the commit subject) |
+| `depNull` | `?drive=depNull&commit=0#/deployments` (no commit anywhere: short SHA fallback on the list, the revision page, the gallery) |
+| `depDetail` | `?drive=depDetail#/deployments` (revision page: skills chips with +, ~ and − signs, Target counts, link to the previous revision, first revision) |
+| `depRollout` | `?drive=depRollout#/deployments` (per-machine rows, state icon and word, first and last attempt, Target chips, error code links to the machine's Problems tab, filter and sort, an older rollout) |
+| `depNoRollout` | `?drive=depNoRollout&norollout=1#/deployments` (no rollout: the diff and a clear sentence) |
+| `depMissing` | `?drive=depMissing#/deployments` (unknown revision ID) |
+| `depRolloutFail` | `?drive=depRolloutFail&fail=rollouts/#/deployments` (the rollout read fails: the diff stays, the error is local, Try again) |
+| `depAbort` | `?drive=depAbort&slow=400#/deployments` (moving to another revision aborts the first read; leaving the page leaves nothing in flight) |
+| `driftActivity` | `?drive=driftActivity#/nodes/homelab-nuc/activity` (drift in the timeline with an expandable file list and a filter; Overview mentions drift from the last 24 hours only) |
+| `driftOld` | `?drive=driftOld#/nodes/studio-mini` (an event older than a day leaves Overview and stays in Activity) |
+| `driftNone` | `?drive=driftNone&drift=0#/nodes/homelab-nuc/activity` (a Server without `drift`) |
+| `issueFlow` | `?drive=issueFlow#/problems`, also with `&scope=operate` (state tabs with counts, Acknowledge, Snooze 1 h/4 h/24 h/7 d, Reopen, the ID in the request body, who and until when, badge counts open errors only, audit events) |
+| `issueAllQuiet` | `?drive=issueAllQuiet#/problems` (every issue acknowledged or snoozed: "No open problems", no badge) |
+| `issueNode` | `?drive=issueNode#/nodes/studio-mini/problems` (the same on the machine's Problems tab: tab count, header button, Activity) |
+| `issueSince` | `?drive=issueSince&diskdelay=1000#/problems` (an acknowledgement stops applying when `since` changes; a snooze does not) |
+| `issueScope` | `?drive=issueScope&scope=read#/problems` (a read token sees locked buttons and the reason; nothing is sent) |
+| `issueForbidden` | `?drive=issueForbidden&forbid=1#/problems` (a 403 is explained and nothing changes) |
+| `fixturePhase4` | `?drive=fixturePhase4#/nodes` (the contract of the new routes: fields, ordering, validation order, `since` rule, audit) |
+| `p4Xss` | `?drive=p4Xss&xss=1&states=1#/deployments` (hostile commit subject and author, Skill name, drift path and Operator name render as text everywhere; no injected element, no `alert`) |
+
+Run each on `harness.html` and `harness-csp.html`; the CSP harness must log no violation. `issueSince` needs about 90 s of virtual time
+(`--virtual-time-budget=90000`) because the disk refresh polls every 5 s.
+
 ## Fixture and the Server
 
 The fixture's mutations are checked against the Server, not against the contract's prose. What differs from a naive fake:
@@ -157,6 +206,7 @@ The fixture's mutations are checked against the Server, not against the contract
 | `POST nodes/{node}/retry` | A blank target is `400 invalid_request` before the Node is looked up. |
 | `POST cliproxy/selection` | Checks run in the Server's order: shape (`400 invalid_selection`), catalog (`404 catalog_unavailable`), pinned models (`409 pinned_model_excluded`, including the Claude-skip rule), empty selection (`400 invalid_selection`), and last the version (`409 stale_selection`). Families in neither list are frozen to the submitted `includeNew`. |
 | `POST source/rescan`, `cliproxy/selection` | The Server writes no audit event for them, and neither does the fixture. |
+| `POST issues/state` | Scope `operate`, then the request (`400 invalid_request`: empty or over-300-character `id`, an `action` other than `acknowledge`, `snooze` or `reopen`, `hours` missing or outside 1 to 168 for `snooze`, `hours` with another action; JSON `null` is absent, like the Server's nullable field), then the issue (`404 issue_not_found`). The answer is the updated issue. Every call is audited (`issue.acknowledged`, `issue.snoozed`, `issue.reopened`, with the Node of the issue). |
 
 The `fixtureContract` scenario asserts these.
 
@@ -170,7 +220,7 @@ The `fixtureContract` scenario asserts these.
 Add `--enable-logging=stderr --v=0 --dump-dom` to see console messages and the DOM. With `?drive=scan#/route` the
 page appends a PASS/FAIL log (stray `undefined`/`NaN` text, `h1`, horizontal overflow) to the DOM dump.
 Other scenarios: `login`, `logout`, `retry`, `revoke`, `revokeConfirm`, `remove`, `removeConfirm`, `rename`, `wizard`,
-`wizardStep2`, `wizardStep3`, `revokeLink`, `scopeRead`, `models`, `sync`, `range`, `search`, `expire`, `forbid`, `fixtureContract`, the phase 2 `detail*` scenarios, the `disk*` scenarios and the phase 3 `agent*` scenarios.
+`wizardStep2`, `wizardStep3`, `revokeLink`, `scopeRead`, `models`, `sync`, `range`, `search`, `expire`, `forbid`, `fixtureContract`, the phase 2 `detail*` scenarios, the `disk*` scenarios, the phase 3 `agent*` scenarios and the phase 4 `dep*`, `drift*`, `issue*`, `fixturePhase4` and `p4Xss` scenarios.
 
 Scenarios that need switches and a route:
 

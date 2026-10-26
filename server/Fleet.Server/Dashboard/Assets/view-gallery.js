@@ -132,7 +132,7 @@
       { key: 'outdated', title: 'Agent update available', sub: 'These Agents are older than the Server. Upgrade them on the machine; Fleet never does it for you. Their health is still shown on each card.', nodes: lifted },
       { key: 'attention', title: 'Needs attention', sub: 'Fix these first. The most serious problems are at the top. A disk that is 85% full or more is listed here too.', nodes: rest.filter(needsAttention) },
       { key: 'updating', title: 'Updating', sub: 'Receiving new assignments right now. No action needed.', nodes: rest.filter(n => !needsAttention(n) && healthOf(n).key === 'updating') },
-      { key: 'ok', title: 'Up to date', sub: rev ? `Every assigned Target is in sync. Latest published revision: ${u.shortSha(rev.sourceRevision)}.` : 'Every assigned Target is in sync.', nodes: rest.filter(n => !needsAttention(n) && healthOf(n).key === 'ok') },
+      { key: 'ok', title: 'Up to date', sub: rev ? `Every assigned Target is in sync. Latest published revision: ${u.shortSha(rev.sourceRevision)}${model.commit(rev.commit)?.subject ? `, “${model.commit(rev.commit).subject}”` : ''}.` : 'Every assigned Target is in sync.', nodes: rest.filter(n => !needsAttention(n) && healthOf(n).key === 'ok') },
     ].filter(s => s.nodes.length);
   };
 
@@ -171,7 +171,7 @@
       { key: 'failing', label: 'Action needed', level: 'critical', kind: 'bang', value: c.failing },
     ].map(p => ({ ...p, unit: p.value === 1 ? 'machine' : 'machines', tip: names(p.key) }));
     const counts = u.emptyCounts(); live.forEach(n => u.addCounts(counts, n.counts));
-    const total = u.countTotal(counts), rev = newestRev(), scan = S.source;
+    const total = u.countTotal(counts), rev = newestRev(), commit = model.commit(rev?.commit), scan = S.source;
     const fullDisks = live.filter(model.diskHot).length;
     const sentence = [c.updating ? `${c.updating} ${c.updating === 1 ? 'is' : 'are'} updating` : null, attention ? `${attention} need${attention === 1 ? 's' : ''} your attention` : null,
       fullDisks ? `${fullDisks} ${fullDisks === 1 ? 'has' : 'have'} a disk that is ${model.DISK_WARN}% full or more` : null].filter(Boolean);
@@ -195,7 +195,7 @@
       ${Fleet.api.can('operate') && Fleet.api.can('admin') ? '' : `<p class="lock-note">${ic('lock')}<span>${esc(`${api.scopeTitle()} access: ${!api.can('operate') ? 'sync and add are' : 'adding machines is'} unavailable.`)}</span></p>`}
     </div>
     <div class="tiles">
-      <a class="tile" href="#/deployments"><span class="tile-ic t-info">${ic('rocket')}</span><span class="tile-txt"><b>${rev ? (counts.succeeded < total ? `Deploying ${esc(u.shortSha(rev.sourceRevision))}` : `Latest revision ${esc(u.shortSha(rev.sourceRevision))}`) : 'Deployments'}</b><span>${total ? `${u.num(counts.succeeded)} of ${u.num(total)} assignments done` : 'No assignments yet'}</span>
+      <a class="tile" href="#/deployments"><span class="tile-ic t-info">${ic('rocket')}</span><span class="tile-txt"><b>${rev ? (counts.succeeded < total ? `Deploying ${esc(u.shortSha(rev.sourceRevision))}` : `Latest revision ${esc(u.shortSha(rev.sourceRevision))}`) : 'Deployments'}</b>${commit?.subject ? `<span class="tile-commit" data-tip="${esc(`${commit.subject}|${commit.author ? `by ${commit.author}` : 'commit subject'}`)}">${esc(commit.subject)}</span>` : ''}<span>${total ? `${u.num(counts.succeeded)} of ${u.num(total)} assignments done` : 'No assignments yet'}</span>
         <span class="tile-meter" role="img" aria-label="${counts.succeeded} of ${total} assignments succeeded"><span data-w="${(counts.succeeded / Math.max(1, total) * 100).toFixed(1)}"></span></span></span>${ic('chevR', 'tile-chev')}</a>
       <a class="tile" href="#/repository"><span class="tile-ic ${!scan || scanOk ? 't-good' : 't-warning'}">${ic('branch')}</span><span class="tile-txt"><b>Repository</b><span>${!scan ? 'No scans recorded yet' : `${scanOk ? 'Up to date' : scan.outcome === 'invalid' ? 'Last scan was rejected' : 'Last scan failed'} · scanned ${esc(u.rel(scan.observedAt))}`}</span></span>${scan && !scanOk ? glyph('warning', 'bang', 'tile-g') : ''}${ic('chevR', 'tile-chev')}</a>
       <a class="tile" href="#/models"><span class="tile-ic ${badCats ? 't-warning' : 't-good'}">${ic('spark')}</span><span class="tile-txt"><b>Models</b><span>${!S.proxy ? 'Open to see CLIProxy catalogs' : !S.proxy.enabled ? 'Model sync is not configured' : !S.proxy.catalogs.length ? 'No CLIProxy catalogs in use' : badCats ? `${badCats} of ${S.proxy.catalogs.length} catalogs failing` : 'All catalogs healthy'}</span></span>${badCats ? glyph('warning', 'bang', 'tile-g') : ''}${ic('chevR', 'tile-chev')}</a>
@@ -314,7 +314,7 @@
       S.nodes = nodes.items.map(model.fromList); S.truncated = nodes.truncated;
       byId.clear(); S.nodes.forEach(n => byId.set(n.id, n));
       S.issues = issues ? issues.items || [] : null; S.source = source; S.rev = revs ? revs.items[0] || null : null; S.proxy = proxy; S.links = links ? links.items : null;
-      model.summary.issues = S.issues; if (issues) model.summary.errors = S.issues.filter(i => i.severity === 'error').length;
+      model.summary.issues = S.issues; if (issues) model.summary.errors = model.errorCount(S.issues);
       Fleet.renderNav();
       return paint();
     },

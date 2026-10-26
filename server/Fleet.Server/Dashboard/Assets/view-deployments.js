@@ -1,16 +1,17 @@
 'use strict';
 /* Fleet dashboard: Deployments.
-   API: GET desired-revisions?order=newest, GET rollouts?order=newest, GET warnings, GET nodes, GET errors, GET rollouts/{id}/attempts (on demand).
+   API: GET desired-revisions?order=newest, GET rollouts?order=newest, GET desired-revisions/{id} (the newest revision, for what changed), GET warnings, GET nodes, GET errors, GET rollouts/{id}/attempts (on demand).
    The Server returns revisions and rollouts newest first, one page at a time, so the first revision is the newest. A rollout belongs to the
    revision named by its desiredRevisionId. "Load older revisions" follows both cursors.
-   Phase 1 shows Assignment state counts per revision. Commit messages and diffs need phase 4 and are not shown. */
+   Each revision shows its commit subject, author and time (the short SHA when the Server has no commit for it) and links to its own page,
+   #/deployments/<revisionId> (view-revision.js), with the diff and per-machine rollout progress. */
 (function () {
   const Fleet = window.Fleet = window.Fleet || {};
   const u = Fleet.u, ui = Fleet.ui, api = Fleet.api, model = Fleet.model, catalog = Fleet.catalog;
   const { esc, ic, glyph, enc } = u;
   Fleet.views = Fleet.views || {};
 
-  const S = { revs: [], revsNext: null, rollouts: new Map(), rolloutsNext: null, loadingMore: false, warnings: [], nodes: [], filter: 'all', attempts: new Map(), loadingAttempts: new Set(), truncated: false, focus: null, gen: 0 };
+  const S = { revs: [], revsNext: null, rollouts: new Map(), rolloutsNext: null, loadingMore: false, warnings: [], nodes: [], filter: 'all', attempts: new Map(), loadingAttempts: new Set(), truncated: false, focus: null, gen: 0, curDetail: null };
   const PAGE = 10;
 
   const countsOf = r => ({ pending: r?.pending || 0, applying: r?.applying || 0, succeeded: r?.succeeded || 0, failed: r?.failed || 0, superseded: r?.superseded || 0 });
@@ -56,13 +57,14 @@
     const r = S.rollouts.get(rev.desiredRevisionId), counts = countsOf(r), p = u.stateParts(counts), warns = warningsFor(rev);
     const key = 'rev:' + u.shortSha(rev.sourceRevision);
     const open = Fleet.openState.has(key) ? Fleet.openState.get(key) : S.focus === u.shortSha(rev.sourceRevision);
-    const live = counts.pending + counts.applying > 0;
+    const live = counts.pending + counts.applying > 0, commit = model.commit(rev.commit);
     return `<li class="hist-item" id="rev-${esc(u.shortSha(rev.sourceRevision))}"><span class="hist-dot">${i === 0 ? (live ? glyph('info', 'sync') : counts.failed ? glyph('critical', 'x') : glyph('good', 'check')) : glyph('good', 'check')}</span>
-      <details data-open-key="${esc(key)}" ${open ? 'open' : ''}><summary><span class="hist-main"><span class="hist-top">${u.revChip(rev.sourceRevision, rev.sourceRevision)}${i === 0 ? '<span class="tag tag--live">Newest</span>' : ''}<b>Published ${esc(u.fmtFull(rev.acceptedAt))} UTC</b></span>
-        <span class="hist-meta">${esc(u.rel(rev.acceptedAt))}${warns.length ? ` · ${glyph('warning', 'bang')}${u.plural(warns.length, 'warning')}` : ''}${r || S.rolloutsNext ? '' : ' · no rollout recorded'}</span></span>
+      <details data-open-key="${esc(key)}" ${open ? 'open' : ''}><summary><span class="hist-main"><span class="hist-top">${u.revChip(rev.sourceRevision, rev.sourceRevision)}${i === 0 ? '<span class="tag tag--live">Newest</span>' : ''}<b>${commit?.subject ? esc(commit.subject) : `Published ${esc(u.fmtFull(rev.acceptedAt))} UTC`}</b></span>
+        <span class="hist-meta">${commit?.author ? `${u.avatar(commit.author, 'av-xs')}${esc(commit.author)} · ` : ''}${commit?.subject ? `${esc(u.fmtFull(rev.acceptedAt))} UTC · ` : ''}${esc(u.rel(rev.acceptedAt))}${warns.length ? ` · ${glyph('warning', 'bang')}${u.plural(warns.length, 'warning')}` : ''}${r || S.rolloutsNext ? '' : ' · no rollout recorded'}</span></span>
         <span class="hist-bar">${r ? u.segbar(p, `Rollout ${u.shortSha(rev.sourceRevision)}`, 'segbar--sm') : ''}<span class="hist-sum">${r ? esc(p.filter(x => x.value).map(x => `${x.value} ${x.label.toLowerCase()}`).join(' · ') || 'No assignments') : ''}</span></span>${ic('chevD', 'sumchev')}</summary>
         <div class="hist-body">${warns.map(warnCallout).join('')}
           <dl class="kv kv--grid kv--3"><div><dt>Source revision</dt><dd class="mono">${esc(rev.sourceRevision)}${u.copyBtn(rev.sourceRevision, '', 'Copy source revision')}</dd></div><div><dt>Desired revision</dt><dd class="mono">${esc(rev.desiredRevisionId)}</dd></div><div><dt>Rollout</dt><dd class="mono">${esc(r?.rolloutId || '—')}</dd></div></dl>
+          <p class="hist-open"><a class="btn btn-sm btn-secondary" href="#/deployments/${enc(rev.desiredRevisionId)}">${ic('list')}What changed and where it stands${ic('chevR')}</a></p>
           ${r ? u.legend(p) : ''}
           ${r ? `<div class="attempts" id="att-${esc(r.rolloutId)}">${attemptsBlock(r)}</div>` : ''}
         </div></details></li>`;
@@ -77,7 +79,7 @@
     const c = k => rows.filter(r => r.st === k).length;
     const shown = S.filter === 'all' ? rows : rows.filter(r => r.st === S.filter);
     if (!revs.length) return `<div class="wrap">${ui.pageHead('Deployments', 'What Fleet is delivering to your machines, and what it delivered before.')}${ui.empty({ icon: 'rocket', title: 'Nothing has been published yet', text: 'When the repository is scanned and accepted, each publication appears here with its rollout.', action: ui.gate('operate', 'btn-primary', `${ic('sync')}Sync repository`, 'data-act="sync"') })}</div>`;
-    const counts = countsOf(curRollout), parts = u.stateParts(counts), warns = warningsFor(cur);
+    const counts = countsOf(curRollout), parts = u.stateParts(counts), warns = warningsFor(cur), commit = model.commit(cur.commit);
     const work = counts.pending + counts.applying + counts.succeeded + counts.failed;
     const active = counts.pending + counts.applying > 0;
     return `<div class="wrap">
@@ -85,9 +87,10 @@
     <section class="dep-hero">
       <div class="dep-hero-main">
         <p class="eyebrow ${active ? 'live' : ''}">${active ? '<span class="live-dot" aria-hidden="true"></span>Rolling out now' : counts.failed ? 'Newest revision, with failures' : 'Newest revision'}</p>
-        <h2 class="dep-title">Revision ${esc(u.shortSha(cur.sourceRevision))}</h2>
-        <p class="dep-meta">${u.revChip(cur.sourceRevision, cur.sourceRevision)}<span>Published <b>${esc(u.rel(cur.acceptedAt))}</b> · ${esc(u.fmtFull(cur.acceptedAt))} UTC</span></p>
-        <p class="muted small dep-note">Commit messages and file-level changes are not available yet. This page shows how each Assignment is converging.</p>
+        <h2 class="dep-title">${esc(model.revTitle(cur))}</h2>
+        <p class="dep-meta">${u.revChip(cur.sourceRevision, cur.sourceRevision)}${commit?.author ? `${u.avatar(commit.author, 'av-xs')}<span><b>${esc(commit.author)}</b> · published ${esc(u.rel(cur.acceptedAt))} · ${esc(u.fmtFull(cur.acceptedAt))} UTC</span>` : `<span>Published <b>${esc(u.rel(cur.acceptedAt))}</b> · ${esc(u.fmtFull(cur.acceptedAt))} UTC</span>`}</p>
+        ${S.curDetail ? `<h3 class="mini-h">What changed</h3>${ui.changeChips(S.curDetail)}` : ''}
+        <p class="dep-more"><a class="btn btn-sm btn-secondary" href="#/deployments/${enc(cur.desiredRevisionId)}">${ic('list')}Open this revision${ic('chevR')}</a></p>
         ${warns.map(w => `<div class="callout callout--warning">${glyph('warning', 'bang')}<div><b>Source warning: ${esc(w.code)}</b><p>${esc(w.message)}</p>${(w.sourceLocations || []).length ? `<div class="loc-chips">${w.sourceLocations.map(l => `<span class="loc">${ic('folder')}<code>${esc(l)}</code></span>`).join('')}</div>` : ''}</div></div>`).join('')}
       </div>
       <div class="dep-hero-side">
@@ -124,6 +127,11 @@
         api.all('warnings', { maxPages: 3 }).catch(Fleet.soft), api.all('nodes', { maxPages: 5 }), catalog.load(),
       ]);
       if (gen !== S.gen) throw Fleet.superseded();
+      /* What the newest revision changed: a failure (a Server before phase 4) only hides that block. */
+      const newest = revs.items[0];
+      const detail = newest ? await api.get(`desired-revisions/${enc(newest.desiredRevisionId)}`).catch(Fleet.soft) : null;
+      if (gen !== S.gen) throw Fleet.superseded();
+      S.curDetail = detail ? model.revisionDetail(detail) : null;
       S.revs = revs.items; S.revsNext = revs.nextCursor;
       S.rollouts = new Map(rollouts.items.map(r => [r.desiredRevisionId, r])); S.rolloutsNext = rollouts.nextCursor;
       S.warnings = warnings ? warnings.items : []; S.nodes = nodes.items.map(model.fromList); S.truncated = nodes.truncated;

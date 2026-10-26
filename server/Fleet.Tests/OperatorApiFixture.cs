@@ -7,6 +7,7 @@ using System.Text.Json;
 using System.Text.Json.Nodes;
 using Fleet.Core.Coordination;
 using Fleet.Server.Persistence;
+using Fleet.Server.Transport;
 using Microsoft.AspNetCore.Builder;
 using Microsoft.AspNetCore.Hosting;
 using Microsoft.AspNetCore.Http;
@@ -31,6 +32,9 @@ public sealed class OperatorApiFixture : IAsyncLifetime
     private readonly string directory = Path.Combine(Path.GetTempPath(), "fleet-operator-" + Guid.NewGuid().ToString("N"));
     // Publishing a snapshot converts CLIProxy targets that it omits to native mode, so every snapshot repeats them.
     private readonly List<SnapshotTarget> pinned = [];
+    private readonly TestNodeRateLimit rateLimit = new();
+
+    public void FreezeRateLimit(EnrolledNode node) => rateLimit.Freeze(node.NodeId.Value);
 
     public WebApplicationFactory<Program> Factory { get; private set; } = null!;
     public HttpClient Admin { get; private set; } = null!;
@@ -55,7 +59,8 @@ public sealed class OperatorApiFixture : IAsyncLifetime
         if (!OperatingSystem.IsWindows()) File.SetUnixFileMode(KeyPath, UnixFileMode.UserRead | UnixFileMode.UserWrite);
         Factory = new WebApplicationFactory<Program>().WithWebHostBuilder(builder => builder.ConfigureAppConfiguration((_, config) =>
             config.AddInMemoryCollection(Configuration(new()))).ConfigureServices(services =>
-                services.AddTransient<IStartupFilter, UniqueClientAddress>().AddTransient<IStartupFilter, RawTargetFromHeader>()));
+                services.AddTransient<IStartupFilter, UniqueClientAddress>().AddTransient<IStartupFilter, RawTargetFromHeader>()
+                    .AddSingleton(new NodeRequestRateLimit(rateLimit))));
         Admin = Client(AdminToken);
         Operate = Client(OperateToken);
         Reader = Client(ReadToken);
@@ -231,6 +236,7 @@ public sealed class OperatorApiFixture : IAsyncLifetime
         Reader?.Dispose();
         Anonymous?.Dispose();
         if (Factory is not null) await Factory.DisposeAsync();
+        rateLimit.Dispose();
         await postgres.DisposeAsync();
         if (Directory.Exists(directory)) Directory.Delete(directory, true);
     }

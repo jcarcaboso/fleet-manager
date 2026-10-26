@@ -68,13 +68,13 @@ pub fn apply(
     reconciler: &fleet_reconcile::Reconciler,
     assignment: &Assignment,
     cache_root: &Path,
-) -> std::result::Result<(), ActionError> {
+) -> std::result::Result<Vec<String>, ActionError> {
     validate(assignment).map_err(ActionError::invalid_assignment)?;
     let local =
         local_assignment(assignment, cache_root).map_err(ActionError::invalid_assignment)?;
     reconciler
         .reconcile_file(&descriptor(assignment), &local)
-        .map(|_| ())
+        .map(|outcome| outcome.repaired)
         .map_err(ActionError::reconcile)
 }
 

@@ -41,12 +41,17 @@ percent-encoded as one URL path segment, so aliases may contain spaces, `/`, `?`
 | `fleet nodes remove <node> --yes` | `GET nodes/{node}`, then `POST nodes/{nodeId}/remove` with `{"alias": <current name>}` |
 | `fleet retry <node> <target>` | `POST nodes/{node}/retry` with `{"target": T}` |
 | `fleet issues list` | `GET issues` |
+| `fleet issues ack <id>` | `POST issues/state` with `{"id": <id>, "action": "acknowledge"}` (scope `operate`) |
+| `fleet issues snooze <id> --hours N` | `POST issues/state` with `{"id": <id>, "action": "snooze", "hours": N}` (`N` is 1 to 168; scope `operate`) |
+| `fleet issues reopen <id>` | `POST issues/state` with `{"id": <id>, "action": "reopen"}` (scope `operate`) |
 | `fleet errors list` | `GET errors` |
 | `fleet explain <code>` | `GET errors/{code}` |
-| `fleet doctor` | `GET issues`, then `GET errors` (see below) |
+| `fleet doctor [--all]` | `GET issues`, then `GET errors` (see below) |
 | `fleet rollouts list [--newest] [--after C]` | `GET rollouts` (`order=newest` with `--newest`) |
+| `fleet rollouts show <rollout-id>` | `GET rollouts/{id}` |
 | `fleet rollouts attempts <rollout-id> [--after C]` | `GET rollouts/{id}/attempts` |
 | `fleet revisions list [--newest] [--after C]` | `GET desired-revisions` (`order=newest` with `--newest`) |
+| `fleet revisions show <revision-id>` | `GET desired-revisions/{id}` |
 | `fleet warnings list [--after C]` | `GET warnings` |
 | `fleet scans list [--after C]` | `GET source/scans` |
 | `fleet source status` | `GET source/status` |
@@ -99,20 +104,59 @@ errors` once. It prints one document:
 ```json
 {
   "ok": false,
-  "issues": [{"id": "...", "code": "assignment_failed", "severity": "error",
+  "counted": "open",
+  "issues": [{"id": "...", "code": "assignment_failed", "severity": "error", "state": "open",
               "errorCode": "lock_failed", "diagnostic": "lock is held by process 4121", "path": ".claude/settings.json", "step": "lock",
               "commands": ["fleet retry studio-mini skills"],
               "explanation": {"title": "...", "explanation": "...", "fix": ["..."]}}],
-  "summary": {"errors": 1, "warnings": 0}
+  "summary": {"errors": 1, "warnings": 0},
+  "states": {"open": 1, "acknowledged": 0, "snoozed": 0}
 }
 ```
 
 Each issue is the Server's issue object plus `explanation`. A failed-Target issue carries `diagnostic`, `path` and `step` from the latest failed Attempt
 (phase 2; `null` when the Agent sent none, absent from a Server that predates phase 2); `fleet doctor` passes them through unchanged. The explanation comes
 from the catalog entry for the issue's `errorCode`, else for its `code`, and is
-`null` when neither is in the catalog. `ok` is true when no issue has severity
-`error`. The command exits 0 when `ok` is true and 10 when it is false; warnings
-alone exit 0. The document is printed in both cases.
+`null` when neither is in the catalog. `ok` is true when no counted issue has
+severity `error`. The command exits 0 when `ok` is true and 10 when it is false;
+warnings alone exit 0. The document is printed in both cases.
+
+Every issue is listed with its `state` (`open`, `acknowledged` or `snoozed`; phase 4, see
+[Operator API](operator-api.md), "Issue state"). An acknowledged or snoozed issue also carries `stateBy`, `stateAt` and, for a snooze, `snoozedUntil`.
+A Server that predates phase 4 sends no state, and so does an unknown state word: the CLI prints `"state": "open"` and counts the issue. By default
+`summary`, `ok` and the exit code count only `open` issues, so an error that an operator acknowledged or snoozed does not fail the check; `counted` says
+`"open"`. With `--all` they count every issue, as `fleet doctor` did before phase 4, and `counted` is `"all"`. `states` always counts the issues in each state.
+
+### Issue state
+
+`fleet issues ack|snooze|reopen` change the state of one issue and print the updated issue (the Server's 200 body). The issue ID contains `:` and can contain
+URLs (a CLIProxy issue is `cliproxy_refresh_failed:<base URL>`), so the CLI never puts it in the URL: it goes in the JSON body of `POST issues/state`,
+which has a fixed path. Quote the ID in the shell. `fleet issues ack` also answers to `fleet issues acknowledge`.
+
+- `ack`: the operator knows about the problem. The acknowledgement applies to the current occurrence only. The Server stores the issue's `since` with it,
+  and the issue is open again as soon as `since` changes (the problem was fixed and came back, or a new measurement replaced the old one).
+- `snooze --hours N`: the issue is hidden from the open list for `N` hours (1 to 168, a week at most). `--hours` is required and the CLI refuses 0, 169 and
+  non-integers before sending anything. The issue returns to `open` by itself when `snoozedUntil` passes.
+- `reopen`: removes either state.
+
+All three need scope `operate` (HTTP 403 `insufficient_scope`, exit 3, for a read token). An ID that no current issue has is HTTP 404 `issue_not_found`
+(exit 4), which also happens when the problem was fixed in the meantime. A blank ID is a usage error (exit 2). Each change is audited as
+`issue.acknowledged`, `issue.snoozed` or `issue.reopened`; `fleet audit list --newest` shows who did it.
+
+### `revisions show` and `rollouts show`
+
+Both print the Server's JSON unchanged ([Operator API](operator-api.md), "Phase 4: deployments, drift and issue state"); the ID must be a UUID, so a typo is
+a usage error (exit 2) before any request, and an unknown revision or rollout is HTTP 404 `revision_not_found` or `rollout_not_found` (exit 4).
+
+- `fleet revisions show <id>` answers what a deployment changed: `commit` (`subject`, `author`, `committedAt`, or `null` for a revision accepted before
+  phase 4), `previous` (the revision before it, or `null` for the first), `rolloutId`, `skills` (`added`, `changed` and `removed` names, compared by bundle
+  digest) and `targets` (`added`, `changed`, `removed` and the number of `nodes` affected). Get the ID from `fleet revisions list --newest`.
+- `fleet rollouts show <id>` answers where each machine stands: a `summary` of Assignment states and `nodes`, one per machine ordered by name, with its `state`
+  (the worst of its Targets: `failed`, `applying`, `pending`, `succeeded`, `superseded`), `firstAttemptAt`, `lastAttemptAt` and every Target's `state`,
+  `errorCode` and `updatedAt`. Explain an `errorCode` with `fleet explain`. `nodes` holds at most 500 machines.
+
+`fleet nodes show <node>` also carries `drift`: the Agent's reports of files that were changed outside Fleet and repaired, newest first, as
+`[{"target", "files", "detectedAt"}]`. Drift is repaired automatically; it is information, not an issue.
 
 ### `nodes list` and `nodes show`: `agent`
 
@@ -291,7 +335,7 @@ and `invalid_response`.
 | 4 | Not found: HTTP 404 |
 | 5 | Conflict: HTTP 409 |
 | 6 | Any other HTTP status, transport failure, timeout, or unreadable or oversized response |
-| 10 | `fleet doctor` found error-severity issues (the document is on stdout) |
+| 10 | `fleet doctor` found error-severity issues among the issues it counts (open ones, or all with `--all`; the document is on stdout) |
 
 Clap usage errors and `--help` use clap's own text and exit codes (2 for errors,
 0 for help).

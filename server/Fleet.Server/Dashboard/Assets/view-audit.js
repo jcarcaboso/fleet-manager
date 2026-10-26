@@ -16,6 +16,7 @@
     node_credential_revoked: ['ban', 'Revoked a credential'], cliproxy_selection_saved: ['spark', 'Saved a model selection'], cliproxy_refresh_requested: ['spark', 'Refreshed model catalogs'],
     node_alias_changed: ['pencil', 'Renamed a machine'], node_revoked: ['ban', 'Revoked a machine'], node_removed: ['trash', 'Removed a machine'],
     'assignment.retry_requested': ['retry', 'Requested a retry'],
+    'issue.acknowledged': ['ack', 'Acknowledged a problem'], 'issue.snoozed': ['snooze', 'Snoozed a problem'], 'issue.reopened': ['retry', 'Reopened a problem'],
   };
   Fleet.auditLabel = a => (ACTION[a] || [])[1] || String(a).replace(/[._]/g, ' ').replace(/^./, c => c.toUpperCase());
   const icon = a => (ACTION[a] || ['info'])[0];

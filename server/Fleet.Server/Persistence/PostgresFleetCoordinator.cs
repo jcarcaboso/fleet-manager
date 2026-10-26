@@ -345,12 +345,17 @@ public sealed partial class PostgresFleetCoordinator(
                 });
         }
 
+        // Informational: sanitized again here, so whatever supplied the snapshot cannot store control characters or long text.
+        var commit = CommitMetadataRules.Sanitize(snapshot.Commit);
         var revision = new DesiredRevisionRow
         {
             Id = Guid.NewGuid(),
             WorkspaceId = options.WorkspaceId.Value,
             SourceRevision = snapshot.SourceRevision,
-            AcceptedAt = snapshot.ObservedAt
+            AcceptedAt = snapshot.ObservedAt,
+            CommitSubject = commit?.Subject,
+            CommitAuthor = commit?.Author,
+            CommittedAt = commit?.CommittedAt
         };
         db.DesiredRevisions.Add(revision);
         db.SourceScans.Add(new SourceScanRow
@@ -706,7 +711,7 @@ public sealed partial class PostgresFleetCoordinator(
             JsonSerializer.Deserialize<string[]>(x.SourceLocations) ?? []));
     }
 
-    public async Task<Page<DesiredRevisionStatus>> GetDesiredRevisionsAsync(PageRequest page, CancellationToken cancellationToken = default)
+    public async Task<Page<DesiredRevisionSummary>> GetDesiredRevisionsAsync(PageRequest page, CancellationToken cancellationToken = default)
     {
         await EnsureWorkspace(cancellationToken);
         if (page.Order == PageOrder.Newest)
@@ -718,12 +723,12 @@ public sealed partial class PostgresFleetCoordinator(
             var newest = await query.OrderByDescending(x => x.AcceptedAt).ThenByDescending(x => x.Id).Take(newestLimit + 1)
                 .ToListAsync(cancellationToken);
             return MakeTimePage(newest, newestLimit, x => x.AcceptedAt, x => x.Id,
-                x => new DesiredRevisionStatus(new(x.Id), x.SourceRevision, x.AcceptedAt));
+                x => new DesiredRevisionSummary(new(x.Id), x.SourceRevision, x.AcceptedAt, CommitOf(x)));
         }
         var (limit, cursor) = PageArgs(page);
         var rows = await db.DesiredRevisions.AsNoTracking().Where(x => x.Id.CompareTo(cursor) > 0).OrderBy(x => x.Id)
             .Take(limit + 1).ToListAsync(cancellationToken);
-        return MakePage(rows, limit, x => x.Id, x => new DesiredRevisionStatus(new(x.Id), x.SourceRevision, x.AcceptedAt));
+        return MakePage(rows, limit, x => x.Id, x => new DesiredRevisionSummary(new(x.Id), x.SourceRevision, x.AcceptedAt, CommitOf(x)));
     }
 
     public async Task<Page<RolloutStatus>> GetRolloutsAsync(PageRequest page, CancellationToken cancellationToken = default)

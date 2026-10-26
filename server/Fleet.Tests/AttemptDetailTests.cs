@@ -137,6 +137,7 @@ public sealed class AttemptDetailTests(OperatorApiFixture fixture) : IClassFixtu
     {
         var (noisy, noisyAttempt) = await FailedAsync("detail-noisy");
         var (calm, calmAttempt) = await FailedAsync("detail-calm");
+        fixture.FreezeRateLimit(noisy);
         var results = await Task.WhenAll(Enumerable.Range(0, NodeRequestRateLimit.Burst + 40)
             .Select(_ => PostAsync(noisy, noisyAttempt, new { diagnostic = "same" })));
         Assert.Contains(results, x => x.Status == 204);
@@ -148,7 +149,7 @@ public sealed class AttemptDetailTests(OperatorApiFixture fixture) : IClassFixtu
             Assert.False(string.IsNullOrWhiteSpace(x.Body.GetProperty("message").GetString()));
         });
         Assert.All(results, x => Assert.True(x.Status is 204 or 429, x.Status.ToString()));
-        Assert.True(results.Count(x => x.Status == 204) <= NodeRequestRateLimit.Burst + 5);
+        Assert.Equal(NodeRequestRateLimit.Burst, results.Count(x => x.Status == 204));
 
         Assert.Equal(204, (await PostAsync(calm, calmAttempt, new { diagnostic = "unaffected" })).Status);
         Assert.Equal("same", (await LatestAttemptAsync("detail-noisy"))["diagnostic"]!.GetValue<string>());

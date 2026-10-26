@@ -24,7 +24,11 @@ public sealed record OperatorIssue(
     IReadOnlyList<string> Commands,
     string? Diagnostic = null,
     string? Path = null,
-    string? Step = null);
+    string? Step = null,
+    string State = IssueStateNames.Open,
+    string? StateBy = null,
+    DateTimeOffset? StateAt = null,
+    DateTimeOffset? SnoozedUntil = null);
 
 /// <summary>Builds the open issues of the Workspace. <c>GET issues</c> returns them; the legacy diagnostics reuse the configuration part.</summary>
 public static partial class OperatorIssues
@@ -107,8 +111,28 @@ public static partial class OperatorIssues
                     $"{failedCount - failedShown} more assignments failed", "Only the first failures are listed.",
                     "Run `fleet nodes list` to see the failed counts for every Node.", "nodes", null, null, null, null, null, ["fleet nodes list"])]);
         }
-        return ordered;
+        var states = await coordinator.GetIssueStatesAsync(ordered.Select(x => x.Id).ToList(), ct);
+        return ordered.Select(issue => WithState(issue, states.GetValueOrDefault(issue.Id), now)).ToList();
     }
+
+    /// <summary>
+    /// The issue with the state that <paramref name="entry"/> gives it at <paramref name="now"/>. An acknowledgement applies while the
+    /// issue's <c>since</c> equals the one stored with it, a snooze until its time has passed. Anything else is <c>open</c>.
+    /// </summary>
+    public static OperatorIssue WithState(OperatorIssue issue, IssueStateEntry? entry, DateTimeOffset now)
+    {
+        var open = issue with { State = IssueStateNames.Open, StateBy = null, StateAt = null, SnoozedUntil = null };
+        if (entry is null) return open;
+        if (entry.State == IssueStateNames.Acknowledged && SameInstant(entry.Since, issue.Since))
+            return open with { State = IssueStateNames.Acknowledged, StateBy = entry.Actor, StateAt = entry.At };
+        if (entry.State == IssueStateNames.Snoozed && entry.SnoozedUntil is { } until && until > now)
+            return open with { State = IssueStateNames.Snoozed, StateBy = entry.Actor, StateAt = entry.At, SnoozedUntil = until };
+        return open;
+    }
+
+    // PostgreSQL keeps microseconds, so both sides are compared at that precision.
+    private static bool SameInstant(DateTimeOffset? stored, DateTimeOffset? current) =>
+        stored is null || current is null ? stored is null && current is null : stored.Value.UtcTicks / 10 == current.Value.UtcTicks / 10;
 
     /// <summary>Used-space percentage (of used + available, one decimal) from which a Node's fullest volume raises disk_space_low.</summary>
     public const double DiskLowPercent = 85.0;
@@ -222,7 +246,7 @@ public static partial class OperatorIssues
                     issues.Add(new($"cliproxy_refresh_failed:{url}", "cliproxy_refresh_failed", cached ? "warning" : "error",
                         "CLIProxy model refresh failed",
                         $"{url}: {error}. " + (cached ? "Agents can use the last valid catalog." : "No model catalog is available."), action, "models",
-                        null, null, null, null, null, ["fleet models refresh"]));
+                        null, null, null, null, catalog.FailureSince(url), ["fleet models refresh"]));
                 }
             }
         }

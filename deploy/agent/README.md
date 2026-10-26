@@ -106,6 +106,16 @@ poll and again, at most every 4 hours, only when something changed. A value
 that cannot be read is sent as empty, and a Server that predates this feature
 answers 404, which the Agent ignores until the next slot.
 
+When the Agent finds that Fleet-managed files were changed on the machine
+outside Fleet, and puts them back, it tells the Server which ones. Only the
+**paths** of the repaired files below your home directory are sent (for example
+`.agents/skills/incident-runbook/SKILL.md`), at most 20 per Target, never
+their contents. Only drift in Skills and managed agent files is reported, not
+in AI-client settings. The report is sent once, after the cycle that repaired
+the files, in the background with a 10 second limit. It is not saved or
+retried: if the Server is unreachable or predates this feature (404), the
+report is dropped. It does not change what the Agent repairs or when.
+
 ## Publish and verify Skills
 
 Configure this Node's alias in the source repository:
