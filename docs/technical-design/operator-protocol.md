@@ -35,6 +35,7 @@ percent-encoded as one URL path segment, so aliases may contain spaces, `/`, `?`
 | `fleet nodes show <node>` | `GET nodes/{node}` |
 | `fleet nodes attempts <node> [--target T] [--after C]` | `GET nodes/{node}/attempts` |
 | `fleet nodes checkins <node> [--hours N]` | `GET nodes/{node}/checkins` (`N` is 1 to 168) |
+| `fleet nodes disk <node> [--refresh]` | `GET nodes/{node}`, printing `{"node", "disk"}` (see below); with `--refresh` only `POST nodes/{node}/disk-usage/refresh` (scope `operate`), printing its 202 body |
 | `fleet nodes rename <current> <new>` | `POST nodes/rename` |
 | `fleet nodes revoke <node> --yes` | `GET nodes/{node}`, then `POST nodes/{nodeId}/revoke` |
 | `fleet nodes remove <node> --yes` | `GET nodes/{node}`, then `POST nodes/{nodeId}/remove` with `{"alias": <current name>}` |
@@ -112,6 +113,41 @@ from the catalog entry for the issue's `errorCode`, else for its `code`, and is
 `null` when neither is in the catalog. `ok` is true when no issue has severity
 `error`. The command exits 0 when `ok` is true and 10 when it is false; warnings
 alone exit 0. The document is printed in both cases.
+
+### `nodes list` and `nodes show`: `agent`
+
+Both print the Server's JSON unchanged, so the phase 3 `agent` property flows through ([Operator API](operator-api.md), "Phase 3: Agent and machine
+information"). Items of `nodes list` carry `{"version", "outdated", "os": {"name", "version"}, "arch", "hostname"}`; `nodes show` adds `latestVersion`,
+`os.kernel`, `user`, `installMethod`, `serviceManager`, `stateDirectory` and `reportedAt`. `agent` is `null` when the Node never reported (always the case for
+Agents before 0.9.0) and absent from a Server that predates phase 3; neither is an error. `fleet doctor` and `fleet issues list` print the `agent_outdated`
+warning like any other issue: `action` names the upgrade command for the install method and `commands` holds `fleet nodes show <node>`. There is no command
+that upgrades an Agent; the operator tells the person who owns the machine.
+
+### `nodes disk`
+
+`fleet nodes disk <node>` reads `GET nodes/{node}` and prints only the Node's alias and its `disk` object, so the output is small and the same shape every
+time:
+
+```json
+{
+  "node": "studio-mini",
+  "disk": {
+    "measuredAt": "2026-10-26T09:48:00Z",
+    "refreshRequestedAt": null,
+    "volumes": [{"label": "home", "totalBytes": 994662584320, "usedBytes": 871203905536,
+                 "availableBytes": 72818462720, "usedPercent": 92.3}]
+  }
+}
+```
+
+`disk` is `null` when the Node has never reported and no refresh is pending (always the case for Agents before 0.9.0); that is a normal answer, not an error.
+`usedPercent` is `usedBytes / (usedBytes + availableBytes) * 100` to one decimal, like `df`. `disk_space_low` (85% used or more) and `disk_space_critical`
+(95% or more) issues come from the fullest volume and list this command in their `commands`.
+
+`fleet nodes disk <node> --refresh` sends only `POST nodes/{node}/disk-usage/refresh` (scope `operate`) and prints the 202 body
+`{"refreshRequestedAt": "..."}`. It does not wait. The Agent measures on its next poll, so run `fleet nodes disk <node>` again after a minute and check that
+`measuredAt` is later than `refreshRequestedAt`. An Agent that does not support disk usage never answers. A revoked Node is HTTP 409 `node_revoked` (exit 5), a
+token below `operate` is HTTP 403 `insufficient_scope` (exit 3).
 
 ### `models select`
 

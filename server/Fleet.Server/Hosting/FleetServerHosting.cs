@@ -48,7 +48,12 @@ public static class FleetServerHosting
         builder.Services.AddScoped<CliProxySelectionStore>();
         builder.Services.AddScoped<IFleetCoordinator>(services => new PostgresFleetCoordinator(
             services.GetRequiredService<FleetDbContext>(), services.GetRequiredService<TimeProvider>(),
-            new FleetCoordinationOptions { WorkspaceId = new WorkspaceId(services.GetRequiredService<IOptions<FleetOptions>>().Value.WorkspaceId) }));
+            new FleetCoordinationOptions
+            {
+                WorkspaceId = new WorkspaceId(services.GetRequiredService<IOptions<FleetOptions>>().Value.WorkspaceId),
+                LatestAgentVersion = services.GetRequiredService<LatestAgentVersion>().Value
+            }));
+        builder.Services.AddSingleton(new LatestAgentVersion(ServerVersion.Current));
         builder.Services.AddSingleton<IEnrolledNodeSource, RegisteredNodeSource>();
         builder.Services.AddSingleton<SourcePollingService>();
         builder.Services.AddHostedService(services => services.GetRequiredService<SourcePollingService>());
@@ -70,7 +75,7 @@ public static class FleetServerHosting
                 context.Connection.RemoteIpAddress?.ToString() ?? "unknown",
                 _ => new FixedWindowRateLimiterOptions { PermitLimit = 20, Window = TimeSpan.FromMinutes(1), QueueLimit = 0 }));
         });
-        builder.Services.AddSingleton(AttemptDetailRateLimit.Create());
+        builder.Services.AddSingleton(NodeRequestRateLimit.Create());
         builder.Services.AddOpenApi("agent", options => options.ShouldInclude = description => description.GroupName == "agent");
         builder.Services.AddOpenApi("operator", options => options.ShouldInclude = description => description.GroupName == "operator");
     }

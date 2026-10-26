@@ -10,6 +10,7 @@ The direct dependencies are deliberately limited to the approved stack:
 | `reqwest` | HTTPS transport with the rustls TLS backend | MIT OR Apache-2.0 |
 | `serde`, `serde_json` | Versioned JSON request and response models | MIT OR Apache-2.0 |
 | `tokio` | Async runtime used by the HTTP client and CLI entry point | MIT |
+| `libc` | `fleet-agent` only, on Unix: the `statvfs` (Linux) and `statfs` (macOS) calls that measure disk usage. Already a transitive dependency; no new locked package | MIT OR Apache-2.0 |
 | `uuid` | Validate credential, rollout and link identifiers before sending requests | MIT OR Apache-2.0 |
 
 Each dependency is used directly by the current CLI and is pinned through the

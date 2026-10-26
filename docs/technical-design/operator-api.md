@@ -362,3 +362,145 @@ These fields are added; nothing is removed.
 
 All three are `null` when the Agent did not send detail. Agents before phase 2
 never send it.
+
+## Disk usage
+
+Agents report the disk usage of the filesystem holding the user's home
+directory, so Operators can see machines filling up (for example with Git
+worktrees) before reconciliation fails. A measurement is one `statvfs` call
+on Linux or `statfs` on macOS. It never walks directories.
+
+### Agent behaviour
+
+- The Agent measures the volume holding the home directory (`home`). If the
+  Agent state directory is on a different device, it also measures that volume
+  (`state`).
+- It reports after its first successful poll, then every 4 hours, and in the
+  cycle after the Server sets `diskUsageRequested`. The schedule is kept in
+  memory only, so a restart sends a new report. A failed report is retried at
+  the next 4-hour slot, or on the next request.
+- Every poll request carries `X-Fleet-Agent-Capabilities: disk-usage`. Only
+  then may the Server add `"diskUsageRequested": true` to the poll response.
+  Agents without the header never receive the field, because they reject
+  unknown fields. A new Agent accepts the poll response with or without it.
+- HTTP 404 from the report route means the Server predates this feature. The
+  Agent tries again at the next 4-hour slot.
+
+### `PUT /agent/v1/disk-usage` (Node mTLS)
+
+```json
+{ "volumes": [
+  { "label": "home", "totalBytes": 994662584320, "usedBytes": 871203905536, "availableBytes": 72818462720 }
+] }
+```
+
+- One or two volumes with distinct labels, `home` and/or `state`.
+- Byte values are non-negative integers. `usedBytes` is
+  `(blocks - free blocks) * fragment size`. `availableBytes` is the space
+  available to the user (`f_bavail`). `totalBytes` is the filesystem size.
+  `usedBytes + availableBytes` must not exceed `totalBytes`.
+- 204 on success. 400 `invalid_request`. 429 `rate_limited` from the
+  per-Node limiter that also covers attempt detail. The Server stores only the
+  latest report per Node, sets `measuredAt` to the time it received the report,
+  and clears a pending refresh request.
+
+### Operator API
+
+`usedPercent` is `usedBytes / (usedBytes + availableBytes) * 100`, rounded to
+one decimal, which is how `df` computes it.
+
+- `GET nodes` items gain `disk`: the volume with the highest `usedPercent`, as
+  `{ "label", "usedPercent", "usedBytes", "availableBytes", "totalBytes", "measuredAt" }`,
+  or `null` if the Node never reported.
+- `GET nodes/{node}` gains `disk`:
+  `{ "measuredAt", "refreshRequestedAt", "volumes": [{ "label", "totalBytes", "usedBytes", "availableBytes", "usedPercent" }] }`,
+  or `null` if the Node has never reported and no refresh is pending.
+  `refreshRequestedAt` is `null` unless a refresh is pending.
+- `POST nodes/{node}/disk-usage/refresh` (scope `operate`) records a request
+  and returns 202 `{ "refreshRequestedAt": "…" }`. The Agent answers on its
+  next poll. Agents without disk-usage support never answer; the dashboard
+  explains that after two poll intervals. A revoked Node returns 409
+  `node_revoked`. Repeated requests keep the original timestamp until the
+  Agent answers.
+- `GET issues` adds `disk_space_low` (warning, 85% used or more) and
+  `disk_space_critical` (error, 95% used or more), one per Node, using the
+  fullest volume. `since` is `measuredAt`. `commands` include
+  `fleet nodes disk <alias>` and `fleet nodes disk <alias> --refresh`.
+
+## Phase 3: Agent and machine information
+
+Agents report who and what they run as, so the dashboard can show OS, Agent
+version and install details, and flag outdated Agents.
+
+### Agent behaviour
+
+- The Agent builds the report from cheap local sources only:
+  - `agentVersion`: its own crate version.
+  - `os.name` and `os.version`: on Linux, `NAME` and `VERSION_ID` from
+    `/etc/os-release` (or `/usr/lib/os-release`); on macOS, `ProductName` and
+    `ProductVersion` from `/System/Library/CoreServices/SystemVersion.plist`.
+  - `os.kernel`: the `uname` release.
+  - `arch`: the compile-time architecture, such as `x86_64` or `aarch64`.
+  - `hostname`: from `gethostname`.
+  - `user`: the login name of the effective user.
+  - `installMethod`: derived from the executable path. `homebrew` if it is
+    under a Homebrew prefix (`/opt/homebrew`, `/usr/local/Cellar`,
+    `/home/linuxbrew`, `.linuxbrew`), `cargo` if it is under `~/.cargo/bin`,
+    otherwise `binary`.
+  - `serviceManager`: `systemd` when `INVOCATION_ID` is set, `launchd` when
+    `XPC_SERVICE_NAME` is set and is not `0`, otherwise `none`.
+  - `stateDirectory`: with the home directory replaced by `~`.
+- It never runs subprocesses or walks directories. A field it cannot read is
+  `null`.
+- It sends the report after the first successful poll, then whenever the
+  values change, checked at the same 4-hour slot as disk usage. A failed
+  report is retried at the next slot. HTTP 404 means an older Server.
+
+### `PUT /agent/v1/telemetry` (Node mTLS)
+
+```json
+{
+  "agentVersion": "0.9.0",
+  "os": { "name": "Fedora Linux", "version": "44", "kernel": "7.2.11-200.fc44.x86_64" },
+  "arch": "x86_64",
+  "hostname": "studio-mini.home.arpa",
+  "user": "joan",
+  "installMethod": "homebrew",
+  "serviceManager": "launchd",
+  "stateDirectory": "~/.local/state/fleet-agent"
+}
+```
+
+- Every property is present. `os` is an object whose fields may be `null`.
+  Other fields may be `null`, except `agentVersion`, which must be
+  `MAJOR.MINOR.PATCH` with an optional `-prerelease` tag.
+- Strings have control characters removed and are at most 128 characters
+  (`stateDirectory`: 512). `installMethod` is `homebrew`, `cargo` or `binary`.
+  `serviceManager` is `systemd`, `launchd` or `none`.
+- 204 on success. 400 `invalid_request`. 429 `rate_limited`, from the shared
+  per-Node limiter. The Server stores only the latest report per Node, with
+  `reportedAt` set to the time it received the report.
+
+### Operator API
+
+`latestVersion` is the Server's own version: Server and Agent releases share
+version numbers. `outdated` is true when `agentVersion` is lower than
+`latestVersion` under semantic versioning, where a prerelease sorts below its
+release.
+
+- `GET nodes` items gain `agent`:
+  `{ "version", "outdated", "os": { "name", "version" }, "arch", "hostname" }`,
+  or `null` if the Node never reported.
+- `GET nodes/{node}` gains `agent`:
+  `{ "version", "latestVersion", "outdated", "os": { "name", "version", "kernel" }, "arch", "hostname", "user", "installMethod", "serviceManager", "stateDirectory", "reportedAt" }`,
+  or `null`.
+- `GET issues` adds `agent_outdated` (warning), one per non-revoked Node with
+  `outdated: true`. `since` is `reportedAt`. `commands` include
+  `fleet nodes show <alias>`. Its `detail` names the running and the latest
+  version, and its `action` gives the upgrade command for the install
+  method:
+  - Homebrew: `brew upgrade fleet-agent`.
+  - Cargo: reinstall with Cargo from the release tag, as in
+    `cli-installation.md`.
+  - Binary: replace the binary from the release archive and restart the
+    service.

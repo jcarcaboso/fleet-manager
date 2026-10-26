@@ -375,6 +375,7 @@ dependencies = [
  "dirs",
  "fleet-reconcile",
  "jsonc-parser",
+ "libc",
  "rcgen",
  "reqwest",
  "serde",

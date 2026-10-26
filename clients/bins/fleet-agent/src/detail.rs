@@ -463,7 +463,18 @@ pub mod testing {
     pub struct Request {
         pub method: String,
         pub path: String,
+        /// Lower-case header names with trimmed values.
+        pub headers: Vec<(String, String)>,
         pub body: String,
+    }
+
+    impl Request {
+        pub fn header(&self, name: &str) -> Option<&str> {
+            self.headers
+                .iter()
+                .find(|(key, _)| key == name)
+                .map(|(_, value)| value.as_str())
+        }
     }
 
     pub struct MockServer {
@@ -537,16 +548,19 @@ pub mod testing {
         let mut parts = line.split_whitespace();
         let (method, path) = (parts.next()?.to_owned(), parts.next()?.to_owned());
         let mut length = 0;
+        let mut headers = Vec::new();
         loop {
             line.clear();
             reader.read_line(&mut line).ok()?;
             if line == "\r\n" || line.is_empty() {
                 break;
             }
-            if let Some((name, value)) = line.split_once(':')
-                && name.eq_ignore_ascii_case("content-length")
-            {
-                length = value.trim().parse().ok()?;
+            if let Some((name, value)) = line.split_once(':') {
+                let name = name.to_ascii_lowercase();
+                if name == "content-length" {
+                    length = value.trim().parse().ok()?;
+                }
+                headers.push((name, value.trim().to_owned()));
             }
         }
         let mut body = vec![0; length];
@@ -554,6 +568,7 @@ pub mod testing {
         Some(Request {
             method,
             path,
+            headers,
             body: String::from_utf8_lossy(&body).into_owned(),
         })
     }

@@ -309,6 +309,7 @@ public sealed partial class OperatorApiTests(OperatorApiFixture fixture) : IClas
         var operateRoutes = new (string Path, object? Body)[]
         {
             ("source/rescan", null), ("cliproxy/refresh", null), ("nodes/missing/retry", new { target = "skills" }),
+            ("nodes/missing/disk-usage/refresh", null),
             ("cliproxy/selection", new { baseUrl = "https://proxy.example/v1", version = 0, policy = (object?)null })
         };
         var adminRoutes = new (string Path, object? Body)[]

@@ -127,5 +127,35 @@
     "succeeded": 2,
     "failed": 1,
     "superseded": 0
+  },
+  "disk": {
+    "measuredAt": "2026-10-25T12:00:00Z",
+    "refreshRequestedAt": null,
+    "volumes": [
+      {
+        "label": "home",
+        "totalBytes": 994662584320,
+        "usedBytes": 871203905536,
+        "availableBytes": 72818462720,
+        "usedPercent": 92.3
+      }
+    ]
+  },
+  "agent": {
+    "version": "0.8.0",
+    "latestVersion": "0.8.1",
+    "outdated": true,
+    "os": {
+      "name": "Fedora Linux",
+      "version": "44",
+      "kernel": "7.2.11-200.fc44.x86_64"
+    },
+    "arch": "x86_64",
+    "hostname": "studio-mini.home.arpa",
+    "user": "joan",
+    "installMethod": "homebrew",
+    "serviceManager": "systemd",
+    "stateDirectory": "~/.local/state/fleet-agent",
+    "reportedAt": "2026-10-25T12:00:00Z"
   }
 }

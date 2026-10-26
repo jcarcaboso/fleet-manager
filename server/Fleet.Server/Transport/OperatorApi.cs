@@ -104,6 +104,11 @@ public static partial class OperatorApi
             return await coordinator.RetryAssignmentAsync(
                 new(await ResolveNodeAsync(http, node, coordinator, false, ct), request.Target, Actor(http)), ct);
         }).Scope(OperatorScope.Operate);
+        // Records the request; the Agent answers on its next poll if it supports disk usage. Repeats keep the first timestamp.
+        api.MapPost("/nodes/{node}/disk-usage/refresh", async (string node, HttpContext http, IFleetCoordinator coordinator,
+            CancellationToken ct) =>
+            Results.Json(await coordinator.RequestDiskUsageRefreshAsync(await ResolveNodeAsync(http, node, coordinator, false, ct), Actor(http), ct),
+                statusCode: StatusCodes.Status202Accepted)).Scope(OperatorScope.Operate);
         api.MapPost("/nodes/rename", async (OperatorRenameAliasRequest request, HttpContext http,
             IFleetCoordinator coordinator, CancellationToken ct) =>
             await coordinator.RenameNodeAliasAsOperatorAsync(new(request.CurrentAlias, request.Alias, Actor(http)), ct))
@@ -122,8 +127,9 @@ public static partial class OperatorApi
 
         // Issues and errors
         api.MapGet("/issues", async (FleetDbContext db, IFleetCoordinator coordinator, CliProxyCatalog catalog,
-            IOptions<FleetOptions> options, IConfiguration configuration, TimeProvider time, CancellationToken ct) =>
-            new { items = await OperatorIssues.ReadAsync(db, coordinator, catalog, options, configuration, time, ct) })
+            IOptions<FleetOptions> options, IConfiguration configuration, TimeProvider time, LatestAgentVersion latest,
+            CancellationToken ct) =>
+            new { items = await OperatorIssues.ReadAsync(db, coordinator, catalog, options, configuration, time, latest.Value, ct) })
             .Scope(OperatorScope.Read);
         api.MapGet("/errors", () => new { items = ErrorCatalog.All }).Scope(OperatorScope.Read);
         api.MapGet("/errors/{code}", (string code) => ErrorCatalog.Find(code) ?? throw new OperatorApiException(404, "invalid_request",

@@ -409,11 +409,40 @@ namespace Fleet.Server.Persistence.Migrations
                     b.ToTable("node_checkins", (string)null);
                 });
 
+            modelBuilder.Entity("Fleet.Server.Persistence.NodeDiskUsageRow", b =>
+                {
+                    b.Property<Guid>("NodeId")
+                        .HasColumnType("uuid");
+
+                    b.Property<string>("Label")
+                        .HasMaxLength(16)
+                        .HasColumnType("character varying(16)");
+
+                    b.Property<long>("AvailableBytes")
+                        .HasColumnType("bigint");
+
+                    b.Property<DateTimeOffset>("MeasuredAt")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.Property<long>("TotalBytes")
+                        .HasColumnType("bigint");
+
+                    b.Property<long>("UsedBytes")
+                        .HasColumnType("bigint");
+
+                    b.HasKey("NodeId", "Label");
+
+                    b.ToTable("node_disk_usage", (string)null);
+                });
+
             modelBuilder.Entity("Fleet.Server.Persistence.NodeRow", b =>
                 {
                     b.Property<Guid>("Id")
                         .ValueGeneratedOnAdd()
                         .HasColumnType("uuid");
+
+                    b.Property<DateTimeOffset?>("DiskUsageRefreshRequestedAt")
+                        .HasColumnType("timestamp with time zone");
 
                     b.Property<DateTimeOffset>("EnrolledAt")
                         .HasColumnType("timestamp with time zone");
@@ -443,6 +472,60 @@ namespace Fleet.Server.Persistence.Migrations
                         .IsUnique();
 
                     b.ToTable("nodes", (string)null);
+                });
+
+            modelBuilder.Entity("Fleet.Server.Persistence.NodeTelemetryRow", b =>
+                {
+                    b.Property<Guid>("NodeId")
+                        .HasColumnType("uuid");
+
+                    b.Property<string>("AgentVersion")
+                        .IsRequired()
+                        .HasMaxLength(128)
+                        .HasColumnType("character varying(128)");
+
+                    b.Property<string>("Arch")
+                        .HasMaxLength(128)
+                        .HasColumnType("character varying(128)");
+
+                    b.Property<string>("Hostname")
+                        .HasMaxLength(128)
+                        .HasColumnType("character varying(128)");
+
+                    b.Property<string>("InstallMethod")
+                        .HasMaxLength(16)
+                        .HasColumnType("character varying(16)");
+
+                    b.Property<string>("OsKernel")
+                        .HasMaxLength(128)
+                        .HasColumnType("character varying(128)");
+
+                    b.Property<string>("OsName")
+                        .HasMaxLength(128)
+                        .HasColumnType("character varying(128)");
+
+                    b.Property<string>("OsVersion")
+                        .HasMaxLength(128)
+                        .HasColumnType("character varying(128)");
+
+                    b.Property<DateTimeOffset>("ReportedAt")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.Property<string>("ServiceManager")
+                        .HasMaxLength(16)
+                        .HasColumnType("character varying(16)");
+
+                    b.Property<string>("StateDirectory")
+                        .HasMaxLength(512)
+                        .HasColumnType("character varying(512)");
+
+                    b.Property<string>("User")
+                        .HasMaxLength(128)
+                        .HasColumnType("character varying(128)");
+
+                    b.HasKey("NodeId");
+
+                    b.ToTable("node_telemetry", (string)null);
                 });
 
             modelBuilder.Entity("Fleet.Server.Persistence.RolloutRow", b =>
@@ -669,6 +752,24 @@ namespace Fleet.Server.Persistence.Migrations
                 });
 
             modelBuilder.Entity("Fleet.Server.Persistence.NodeCheckinRow", b =>
+                {
+                    b.HasOne("Fleet.Server.Persistence.NodeRow", null)
+                        .WithMany()
+                        .HasForeignKey("NodeId")
+                        .OnDelete(DeleteBehavior.Cascade)
+                        .IsRequired();
+                });
+
+            modelBuilder.Entity("Fleet.Server.Persistence.NodeDiskUsageRow", b =>
+                {
+                    b.HasOne("Fleet.Server.Persistence.NodeRow", null)
+                        .WithMany()
+                        .HasForeignKey("NodeId")
+                        .OnDelete(DeleteBehavior.Cascade)
+                        .IsRequired();
+                });
+
+            modelBuilder.Entity("Fleet.Server.Persistence.NodeTelemetryRow", b =>
                 {
                     b.HasOne("Fleet.Server.Persistence.NodeRow", null)
                         .WithMany()

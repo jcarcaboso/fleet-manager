@@ -2,21 +2,23 @@ mod actions;
 mod ai_client;
 mod credentials;
 mod detail;
+mod disk;
 mod protocol;
 mod service;
 mod state;
+mod telemetry;
 
 use anyhow::{Context, Result, bail};
 use clap::{Parser, Subcommand};
 use credentials::{CredentialStore, StoredIdentity};
-use protocol::{Api, Assignment, ConvergenceState};
+use protocol::{Api, Assignment, ConvergenceState, DiskUsageReport, TelemetryReport};
 use serde::{Deserialize, Serialize};
 use std::{
     collections::BTreeMap,
     fs,
     io::{self, BufRead, Write},
     path::{Path, PathBuf},
-    time::Duration,
+    time::{Duration, Instant},
 };
 use time::{OffsetDateTime, format_description::well_known::Rfc3339};
 use uuid::Uuid;
@@ -266,6 +268,12 @@ async fn main() -> Result<()> {
             let actions = actions::Registry::new(&reconciler, &ai_reconciler, &cache);
             let path = directory.join("run.json");
             let mut run = state::read_json::<RunState>(&path)?.unwrap_or_default();
+            let mut disk_schedule = disk::Schedule::default();
+            let mut disk_worker = disk::Worker::new(config.home.clone(), directory.clone());
+            let mut disk_report: Option<tokio::task::JoinHandle<()>> = None;
+            let mut telemetry_schedule = telemetry::Schedule::default();
+            let mut telemetry_worker = telemetry::worker(directory.clone(), config.home.clone());
+            let mut telemetry_report: Option<TelemetryTask> = None;
             loop {
                 let result = cycle(
                     &config,
@@ -275,10 +283,28 @@ async fn main() -> Result<()> {
                     &path,
                     &directory,
                     &actions,
+                    &mut disk_schedule,
+                    &mut telemetry_schedule,
                 )
                 .await;
                 // After the cycle, so the report and reconciliation never wait for it.
                 send_pending_detail(&config, &identity, &run, &directory).await;
+                send_disk_usage(
+                    &config,
+                    &identity,
+                    &mut disk_schedule,
+                    &mut disk_worker,
+                    &mut disk_report,
+                )
+                .await;
+                send_telemetry(
+                    &config,
+                    &identity,
+                    &mut telemetry_schedule,
+                    &mut telemetry_worker,
+                    &mut telemetry_report,
+                )
+                .await;
                 let outcome = match result {
                     Ok(outcome) => outcome,
                     Err(error) if once => return Err(error),
@@ -303,6 +329,14 @@ async fn main() -> Result<()> {
                     _ = tokio::time::sleep(Duration::from_secs(outcome.next_poll_seconds.clamp(5, 3600))) => {},
                     result = tokio::signal::ctrl_c() => { result?; break; }
                 }
+            }
+            // `--once` is a one-shot: let a report in flight finish (its own
+            // 10 s timeout bounds this). Otherwise it ends with the process.
+            if once && let Some(report) = disk_report {
+                let _ = report.await;
+            }
+            if once && let Some(report) = telemetry_report {
+                let _ = report.await;
             }
         }
         Command::Service { .. } => unreachable!(),
@@ -536,6 +570,147 @@ async fn send_pending_detail(
     }
 }
 
+/// Sends the disk usage when the schedule says so. Like attempt detail it is
+/// best effort and runs after reconciliation: nothing here can fail a cycle.
+/// The attempt is recorded first, so a failure waits for the next slot or the
+/// next Server request instead of being retried.
+async fn send_disk_usage(
+    config: &state::Config,
+    identity: &StoredIdentity,
+    schedule: &mut disk::Schedule,
+    worker: &mut disk::Worker,
+    in_flight: &mut Option<tokio::task::JoinHandle<()>>,
+) {
+    step_disk_usage(schedule, worker, in_flight, |report| {
+        let client = api(config, identity);
+        async move {
+            match client {
+                Ok(client) => deliver_disk_usage(&client, &report).await,
+                Err(error) => eprintln!("could not send disk usage: {error}"),
+            }
+        }
+    })
+    .await;
+}
+
+/// One cycle's disk work. The measurement runs on the [`disk::Worker`] thread
+/// and the report is a side task, so neither can delay the next poll beyond
+/// the worker's short bounded wait. At most one report is in flight; a report
+/// that finds another still running is dropped, and the schedule tries again
+/// at the next slot or request.
+async fn step_disk_usage<F, Fut>(
+    schedule: &mut disk::Schedule,
+    worker: &mut disk::Worker,
+    in_flight: &mut Option<tokio::task::JoinHandle<()>>,
+    send: F,
+) where
+    F: FnOnce(DiskUsageReport) -> Fut,
+    Fut: std::future::Future<Output = ()> + Send + 'static,
+{
+    let now = Instant::now();
+    // A measurement requested in an earlier cycle may have finished since.
+    let mut report = worker.collect(now);
+    if report.is_none() && worker.is_idle() && schedule.is_due(now) {
+        schedule.attempted(now);
+        report = worker.measure(now).await;
+    }
+    let Some(report) = report else {
+        return;
+    };
+    if in_flight.as_ref().is_some_and(|task| !task.is_finished()) {
+        eprintln!("skipped a disk usage report: the previous one is still being sent");
+        return;
+    }
+    *in_flight = Some(tokio::spawn(send(report)));
+}
+
+/// A machine information report being sent. It ends with the report if the
+/// Server accepted it.
+type TelemetryTask = tokio::task::JoinHandle<Option<TelemetryReport>>;
+
+/// Sends the machine information when the schedule says so. Like disk usage it
+/// is best effort, runs after reconciliation and cannot fail a cycle.
+async fn send_telemetry(
+    config: &state::Config,
+    identity: &StoredIdentity,
+    schedule: &mut telemetry::Schedule,
+    worker: &mut disk::Worker<TelemetryReport>,
+    in_flight: &mut Option<TelemetryTask>,
+) {
+    step_telemetry(Instant::now(), schedule, worker, in_flight, |report| {
+        let client = api(config, identity);
+        async move {
+            match client {
+                Ok(client) => deliver_telemetry(&client, &report).await,
+                Err(error) => {
+                    eprintln!("could not send machine information: {error}");
+                    false
+                }
+            }
+        }
+    })
+    .await;
+}
+
+/// One cycle's machine information work, shaped like [`step_disk_usage`]. The
+/// reads run on the worker thread and the report is a side task, with at most
+/// one in flight. A report the Server did not accept is not remembered, so the
+/// next slot (4 hours after this attempt) sends it again; one it accepted is
+/// sent again only if the values change.
+async fn step_telemetry<F, Fut>(
+    now: Instant,
+    schedule: &mut telemetry::Schedule,
+    worker: &mut disk::Worker<TelemetryReport>,
+    in_flight: &mut Option<TelemetryTask>,
+    send: F,
+) where
+    F: FnOnce(TelemetryReport) -> Fut,
+    Fut: std::future::Future<Output = bool> + Send + 'static,
+{
+    // The previous report finished: remember it if the Server accepted it.
+    if let Some(task) = in_flight.take_if(|task| task.is_finished())
+        && let Ok(Some(accepted)) = task.await
+    {
+        schedule.accepted(accepted);
+    }
+    let mut report = worker.collect(now);
+    if report.is_none() && worker.is_idle() && schedule.is_due(now) {
+        schedule.attempted(now);
+        report = worker.measure(now).await;
+    }
+    let Some(report) = report else {
+        return;
+    };
+    if !schedule.needs_sending(&report) {
+        return;
+    }
+    if in_flight.is_some() {
+        eprintln!("skipped a machine information report: the previous one is still being sent");
+        return;
+    }
+    let sending = send(report.clone());
+    *in_flight = Some(tokio::spawn(async move { sending.await.then_some(report) }));
+}
+
+/// True when the Server accepted the report. A 404 from an older Server and
+/// every other failure is logged and left for the next slot.
+async fn deliver_telemetry(client: &Api, report: &TelemetryReport) -> bool {
+    match client.telemetry(report).await {
+        Ok(()) => true,
+        Err(error) => {
+            eprintln!("could not send machine information; will retry later: {error}");
+            false
+        }
+    }
+}
+
+async fn deliver_disk_usage(client: &Api, report: &DiskUsageReport) {
+    if let Err(error) = client.disk_usage(report).await {
+        eprintln!("could not send disk usage; will retry later: {error}");
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
 async fn cycle(
     config: &state::Config,
     store: &CredentialStore,
@@ -544,6 +719,8 @@ async fn cycle(
     path: &Path,
     directory: &Path,
     actions: &actions::Registry<'_>,
+    disk_schedule: &mut disk::Schedule,
+    telemetry_schedule: &mut telemetry::Schedule,
 ) -> Result<CycleOutcome> {
     migrate_run_state(run);
     for assignment in run
@@ -570,6 +747,8 @@ async fn cycle(
     if poll.node_id != identity.node_id || poll.workspace_id != identity.workspace_id {
         bail!("Server returned another Node or Workspace identity");
     }
+    disk_schedule.poll_succeeded(poll.disk_usage_requested);
+    telemetry_schedule.poll_succeeded();
     let delay = poll.next_poll_seconds;
     if let Some(assignment) = poll.assignment {
         actions.validate(&assignment)?;
@@ -1008,5 +1187,298 @@ mod tests {
         assert_eq!(outcome, Some(detail::Delivery::Dropped("expired")));
         assert!(!directory.join("pending-detail.json").exists());
         fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[tokio::test]
+    async fn disk_usage_is_sent_best_effort_and_never_retried_in_a_loop() {
+        let directory = test_directory();
+        let server = detail::testing::MockServer::start(vec![(404, ""), (204, "")]);
+        let client = Api::for_loopback_test(&server.url());
+        let report = disk::measure(&directory, &directory).expect("measurable");
+
+        // An older Server answers 404: logged, nothing returned, one request.
+        deliver_disk_usage(&client, &report).await;
+        assert_eq!(server.requests().len(), 1);
+        deliver_disk_usage(&client, &report).await;
+
+        let requests = server.requests();
+        assert_eq!(requests.len(), 2);
+        assert!(
+            requests
+                .iter()
+                .all(|r| r.method == "PUT" && r.path == "/agent/v1/disk-usage")
+        );
+        let body: serde_json::Value = serde_json::from_str(&requests[1].body).unwrap();
+        let volumes = body["volumes"].as_array().unwrap();
+        assert_eq!(volumes.len(), 1, "state directory shares the home device");
+        assert_eq!(volumes[0]["label"], "home");
+        assert!(volumes[0]["totalBytes"].as_u64().unwrap() > 0);
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    fn sample_disk_report() -> DiskUsageReport {
+        DiskUsageReport {
+            volumes: vec![protocol::DiskVolume {
+                label: "home",
+                total_bytes: 10,
+                used_bytes: 4,
+                available_bytes: 6,
+            }],
+        }
+    }
+
+    fn fake_worker(measure: impl Fn() -> Option<DiskUsageReport> + Send + 'static) -> disk::Worker {
+        disk::Worker::with_measurer(
+            Box::new(measure),
+            Duration::from_secs(5),
+            Duration::from_secs(60),
+        )
+    }
+
+    #[tokio::test]
+    async fn the_report_is_a_side_task_and_one_is_in_flight_at_most() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        let sent = std::sync::Arc::new(AtomicUsize::new(0));
+        let mut schedule = disk::Schedule::default();
+        let mut worker = fake_worker(|| Some(sample_disk_report()));
+        let mut in_flight = None;
+        let slow_send = |sent: std::sync::Arc<AtomicUsize>| {
+            move |_report: DiskUsageReport| async move {
+                sent.fetch_add(1, Ordering::SeqCst);
+                tokio::time::sleep(Duration::from_secs(30)).await;
+            }
+        };
+
+        // Not due before the first successful poll: nothing happens.
+        step_disk_usage(
+            &mut schedule,
+            &mut worker,
+            &mut in_flight,
+            slow_send(sent.clone()),
+        )
+        .await;
+        assert!(in_flight.is_none());
+
+        // Due: the cycle returns while the 30 s send is still running.
+        schedule.poll_succeeded(false);
+        let began = Instant::now();
+        step_disk_usage(
+            &mut schedule,
+            &mut worker,
+            &mut in_flight,
+            slow_send(sent.clone()),
+        )
+        .await;
+        assert!(began.elapsed() < Duration::from_secs(2));
+        assert!(in_flight.as_ref().is_some_and(|task| !task.is_finished()));
+        tokio::task::yield_now().await;
+        assert_eq!(sent.load(Ordering::SeqCst), 1);
+
+        // Asked again while that report is still being sent: dropped.
+        schedule.poll_succeeded(true);
+        step_disk_usage(
+            &mut schedule,
+            &mut worker,
+            &mut in_flight,
+            slow_send(sent.clone()),
+        )
+        .await;
+        tokio::task::yield_now().await;
+        assert_eq!(sent.load(Ordering::SeqCst), 1);
+        in_flight.take().unwrap().abort();
+    }
+
+    #[tokio::test]
+    async fn nothing_is_sent_when_no_volume_can_be_measured() {
+        let mut schedule = disk::Schedule::default();
+        schedule.poll_succeeded(false);
+        let mut worker = fake_worker(|| None);
+        let mut in_flight = None;
+        step_disk_usage(&mut schedule, &mut worker, &mut in_flight, |_| async {
+            panic!("no report to send");
+        })
+        .await;
+        assert!(in_flight.is_none());
+        // The attempt counts: no new try before the next slot.
+        assert!(!schedule.is_due(Instant::now()));
+    }
+
+    #[tokio::test]
+    async fn a_stuck_measurement_never_stalls_the_cycle() {
+        let (release, blocked) = std::sync::mpsc::channel::<()>();
+        let blocked = std::sync::Mutex::new(blocked);
+        let mut schedule = disk::Schedule::default();
+        schedule.poll_succeeded(false);
+        let mut worker = disk::Worker::with_measurer(
+            Box::new(move || {
+                let _ = blocked.lock().unwrap().recv();
+                None
+            }),
+            Duration::from_millis(30),
+            Duration::from_millis(60),
+        );
+        let mut in_flight = None;
+        let began = Instant::now();
+        step_disk_usage(&mut schedule, &mut worker, &mut in_flight, |_| async {
+            panic!("no report to send");
+        })
+        .await;
+        assert!(began.elapsed() < Duration::from_secs(2));
+        assert!(!worker.is_idle());
+        assert!(in_flight.is_none());
+        drop(release);
+    }
+
+    fn telemetry_worker(
+        counter: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+    ) -> disk::Worker<TelemetryReport> {
+        // The hostname follows the counter, so a test changes the values by
+        // bumping it.
+        disk::Worker::styled(
+            Box::new(move || {
+                let mut report = telemetry::fixture();
+                report.hostname = Some(format!(
+                    "host-{}",
+                    counter.load(std::sync::atomic::Ordering::SeqCst)
+                ));
+                Some(report)
+            }),
+            Duration::from_secs(5),
+            Duration::from_secs(60),
+            disk::Style {
+                thread: "fleet-telemetry-test",
+                what: "machine information",
+                stack_bytes: 512 * 1024,
+            },
+        )
+    }
+
+    async fn finish(task: &Option<TelemetryTask>) {
+        while task.as_ref().is_some_and(|task| !task.is_finished()) {
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    }
+
+    #[tokio::test]
+    async fn machine_information_is_sent_after_the_first_poll_then_only_on_change() {
+        use std::sync::{
+            Arc, Mutex,
+            atomic::{AtomicUsize, Ordering},
+        };
+        let slot = disk::REPORT_INTERVAL;
+        let start = Instant::now();
+        let counter = Arc::new(AtomicUsize::new(0));
+        let accept = Arc::new(std::sync::atomic::AtomicBool::new(true));
+        let sent: Arc<Mutex<Vec<String>>> = Arc::default();
+        let mut schedule = telemetry::Schedule::default();
+        let mut worker = telemetry_worker(counter.clone());
+        let mut in_flight = None;
+        let mut cycle = async |now: Instant,
+                               schedule: &mut telemetry::Schedule,
+                               in_flight: &mut Option<TelemetryTask>| {
+            let (sent, accept) = (sent.clone(), accept.clone());
+            step_telemetry(now, schedule, &mut worker, in_flight, |report| async move {
+                sent.lock().unwrap().push(report.hostname.unwrap());
+                accept.load(Ordering::SeqCst)
+            })
+            .await;
+            finish(in_flight).await;
+        };
+
+        // Not before the first successful poll.
+        cycle(start, &mut schedule, &mut in_flight).await;
+        assert!(sent.lock().unwrap().is_empty());
+
+        // The first poll sends; polls in the next minutes do not.
+        schedule.poll_succeeded();
+        cycle(start, &mut schedule, &mut in_flight).await;
+        cycle(
+            start + Duration::from_secs(60),
+            &mut schedule,
+            &mut in_flight,
+        )
+        .await;
+        assert_eq!(*sent.lock().unwrap(), ["host-0"]);
+
+        // The next slot with unchanged values sends nothing.
+        cycle(start + slot, &mut schedule, &mut in_flight).await;
+        assert_eq!(sent.lock().unwrap().len(), 1);
+
+        // Changed values go out at the following slot, not before.
+        counter.store(1, Ordering::SeqCst);
+        cycle(
+            start + slot + Duration::from_secs(60),
+            &mut schedule,
+            &mut in_flight,
+        )
+        .await;
+        assert_eq!(sent.lock().unwrap().len(), 1);
+        accept.store(false, Ordering::SeqCst);
+        cycle(start + 2 * slot, &mut schedule, &mut in_flight).await;
+        assert_eq!(*sent.lock().unwrap(), ["host-0", "host-1"]);
+
+        // The Server refused (404, 429, ...): not retried before the next slot,
+        // then retried although the values did not change again.
+        cycle(
+            start + 2 * slot + Duration::from_secs(30 * 60),
+            &mut schedule,
+            &mut in_flight,
+        )
+        .await;
+        assert_eq!(sent.lock().unwrap().len(), 2);
+        accept.store(true, Ordering::SeqCst);
+        cycle(start + 3 * slot, &mut schedule, &mut in_flight).await;
+        assert_eq!(sent.lock().unwrap().len(), 3);
+        cycle(start + 4 * slot, &mut schedule, &mut in_flight).await;
+        assert_eq!(
+            sent.lock().unwrap().len(),
+            3,
+            "accepted values are not resent"
+        );
+    }
+
+    #[tokio::test]
+    async fn machine_information_is_a_side_task_with_one_in_flight() {
+        let start = Instant::now();
+        let counter = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let mut schedule = telemetry::Schedule::default();
+        schedule.poll_succeeded();
+        let mut worker = telemetry_worker(counter.clone());
+        let mut in_flight = None;
+        let slow = |_report: TelemetryReport| async {
+            tokio::time::sleep(Duration::from_secs(30)).await;
+            true
+        };
+        let began = Instant::now();
+        step_telemetry(start, &mut schedule, &mut worker, &mut in_flight, slow).await;
+        assert!(began.elapsed() < Duration::from_secs(2));
+        assert!(in_flight.as_ref().is_some_and(|task| !task.is_finished()));
+
+        // A slot arrives while the report is still being sent: dropped.
+        counter.store(1, std::sync::atomic::Ordering::SeqCst);
+        step_telemetry(
+            start + disk::REPORT_INTERVAL,
+            &mut schedule,
+            &mut worker,
+            &mut in_flight,
+            |_| async { panic!("one report at a time") },
+        )
+        .await;
+        in_flight.take().unwrap().abort();
+    }
+
+    #[tokio::test]
+    async fn machine_information_failures_are_not_remembered() {
+        let server = detail::testing::MockServer::start(vec![(404, ""), (204, "")]);
+        let client = Api::for_loopback_test(&server.url());
+        let report = telemetry::fixture();
+        assert!(!deliver_telemetry(&client, &report).await);
+        assert!(deliver_telemetry(&client, &report).await);
+        let requests = server.requests();
+        assert!(
+            requests
+                .iter()
+                .all(|r| r.method == "PUT" && r.path == "/agent/v1/telemetry")
+        );
     }
 }

@@ -93,6 +93,33 @@ public interface IFleetCoordinator
         AttemptDetail detail,
         CancellationToken cancellationToken = default);
 
+    /// <summary>
+    /// Replaces the Node's stored disk volumes with the report and clears a pending refresh request, in one transaction.
+    /// The report is validated with <see cref="DiskUsageRules"/>; invalid reports throw invalid_request.
+    /// </summary>
+    Task RecordDiskUsageAsync(
+        NodeAuthentication authentication,
+        DiskUsageReport report,
+        CancellationToken cancellationToken = default);
+
+    /// <summary>
+    /// Records that an Operator wants a fresh disk report. A repeat keeps the original timestamp until the Agent reports.
+    /// Throws node_not_found, or node_revoked for a revoked Node.
+    /// </summary>
+    Task<DiskRefreshRequested> RequestDiskUsageRefreshAsync(
+        NodeId nodeId,
+        string requestedBy,
+        CancellationToken cancellationToken = default);
+
+    /// <summary>
+    /// Replaces the Node's stored telemetry with the report, in one transaction under the Node row lock.
+    /// The report is validated with <see cref="AgentTelemetryRules"/>; invalid reports throw invalid_request.
+    /// </summary>
+    Task RecordAgentTelemetryAsync(
+        NodeAuthentication authentication,
+        AgentTelemetryReport report,
+        CancellationToken cancellationToken = default);
+
     Task<Page<NodeStatus>> GetNodesAsync(
         PageRequest page,
         DateTimeOffset now,

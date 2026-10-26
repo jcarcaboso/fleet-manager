@@ -198,7 +198,8 @@ public sealed class OperatorApiFixture : IAsyncLifetime
         return new(digest, "fleet.file/v1", bytes.Length, bytes);
     }
 
-    public async Task<HttpContext> SendNodeAsync(string path, X509Certificate2 certificate, object? body = null, string method = "POST")
+    public async Task<HttpContext> SendNodeAsync(string path, X509Certificate2 certificate, object? body = null, string method = "POST",
+        string? capabilities = null)
     {
         using var client = new HttpClient(Factory.Server.CreateHandler(context =>
         {
@@ -208,6 +209,7 @@ public sealed class OperatorApiFixture : IAsyncLifetime
         { BaseAddress = new Uri(Origin) };
         using var request = new HttpRequestMessage(new HttpMethod(method), path);
         if (body is not null) request.Content = JsonContent.Create(body);
+        if (capabilities is not null) request.Headers.TryAddWithoutValidation("X-Fleet-Agent-Capabilities", capabilities);
         using var response = await client.SendAsync(request);
         var result = new DefaultHttpContext();
         result.Response.StatusCode = (int)response.StatusCode;
