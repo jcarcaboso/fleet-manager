@@ -273,17 +273,56 @@ describe('search, grouping and sorting', () => {
     expect(seen[0]).toMatch(/^Seen (just now|\d+ s ago)/);
   });
 
-  it('keeps the grouping and sort when the page is visited again, but not the search', async () => {
+  it('keeps the grouping, the sort and the search when the page is visited again (as the old module-level state did)', async () => {
     await open();
     await group('platform');
     await sort('name');
     await search('mac');
+    const shown = names();
+    expect(shown.length).toBeGreaterThan(0);
     await app!.go('/audit');
     await app!.go('/machines');
     await waitFor(() => $('.card'));
-    expect(secTitles().join()).toBe('macOS:6,Linux:7');
+    expect(secTitles().join()).toBe('macOS:6');
     expect((app!.wrapper.find('#sort').element as HTMLSelectElement).value).toBe('name');
+    expect((app!.wrapper.find('#q').element as HTMLInputElement).value).toBe('mac');
+    expect(names()).toEqual(shown);
+  });
+
+  it('a link that was created clears the search so the new machine is visible; a revoked link leaves it alone', async () => {
+    await open();
+    await search('mac');
+    app!.ctx.enrollmentBus.revoked('00000000-0000-4000-8000-000000000001');
+    await app!.settle();
+    expect((app!.wrapper.find('#q').element as HTMLInputElement).value, 'a late revoke').toBe('mac');
+    expect(app!.mock.calls.filter(c => c.path === 'nodes').length, 'but the lists reload').toBeGreaterThan(1);
+    app!.ctx.enrollmentBus.linkCreated();
+    await app!.settle();
+    expect((app!.wrapper.find('#q').element as HTMLInputElement).value, 'a created link').toBe('');
+    expect(app!.ctx.gallery.search).toBe('');
+  });
+
+  it('signing out forgets the search (and the grouping and sort stay: they are only a layout)', async () => {
+    await open();
+    await group('platform');
+    await search('mac');
+    await app!.ctx.session.logout();
+    await waitFor(() => app!.router.currentRoute.value.name === 'login'); // the redirect loads the sign-in view lazily
+    await app!.settle();
+    expect(app!.ctx.gallery).toMatchObject({ search: '', groupBy: 'platform' });
+    await app!.signIn();
+    await app!.go('/machines');
+    await waitFor(() => $('.card'));
     expect((app!.wrapper.find('#q').element as HTMLInputElement).value).toBe('');
+  });
+
+  it('the page /machines?add=1 (the old #/add bookmark) opens the Add machine wizard and cleans the address', async () => {
+    installIntersectionObserver(() => false);
+    app = await mountApp({ path: '/machines?add=1' });
+    await waitFor(() => app!.ctx.wizard.open);
+    await waitFor(() => $('.modal'));
+    expect(app.router.currentRoute.value.fullPath).toBe('/machines');
+    expect($('.modal h2')?.textContent).toBe('Name your new machine');
   });
 
   it('lists revoked machines in a Retired section that stays open across repaints', async () => {

@@ -6,6 +6,8 @@ import { createErrorCatalog, type ErrorCatalog } from '@/composables/catalog';
 import { createNavSummary, type NavSummary } from '@/composables/summary';
 import { createToasts, type ToastStore } from '@/composables/toasts';
 import type { StatusMeta } from '@/lib/status';
+import { createEnrollmentBus, type EnrollmentBus } from '@/views/Enrollment/enrollmentBus';
+import type { GalleryPrefs } from '@/views/Machines/galleryPrefs';
 
 /** The result of the last repository sync or model refresh, shown on every page that has the button. */
 export interface ActionResult extends StatusMeta {
@@ -47,6 +49,12 @@ export interface FleetContext {
   shell: ShellState;
   /** Open/closed state of `<details>` elements by key, kept across repaints (the old `Fleet.openState`). */
   openState: Map<string, boolean>;
+  /** The "Renamed from …" sentence for the page a rename opens, by the new alias. Taken by that page; dropped when the session ends. */
+  renameNotes: Map<string, string>;
+  /** How the Machines gallery is arranged, search text included. Kept between visits; the search is cleared at the moments the old `galleryReset` was called. */
+  gallery: GalleryPrefs;
+  /** What the Enrollment page, the Machines gallery and the Add machine wizard tell each other (see `views/Enrollment/enrollmentBus.ts`). */
+  enrollmentBus: EnrollmentBus;
 }
 
 export const FLEET_KEY: InjectionKey<FleetContext> = Symbol('fleet');
@@ -68,6 +76,9 @@ export function createFleetContext({ config, fetch }: ContextOptions): FleetCont
   const shared = reactive<SharedState>({ syncing: false, lastSync: null, refreshing: false, lastRefresh: null });
   const wizard = reactive<WizardState>({ open: false, show: () => { wizard.open = true; }, hide: () => { wizard.open = false; } });
   const shell = reactive<ShellState>({ loadedAt: null, focusPending: false, markLoaded: () => { shell.loadedAt = new Date().toISOString(); } });
+  const renameNotes = new Map<string, string>();
+  const gallery = reactive<GalleryPrefs>({ groupBy: 'status', sort: 'attention', retiredOpen: false, search: '' });
+  const enrollmentBus = createEnrollmentBus();
   /* Everything cached for one Operator is dropped when the session starts or ends. */
   watch(() => session.state.status, () => {
     catalog.reset();
@@ -76,8 +87,11 @@ export function createFleetContext({ config, fetch }: ContextOptions): FleetCont
     wizard.open = false;
     shared.syncing = shared.refreshing = false;
     shared.lastSync = shared.lastRefresh = null;
+    renameNotes.clear();
+    gallery.search = '';
+    enrollmentBus.reset();
   }, { flush: 'sync' });
-  return { config, api, session, catalog, summary, toasts, shared, wizard, shell, openState: new Map() };
+  return { config, api, session, catalog, summary, toasts, shared, wizard, shell, openState: new Map(), renameNotes, gallery, enrollmentBus };
 }
 
 export function useFleet(): FleetContext {

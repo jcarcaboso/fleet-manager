@@ -6,6 +6,8 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { FAKE_TIMERS, currentTab, openNode, type NodeTest } from './helpers';
 import { waitFor } from '../../helpers/app';
+import NodeView from '@/views/Node/NodeView.vue';
+import { NODE_PAGE, type NodePage } from '@/views/Node/nodePage';
 
 let t: NodeTest | undefined;
 afterEach(() => { t?.unmount(); t = undefined; vi.useRealTimers(); });
@@ -64,7 +66,8 @@ describe('rename (rename)', () => {
     await setAlias(' studio-mini ');
     await submit();
     expect(t.text('#rename-msg')).toBe('That is already the alias.');
-    expect(t.find('#rename-msg').classes()).not.toContain('is-err');
+    expect(t.find('#rename-msg').classes(), 'neither an error nor a success').not.toContain('is-err');
+    expect(t.find('#rename-msg').classes()).not.toContain('is-ok');
     expect(t.posts()).toHaveLength(0);
   });
 
@@ -455,5 +458,122 @@ describe('answers that arrive after the user moved on (lag=<kind>:3000)', () => 
     await advance(60_000);
     expect(t.app.mock.calls.length).toBe(calls);
     expect(t.text('#disk-status')).toBe('');
+  });
+});
+
+describe('the dialogs close on any route change (Back, Forward, a tab link)', () => {
+  const openRevoke = async () => { await t!.click('.nhero-actions [data-act=revoke-node], .nhero-actions .btn-danger'); await t!.until(() => t!.exists('.modal'), 'revoke modal'); };
+  const openRemove = async () => { await t!.click('.panel--danger [data-act=remove-node]'); await t!.until(() => t!.exists('.modal input'), 'remove modal'); };
+  const page = () => (t!.w().findComponent(NodeView).vm as any).$.provides[NODE_PAGE as symbol] as NodePage;
+
+  it('a tab change closes the Revoke dialog', async () => {
+    t = await openNode('/machines/studio-mini/settings');
+    await openRevoke();
+    await t.app.router.push('/machines/studio-mini/activity');
+    await t.app.settle();
+    expect(t.exists('.modal')).toBe(false);
+    expect(page().dialog.value).toBeNull();
+    expect(document.getElementById('modal-root')!.hasAttribute('hidden')).toBe(true);
+    expect(t.posts()).toHaveLength(0);
+  });
+
+  it('browser Back and Forward close the Remove dialog', async () => {
+    t = await openNode('/machines/studio-mini/overview');
+    await t.go('/machines/studio-mini/settings');
+    await openRemove();
+    t.app.router.back();
+    await t.app.settle();
+    expect(currentTab(t)).toBe('Overview');
+    expect(t.exists('.modal'), 'Back').toBe(false);
+    t.app.router.forward();
+    await t.app.settle();
+    expect(currentTab(t)).toBe('Settings');
+    expect(t.exists('.modal'), 'Forward does not bring it back').toBe(false);
+    expect(page().dialog.value).toBeNull();
+  });
+
+  it('another machine has its own page and no dialog', async () => {
+    t = await openNode('/machines/studio-mini/settings');
+    await openRemove();
+    await t.go('/machines/design-imac/settings');
+    expect(t.exists('.modal')).toBe(false);
+    expect(page().dialog.value).toBeNull();
+  });
+
+  it('a dialog that is busy closes too, and its late answer neither reopens it nor closes the next dialog', async () => {
+    vi.useFakeTimers(FAKE_TIMERS);
+    t = await openNode('/machines/studio-mini/settings', { lag: { revoke: 3000 } });
+    await openRevoke();
+    await t.findAll('.modal-foot button').find(b => b.text() === 'Revoke access')!.trigger('click');
+    await advance(300);
+    await t.app.router.push('/machines/studio-mini/overview');
+    await t.app.settle();
+    expect(t.exists('.modal'), 'closed although the request is still running').toBe(false);
+    await t.app.router.push('/machines/studio-mini/settings');
+    await t.app.settle();
+    await openRemove(); // someone else's dialog
+    await advance(3600);
+    expect(t.exists('.modal input'), 'the late revoke answer leaves the Remove dialog alone').toBe(true);
+    expect(t.text('#modal-root h2')).toBe('Remove studio-mini permanently?');
+    expect(t.toasts()).toContain('studio-mini revoked');
+  });
+
+  it('a removal that was confirmed before a tab change still returns to the list', async () => {
+    vi.useFakeTimers(FAKE_TIMERS);
+    t = await openNode('/machines/studio-mini/settings', { lag: { remove: 3000 } });
+    await openRemove();
+    await t.find('.modal input').setValue('studio-mini');
+    await t.findAll('.modal-foot button').find(b => b.text() === 'Remove machine')!.trigger('click');
+    await advance(300);
+    await t.app.router.push('/machines/studio-mini/overview');
+    await advance(3600);
+    expect(route().fullPath).toBe('/machines');
+    expect(t.exists('.modal')).toBe(false);
+  });
+});
+
+describe('what a rename leaves behind', () => {
+  it('a rename whose navigation does not happen leaves no "Renamed from" note for a later page', async () => {
+    t = await openNode('/machines/studio-mini/settings');
+    t.app.router.beforeEach(to => (to.params.alias === 'studio-renamed' ? false : true));
+    await setAlias('studio-renamed');
+    await submit();
+    await t.app.settle();
+    expect(t.posts(/^nodes\/rename$/)).toHaveLength(1);
+    expect(route().fullPath, 'the navigation was refused').toBe('/machines/studio-mini/settings');
+    expect(t.app.ctx.renameNotes.size, 'nothing waits for a page that never opens').toBe(0);
+  });
+
+  it('a rename that is followed leaves no note behind once the new page took it', async () => {
+    t = await openNode('/machines/studio-mini/settings');
+    await setAlias('studio-renamed');
+    await submit();
+    await t.ready('studio-renamed');
+    expect(t.text('#rename-msg')).toContain('Renamed from studio-mini');
+    expect(t.app.ctx.renameNotes.size).toBe(0);
+  });
+
+  it('signing out forgets a note that was never taken', async () => {
+    t = await openNode('/machines/studio-mini/settings');
+    t.app.ctx.renameNotes.set('somebody', 'Renamed from anybody. Update its entry in fleet.yml too.');
+    await t.app.ctx.session.logout();
+    await t.app.settle();
+    expect(t.app.ctx.renameNotes.size).toBe(0);
+  });
+
+  it('a rename, a removal and the gallery search: the old galleryReset', async () => {
+    t = await openNode('/machines/studio-mini/settings');
+    t.app.ctx.gallery.search = 'mac';
+    await setAlias('studio-renamed');
+    await submit();
+    await t.ready('studio-renamed');
+    expect(t.app.ctx.gallery.search).toBe('');
+    t.app.ctx.gallery.search = 'mac';
+    await t.click('.panel--danger [data-act=remove-node]');
+    await t.until(() => t!.exists('.modal input'));
+    await t.find('.modal input').setValue('studio-renamed');
+    await t.findAll('.modal-foot button').find(b => b.text() === 'Remove machine')!.trigger('click');
+    await t.app.settle();
+    expect(t.app.ctx.gallery.search).toBe('');
   });
 });

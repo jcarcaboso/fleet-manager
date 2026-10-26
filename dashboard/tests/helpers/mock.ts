@@ -2,10 +2,11 @@ import { createApiClient, type ApiClient } from '@/api/client';
 import { createMockServer, MOCK_API_URL, type MockOptions, type MockServer } from '@/api/mock';
 import { createSession, type Session } from '@/api/session';
 import { TOKEN } from './app';
+import { watchMock } from './strict';
 
 /** A client and a session wired to a fresh mock server, without any component. */
 export function mockApi(options: Partial<MockOptions> = {}): { mock: MockServer; api: ApiClient; session: Session; unauthorized: number } {
-  const mock = createMockServer(options);
+  const mock = watchMock(createMockServer(options));
   const hooks = { unauthorized: 0 };
   let session!: Session;
   const api = createApiClient({ apiUrl: MOCK_API_URL, fetch: mock.fetch, onUnauthorized: () => { hooks.unauthorized++; session.handleUnauthorized(); } });

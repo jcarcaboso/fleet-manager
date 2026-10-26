@@ -4,8 +4,9 @@
  */
 import { describe, expect, it } from 'vitest';
 import type { AuditEvent, DesiredRevisionDetail, DesiredRevisionItem, Issue, NodeDetail, NodeListItem, Page, RolloutDetail, RolloutItem } from '@/api/types';
-import { contract, contractsAvailable } from '../helpers/contracts';
+import { contract } from '../helpers/contracts';
 import { loginClient, mockApi } from '../helpers/mock';
+import { allowMalformedBodies } from '../helpers/strict';
 
 const NONE = '00000000-0000-4000-8000-000000000000';
 const NONE2 = '00000000-0000-4000-a000-000000000000';
@@ -154,6 +155,7 @@ describe('fixtureContract', () => {
 
 describe('fixturePhase4', () => {
   it('commit, revision detail, rollout detail, drift and issue state follow the Server', async () => {
+    allowMalformedBodies(); // the issue-state checks below send bodies that do not bind on purpose
     const { mock, get, post, is } = setup();
     const F = mock;
     const list = ((await get('desired-revisions?order=newest')).body as Page<DesiredRevisionItem>).items;
@@ -365,7 +367,7 @@ describe('conventions', () => {
   });
 });
 
-describe.skipIf(!contractsAvailable)('response shapes match contracts/operator/*.json', () => {
+describe('response shapes match contracts/operator/*.json', () => {
   /** Same property names at every level (arrays compare their first item; null or a different primitive stops the descent). */
   function sameShape(actual: unknown, expected: unknown, path = '$'): string[] {
     if (expected === null || actual === null || typeof expected !== 'object' || typeof actual !== 'object') return [];

@@ -1,4 +1,5 @@
-import { ref, shallowRef, watch, type Ref, type ShallowRef } from 'vue';
+import { getCurrentInstance, inject, ref, shallowRef, watch, type Ref, type ShallowRef } from 'vue';
+import { FLEET_KEY } from '@/context';
 import { isSilent } from '@/lib/errors';
 import type { Lane, Token } from '@/lib/lanes';
 import { useView, type ViewScope } from './useView';
@@ -30,7 +31,11 @@ export interface LoadState<T> {
   refreshing: Ref<boolean>;
   /** Starts a new load. Never rejects; resolves to the data, or `undefined` when it failed or was superseded. */
   run(options?: RunOptions): Promise<T | undefined>;
-  /** Same as `run()`: loads again, aborting the one in flight. */
+  /**
+   * The user asked to load again (Refresh, Try again, Check again). Like `run()`, but when the page is replaced by its loading state and
+   * comes back, the button the user pressed is gone and the keyboard focus with it; so the first heading that mounts next takes focus
+   * (`shell.focusPending`, the same rule as after a navigation). A quiet reload keeps the page and the focus.
+   */
   reload(options?: RunOptions): Promise<T | undefined>;
   /** The lane behind it, for `lane.current()` and `lane.cancel()`. */
   lane: Lane;
@@ -52,6 +57,7 @@ export interface LoadState<T> {
  */
 export function useLoad<T>(loader: (token: Token) => Promise<T>, options: LoadOptions = {}): LoadState<T> {
   const view = options.view ?? useView();
+  const shell = getCurrentInstance() ? inject(FLEET_KEY, null)?.shell : undefined;
   const lane = view.lane();
   const data = shallowRef<T | undefined>();
   const error = shallowRef<Error | null>(null);
@@ -91,5 +97,9 @@ export function useLoad<T>(loader: (token: Token) => Promise<T>, options: LoadOp
     }, { flush: 'sync' });
   }
   if (options.immediate !== false) void run();
-  return { data, error, loading, refreshing, run, reload: run, lane, view };
+  function reload(opts: RunOptions = {}): Promise<T | undefined> {
+    if (!opts.quiet && shell) shell.focusPending = true;
+    return run(opts);
+  }
+  return { data, error, loading, refreshing, run, reload, lane, view };
 }

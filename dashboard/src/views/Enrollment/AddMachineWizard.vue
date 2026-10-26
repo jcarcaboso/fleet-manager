@@ -19,7 +19,6 @@ import { clock, enc, fmtTime, ms, now, platformLabel } from '@/lib/format';
 import type { Token } from '@/lib/lanes';
 import { nodeRoute } from '@/router';
 import { ALIAS_HINT, EXPIRIES, aliasError, installSteps, type WizardPlatform } from './enrollment';
-import { useEnrollmentBus } from './enrollmentBus';
 
 /**
  * The Add machine wizard (ported from view-enrollment.js): name it, install and enroll, then wait for the first check-in.
@@ -33,8 +32,7 @@ import { useEnrollmentBus } from './enrollmentBus';
  * cannot keep the wizard waiting past them. The created link is shown once, kept only in this dialog, and cleared when it closes.
  */
 const emit = defineEmits<{ close: [] }>();
-const { api, session, toasts } = useFleet();
-const bus = useEnrollmentBus();
+const { api, session, toasts, enrollmentBus: bus } = useFleet();
 const route = useRoute();
 const view = useView();
 const polling = view.lane(); // only the newest poll counts
@@ -106,7 +104,7 @@ function stop(): void {
   W.link = null;
   W.node = null;
   W.err = null;
-  if (created) bus.changed();
+  if (created) bus.linkCreated();
 }
 onBeforeUnmount(stop);
 
@@ -155,7 +153,7 @@ async function createLink(): Promise<void> {
     failure = e as { message: string; silent?: boolean };
   }
   if (mine !== gen) {
-    if (created) bus.changed();
+    if (created) bus.linkCreated();
     return;
   }
   W.busy = false;

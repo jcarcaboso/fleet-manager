@@ -13,6 +13,7 @@ import type {
   RolloutDetail, Scope, SelectionPolicy,
 } from '../types';
 import { ANCHOR, buildDataset, type DataAttempt, type DataCatalog, type DataCatalogModel, type DataLink, type DataNode, type DataRevision, type DataRollout, type DataTarget, type Dataset } from './dataset';
+import { bindBody, shapeFor } from './bind';
 import { defaultMockOptions, type MockOptions } from './options';
 
 /* eslint-disable @typescript-eslint/no-explicit-any */
@@ -29,6 +30,10 @@ export interface MockCall {
   settled: boolean;
   /** The caller's `AbortSignal` fired. */
   aborted: boolean;
+  /** The HTTP status of the response the mock produced (`null` until it is produced, and for a request that failed like a network error). */
+  status: number | null;
+  /** The Server would refuse the body before running the route: unknown member, wrong type, missing required member, no body (400 invalid_request). */
+  malformed: boolean;
 }
 
 export interface MockState {
@@ -122,7 +127,11 @@ export function createMockServer(overrides: Partial<MockOptions> = {}): MockServ
   const revBySha = (sha: string | null): DataRevision | undefined => F.revisions.find(r => r.shortSha === sha);
 
   /* ---------------------------------------------------------------- mutable state */
-  const state: MockState = { signedIn: !cfg.signedOut, scope: cfg.scope, actor: cfg.actor, csrf: 'mock-csrf-' + hex(Date.now(), 12) };
+  /* The antiforgery token is bound to the identity it was issued for: the Server's changes when the Operator signs in or out, and a request
+     that carries an older one is 400 invalid_csrf. The mock rotates its token at login and logout, so a client that forgets `clearCsrf()` is caught. */
+  let csrfSeq = 0;
+  const newCsrf = (): string => 'mock-csrf-' + hex(`${Date.now()}:${++csrfSeq}`, 12);
+  const state: MockState = { signedIn: !cfg.signedOut, scope: cfg.scope, actor: cfg.actor, csrf: newCsrf() };
   const nodes = (cfg.empty ? [] : JSON.parse(JSON.stringify(F.nodes))) as MNode[];
   if (cfg.weirdAlias && nodes.length) nodes[0]!.alias = 'rack/A 100%';
   const links = (cfg.empty ? [] : JSON.parse(JSON.stringify(F.enrollmentLinks))) as MLink[];
@@ -674,7 +683,7 @@ export function createMockServer(overrides: Partial<MockOptions> = {}): MockServ
   const GUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
   let cookieSent = true;
 
-  async function handle(method: string, path: string, q: URLSearchParams, body: Json, headers: Record<string, string>): Promise<Response> {
+  async function handle(method: string, path: string, q: URLSearchParams, body: Json, headers: Record<string, string>, call: MockCall): Promise<Response> {
     if (cfg.slow) await new Promise(r => setTimeout(r, cfg.slow));
     if (method === 'GET') {
       const d = /^nodes\/([^/]+)/.exec(path);
@@ -683,23 +692,33 @@ export function createMockServer(overrides: Partial<MockOptions> = {}): MockServ
     }
     if (cfg.fail && path.startsWith(cfg.fail) && method === 'GET') return err(500, 'mock_failure', 'The mock was told to fail ' + cfg.fail);
     if (path === 'csrf') return json({ token: state.csrf });
-    /* Like the Server: the Origin check comes first for every non-GET request, then the CSRF token. */
+    /* Like the Server: the JSON body is bound to the route's record first (an unknown member, a wrong type, a missing required member or no body
+       is 400 invalid_request, see bind.ts); then the Origin check for every non-GET request, then the CSRF token. */
+    const shape = method === 'POST' ? shapeFor(path) : null;
+    const malformed = (): Response => { call.malformed = true; return err(400, 'invalid_request', 'The request is malformed or a parameter is invalid.'); };
     const originOk = (): boolean => (headers.origin ?? '').toLowerCase() === (cfg.dashboardOrigin || cfg.origin).toLowerCase();
     if (path === 'login' && method === 'POST') {
+      body = bindBody(shape!, body);
+      if (!body) return malformed();
       if (!originOk()) return err(400, 'invalid_origin');
       if (!cfg.csrfCookie || headers['x-fleet-csrf'] !== state.csrf) return err(400, 'invalid_csrf');
       /* The Server rejects tokens shorter than 32 characters before it compares them. */
       if (!body || typeof body.token !== 'string' || body.token.length < 32 || body.token.length > 1024 || body.token.startsWith('bad')) return err(401, 'unauthorized', 'The Operator token was not accepted.');
       state.signedIn = true;
+      state.csrf = newCsrf();
       cookieSent = cfg.cookie;
       return json({ actor: state.actor, scope: state.scope });
     }
     if (!state.signedIn || !cookieSent) return err(401, 'unauthorized');
     if (path === 'session') return json({ actor: state.actor, scope: state.scope });
     if (method !== 'GET') {
+      if (shape) {
+        body = bindBody(shape, body);
+        if (!body) return malformed();
+      }
       if (!originOk()) return err(400, 'invalid_origin');
       if (!cfg.csrfCookie || headers['x-fleet-csrf'] !== state.csrf) return err(400, 'invalid_csrf');
-      if (path === 'logout') { state.signedIn = false; return json({ signedOut: true }); }
+      if (path === 'logout') { state.signedIn = false; state.csrf = newCsrf(); return json({ signedOut: true }); }
       if (cfg.forbid) return err(403, 'insufficient_scope', 'This credential cannot do that.');
     }
     let m: RegExpExecArray | null;
@@ -867,8 +886,7 @@ export function createMockServer(overrides: Partial<MockOptions> = {}): MockServ
     if (path === 'enrollment-links') {
       /* OperatorApi: expiresInSeconds defaults to 900 and must be 60 to 3600, then the alias is checked. The alias is only bound to the link:
          whether a Node already has it is decided when the Agent enrolls, not here. */
-      const expires = body?.expiresInSeconds === undefined ? 900 : body.expiresInSeconds;
-      if (!Number.isInteger(expires)) return err(400, 'invalid_request', 'The request is malformed or a parameter is invalid.');
+      const expires = body.expiresInSeconds ?? 900;
       if (expires < 60 || expires > 3600) return err(400, 'invalid_expiry', 'expiresInSeconds must be between 60 and 3600.');
       if (typeof body?.alias !== 'string' || !body.alias.trim() || body.alias.length > 200) return err(400, 'invalid_alias', 'alias must not be blank and may be at most 200 characters.');
       const id = guid('link' + Date.now() + Math.random());
@@ -913,7 +931,7 @@ export function createMockServer(overrides: Partial<MockOptions> = {}): MockServ
       const id = (x: unknown): boolean => typeof x === 'string' && x.length > 0 && x.length <= 200 && /^[!-~]+$/.test(x);
       const p = body?.policy;
       const invalid = (): Response => err(400, 'invalid_selection', 'The selection is malformed or leaves no model selected.');
-      if (typeof body?.baseUrl !== 'string' || !body.baseUrl.trim() || body.baseUrl.length > 2048 || !p || typeof body.version !== 'number' || body.version < 0
+      if (typeof body.baseUrl !== 'string' || !body.baseUrl.trim() || body.baseUrl.length > 2048 || !p || (body.version ?? 0) < 0
         || !Array.isArray(p.disabledFamilies) || !Array.isArray(p.enabledFamilies) || !p.modelOverrides || typeof p.modelOverrides !== 'object'
         || !p.disabledFamilies.every(id) || !p.enabledFamilies.every(id) || p.disabledFamilies.some((k: string) => p.enabledFamilies.includes(k))
         || !Object.keys(p.modelOverrides).every(id)) return invalid();
@@ -931,7 +949,7 @@ export function createMockServer(overrides: Partial<MockOptions> = {}): MockServ
           || c.models.some(mm => mm.id === t.aiClient!.model && !selected(saved, mm))).map(t => t.aiClient!.model);
       if (pinned.length) return json({ code: 'pinned_model_excluded', message: 'The selection excludes a model that a Node is assigned.', models: [...new Set(pinned)] }, 409);
       if (!c.models.some(mm => selected(saved, mm))) return invalid();
-      if (body.version !== c.version) return err(409, 'stale_selection', 'The selection changed since it was loaded. Reload it and try again.');
+      if ((body.version ?? 0) !== c.version) return err(409, 'stale_selection', 'The selection changed since it was loaded. Reload it and try again.');
       policies.set(c.baseUrl, saved);
       c.version += 1;
       c.models.forEach(mm => { mm.selected = selected(saved, mm); });
@@ -963,15 +981,16 @@ export function createMockServer(overrides: Partial<MockOptions> = {}): MockServ
     let body: Json = null;
     try { body = typeof init.body === 'string' && init.body ? JSON.parse(init.body) : null; } catch { body = null; }
     const method = (init.method || 'GET').toUpperCase();
-    const call: MockCall = { method, path, query: Object.fromEntries(u.searchParams), body, headers, at: Date.now(), settled: false, aborted: false };
+    const call: MockCall = { method, path, query: Object.fromEntries(u.searchParams), body, headers, at: Date.now(), settled: false, aborted: false, status: null, malformed: false };
     calls.push(call);
-    let run: Promise<Response> = cfg.hang && method === 'GET' && path.startsWith(cfg.hang) ? new Promise<Response>(() => {}) : handle(method, path, u.searchParams, body, headers).catch((e: unknown) => {
+    let run: Promise<Response> = cfg.hang && method === 'GET' && path.startsWith(cfg.hang) ? new Promise<Response>(() => {}) : handle(method, path, u.searchParams, body, headers, call).catch((e: unknown) => {
       if (e instanceof URIError) return err(400, 'invalid_request', 'The path is not correctly percent-encoded.');
       console.error('mock error', e);
       return err(500, 'mock_error', String((e as Error)?.message || e));
     });
     const lag = method !== 'GET' && Object.entries(cfg.lag).find(([text]) => path.includes(text));
     if (lag) run = run.then(r => new Promise<Response>(resolve => setTimeout(() => resolve(r), lag[1])));
+    run = run.then(r => { call.status = r.status; return r; });
     const signal = init.signal;
     if (!signal) return run.finally(() => { call.settled = true; });
     return new Promise<Response>((resolve, reject) => {

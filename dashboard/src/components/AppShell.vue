@@ -2,8 +2,9 @@
 import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue';
 import { useRoute, useRouter } from 'vue-router';
 import { useFleet } from '@/context';
+import { installKeepFocus } from '@/composables/keepFocus';
 import { modalOpenCount } from '@/composables/modalStack';
-import { installTooltipListeners } from '@/composables/tooltip';
+import { hideTip, installTooltipListeners } from '@/composables/tooltip';
 import { useShellTitle } from '@/composables/useDocumentTitle';
 import { fmtTime } from '@/lib/format';
 import { NAV_KEYS, routeViewKey, type NavKey } from '@/router';
@@ -39,10 +40,11 @@ const signingOut = ref(false);
 
 useShellTitle(() => route.meta.title);
 
-/* Navigation: the first heading that mounts takes focus, the footer note updates, and the badges refresh (at most every 20 s).
-   afterEach runs before the new view renders, so the flag is set when its heading mounts. */
+/* Navigation: the first heading that mounts takes focus, a tooltip left over from the old page goes away, the footer note updates, and
+   the badges refresh (at most every 20 s). afterEach runs before the new view renders, so the flag is set when its heading mounts. */
 const stopAfterEach = router.afterEach((_to, _from, failure) => {
   if (failure) return;
+  hideTip();
   shell.focusPending = true;
   shell.markLoaded();
   if (session.signedIn) void summary.refresh();
@@ -55,20 +57,25 @@ watch(() => session.signedIn, signedIn => {
 });
 
 let removeTips: (() => void) | null = null;
+let removeKeepFocus: (() => void) | null = null;
 onMounted(() => {
   removeTips = installTooltipListeners();
+  removeKeepFocus = installKeepFocus();
   if (session.signedIn) void summary.refresh();
   window.addEventListener('pagehide', onPageHide);
 });
 onBeforeUnmount(() => {
   stopAfterEach();
   removeTips?.();
+  removeKeepFocus?.();
   window.removeEventListener('pagehide', onPageHide);
 });
-/* The token field is cleared when the page is hidden, so it never lingers in a restored page. */
+/* When the page is hidden (it can come back from the back/forward cache exactly as it was) the token field is cleared and the Add machine
+   wizard is closed, which drops its one-time enrollment link and stops its polling. */
 function onPageHide(): void {
   const input = document.getElementById('operator-token') as HTMLInputElement | null;
   if (input) input.value = '';
+  wizard.hide();
 }
 
 function skip(): void {
@@ -87,6 +94,7 @@ async function signOut(): Promise<void> {
   }
 }
 const retryBoot = async (): Promise<void> => {
+  shell.focusPending = true; // the button goes away; the page that appears takes the focus
   await session.retryBoot();
   await router.replace(router.currentRoute.value.fullPath);
 };

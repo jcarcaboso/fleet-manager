@@ -6,6 +6,8 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import { FAKE_TIMERS, currentTab, focused, nodeTest, openNode, sleep, stray, type NodeTest } from './helpers';
 import { ApiError } from '@/api/client';
 import { mountApp, textOf, waitFor } from '../../helpers/app';
+import NodeView from '@/views/Node/NodeView.vue';
+import { NODE_PAGE, type NodePage } from '@/views/Node/nodePage';
 
 let t: NodeTest | undefined;
 afterEach(() => { t?.unmount(); t = undefined; vi.useRealTimers(); });
@@ -115,11 +117,13 @@ describe('routing', () => {
     expect(t.find('nav.crumbs [aria-current=page]').text()).toBe('studio-mini');
   });
 
-  it('switching tabs keeps the page: the machine is not read again and the header stays', async () => {
+  it('switching tabs within 15 seconds of the last read keeps the page and does not read the machine again', async () => {
+    vi.useFakeTimers(FAKE_TIMERS);
     t = await openNode('/machines/studio-mini');
     const reads = () => t!.gets(/^nodes\/studio-mini$/).length;
     expect(reads()).toBe(1);
     const h1 = t.find('.nhero h1').element;
+    await sleep(14_000);
     await t.tabs()[2]!.trigger('click');
     await t.app.settle();
     expect(t.app.router.currentRoute.value.fullPath).toBe('/machines/studio-mini/problems');
@@ -127,8 +131,90 @@ describe('routing', () => {
     expect(t.find('.nhero h1').element, 'the same page element').toBe(h1);
     await t.tabs()[3]!.trigger('click');
     await t.app.settle();
-    expect(reads()).toBe(1);
+    expect(reads(), 'under 15 seconds: no new read').toBe(1);
     expect(t.panel()).toContain('Activity');
+  });
+
+  it('switching tabs more than 15 seconds after the last read reads the machine and the issues again, quietly', async () => {
+    vi.useFakeTimers(FAKE_TIMERS);
+    t = await openNode('/machines/build-runner-01');
+    const reads = () => t!.gets(/^nodes\/build-runner-01$/).length;
+    expect(reads()).toBe(1);
+    expect(t.hero(), 'a healthy machine to begin with').not.toMatch(/Action needed/);
+    const h1 = t.find('.nhero h1').element;
+    /* While the visitor stays on Overview a Target fails on the Server. */
+    const mock = t.app.mock.nodes.find(n => n.alias === 'build-runner-01')!;
+    mock.targets[0]!.state = 'failed';
+    mock.targets[0]!.failure = { code: 'ownership_conflict', firstSeenAt: new Date().toISOString(), retries: 1 } as never;
+    await sleep(16_000);
+    await t.tabs()[2]!.trigger('click'); // Problems
+    expect(t.exists('.skel'), 'the page keeps its content while it reads').toBe(false);
+    await t.app.settle();
+    await t.until(() => reads() === 2, 'the machine is read again');
+    expect(t.find('.nhero h1').element, 'the same page element').toBe(h1);
+    await t.until(() => t!.findAll('article.prob').length === 1, 'the failed Target, from the issues read again');
+    expect(t.panel()).not.toContain('Nothing to fix');
+    expect(t.hero(), 'and the header, from the machine read again').toMatch(/Action needed/);
+    expect(t.tabText('Problems')).toMatch(/\d/);
+    expect(t.exists('.skel')).toBe(false);
+    /* The read is fresh again: another tab change reads nothing. */
+    await sleep(2000);
+    await t.tabs()[3]!.trigger('click');
+    await t.app.settle();
+    expect(reads()).toBe(2);
+  });
+
+  it('exactly 15 seconds is still fresh; just over is not', async () => {
+    vi.useFakeTimers(FAKE_TIMERS);
+    t = await openNode('/machines/studio-mini');
+    await sleep(15_000);
+    await t.tabs()[1]!.trigger('click');
+    await t.app.settle();
+    expect(t.gets(/^nodes\/studio-mini$/)).toHaveLength(1);
+    await sleep(1);
+    await t.tabs()[2]!.trigger('click');
+    await t.app.settle();
+    await t.until(() => t!.gets(/^nodes\/studio-mini$/).length === 2, 'read again');
+  });
+
+  it('the newest tab change owns the reading: an older machine read is aborted and the tab on screen shows its own data', async () => {
+    vi.useFakeTimers(FAKE_TIMERS);
+    t = await openNode('/machines/studio-mini', { delay: { 'studio-mini': 400 } });
+    await sleep(20_000);
+    await t.tabs()[2]!.trigger('click'); // Problems: reads the machine again (400 ms)
+    await sleep(100);
+    await t.tabs()[3]!.trigger('click'); // Activity before the answer
+    await sleep(2000);
+    await t.app.settle();
+    const reads = t.gets(/^nodes\/studio-mini$/);
+    expect(reads).toHaveLength(3);
+    expect(reads[1]!.aborted, 'the first of the two re-reads was superseded').toBe(true);
+    expect(currentTab(t)).toBe('Activity');
+    expect(t.panel()).toContain('Activity');
+    expect(t.gets(/\/attempts$/).filter(c => !c.query.target).length, 'Activity was read once, for the newest tab change').toBe(1);
+    expect(t.findAll('article.prob'), 'no Problems cards on the Activity tab').toHaveLength(0);
+  });
+
+  it('a quiet reload that replaces the machine record does not start the tab\'s reads again by itself', async () => {
+    t = await openNode('/machines/studio-mini/problems');
+    const attempts = () => t!.gets(/\/attempts$/).filter(c => c.query.target).length;
+    expect(attempts(), 'one failed Target, read once when the tab opened').toBe(1);
+    const page = (t.w().findComponent(NodeView).vm as any).$.provides[NODE_PAGE as symbol] as NodePage;
+    const before = page.node.value;
+    for (let i = 0; i < 3; i++) await page.core.run({ quiet: true });
+    await t.app.settle();
+    expect(page.node.value, 'the record was replaced').not.toBe(before);
+    expect(t.gets(/^nodes\/studio-mini$/)).toHaveLength(4);
+    expect(attempts(), 'but the tab was not read again').toBe(1);
+    /* On Activity: the first page of attempts and of audit events once, however often the machine is read. */
+    await t.tabs()[3]!.trigger('click');
+    await t.app.settle();
+    const activity = () => t!.gets(/\/attempts$/).filter(c => !c.query.target).length;
+    expect(activity()).toBe(1);
+    for (let i = 0; i < 3; i++) await page.core.run({ quiet: true });
+    await t.app.settle();
+    expect(activity()).toBe(1);
+    expect(t.app.mock.calls.filter(c => c.path === 'audit' && c.query.node).length).toBe(1);
   });
 
   it('sets the page title to the alias', async () => {

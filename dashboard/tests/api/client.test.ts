@@ -266,7 +266,7 @@ describe('mock origin and csrf checks', () => {
   });
   it('a mutation with a wrong CSRF token is 400 invalid_csrf (before the scope check)', async () => {
     const { mock } = mockApi();
-    const r = await mock.fetch('https://x.invalid/dashboard/api/issues/state', { method: 'POST', headers: { 'X-Fleet-CSRF': 'wrong', 'Content-Type': 'application/json' }, body: '{}' });
+    const r = await mock.fetch('https://x.invalid/dashboard/api/issues/state', { method: 'POST', headers: { 'X-Fleet-CSRF': 'wrong', 'Content-Type': 'application/json' }, body: '{"id":"x","action":"reopen"}' });
     expect(r.status).toBe(400);
     expect((await r.json()).code).toBe('invalid_csrf');
   });

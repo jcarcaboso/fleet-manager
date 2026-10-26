@@ -1,5 +1,6 @@
 <script setup lang="ts">
-import { computed, nextTick, onBeforeUnmount, ref, watch } from 'vue';
+import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue';
+import { useRoute, useRouter } from 'vue-router';
 import type { CheckinsResponse, CliProxyStatus, DesiredRevisionItem, EnrollmentLink, Issue, IssuesResponse, NodeListItem, SourceStatus } from '@/api/types';
 import EmptyState from '@/components/EmptyState.vue';
 import ErrorState from '@/components/ErrorState.vue';
@@ -12,7 +13,6 @@ import { useFleet } from '@/context';
 import { soft } from '@/lib/errors';
 import { enc, num, slug } from '@/lib/format';
 import { errorCount, failuresFromIssues, fromList, health, issuesByNode, type Health, type NodeView } from '@/lib/model';
-import { useEnrollmentBus } from '../Enrollment/enrollmentBus';
 import { useRepositorySync } from '../Repository/useRepositorySync';
 import { GROUPS, SORTS, comparator, matches, sections, sortByName, type GroupKey } from './gallery';
 import { useGalleryPrefs } from './galleryPrefs';
@@ -26,11 +26,18 @@ import { createStripScheduler } from './stripScheduler';
  * API: GET nodes (with disk and agent), GET issues, GET errors, GET source/status, GET desired-revisions?order=newest&limit=1,
  * GET cliproxy/status, GET enrollment-links, and GET nodes/{id}/checkins?hours=24 for the strip of each card that is on screen.
  */
-const { api, catalog, summary, shell, shared, wizard } = useFleet();
-const bus = useEnrollmentBus();
+const { api, catalog, summary, shell, shared, wizard, enrollmentBus: bus } = useFleet();
 const prefs = useGalleryPrefs();
+const route = useRoute();
+const router = useRouter();
 
-const q = ref('');
+/* `/machines?add=1` (the old `#/add` bookmark) opens the Add machine wizard over the gallery. The address is cleaned first: the wizard closes on any route change. */
+onMounted(async () => {
+  if (route.query.add === undefined) return;
+  await router.replace({ name: 'machines' });
+  wizard.show();
+});
+
 const searchBox = ref<HTMLInputElement | null>(null);
 
 interface Gallery {
@@ -74,9 +81,10 @@ watch(data, () => strips.restart(), { flush: 'post' });
 
 const quietReload = (): Promise<unknown> => run({ quiet: true });
 const { sync } = useRepositorySync(quietReload);
-/* A link was created or revoked, or a wizard that made one closed: the gallery and its Enrollment tile are stale. A new machine
-   should be visible, so the search is cleared too (the old `galleryReset`). */
-watch(() => bus.version, () => { q.value = ''; void quietReload(); });
+/* A link was created or revoked, or a wizard that made one closed: the gallery and its Enrollment tile are stale. */
+watch(() => bus.version, () => { void quietReload(); });
+/* Only a new link clears the search (the old `galleryReset`), so a machine that just enrolled is visible. A late revoke leaves it alone. */
+watch(() => bus.created, () => { prefs.search = ''; });
 
 const byIssues = computed(() => issuesByNode(data.value?.issues ?? []));
 const healths = computed(() => {
@@ -86,7 +94,7 @@ const healths = computed(() => {
 });
 const healthOf = (n: NodeView): Health => healths.value.get(n.id) ?? health(n);
 
-const query = computed(() => q.value.trim().toLowerCase());
+const query = computed(() => prefs.search.trim().toLowerCase());
 const live = computed(() => (data.value?.nodes ?? []).filter(n => !n.revoked));
 const shownLive = computed(() => live.value.filter(n => matches(n, query.value, healthOf)).sort(comparator(prefs.sort, healthOf)));
 const shownRetired = computed(() => (data.value?.nodes ?? []).filter(n => n.revoked && matches(n, query.value, healthOf)).sort(sortByName));
@@ -96,7 +104,7 @@ const groups = computed(() => sections(shownLive.value, prefs.groupBy, prefs.sor
 watch([query, () => prefs.groupBy, () => prefs.sort], () => strips.rescan(), { flush: 'post' });
 
 const setGroup = (g: GroupKey): void => { prefs.groupBy = g; };
-const clearSearch = (): void => { q.value = ''; void nextTick(() => searchBox.value?.focus()); };
+const clearSearch = (): void => { prefs.search = ''; void nextTick(() => searchBox.value?.focus()); };
 async function jump(key: string): Promise<void> {
   if (prefs.groupBy !== 'status') {
     prefs.groupBy = 'status';
@@ -119,7 +127,7 @@ const onRetiredToggle = (e: Event): void => { prefs.retiredOpen = (e.target as H
           :syncing="shared.syncing" @sync="sync()" @add="wizard.show()" @jump="jump"
         />
         <div class="toolbar" role="search">
-          <label class="search"><Icon name="search" /><span class="sr">Search machines</span><input id="q" ref="searchBox" v-model="q" type="search" autocomplete="off" placeholder="Search by name, hostname, OS, Agent version or status"></label>
+          <label class="search"><Icon name="search" /><span class="sr">Search machines</span><input id="q" ref="searchBox" v-model="prefs.search" type="search" autocomplete="off" placeholder="Search by name, hostname, OS, Agent version or status"></label>
           <div class="seg-ctl" role="group" aria-label="Group by"><span class="seg-lbl">Group by</span><button v-for="[k, l] in GROUPS" :key="k" type="button" data-act="group" :data-v="k" :aria-pressed="prefs.groupBy === k" @click="setGroup(k)">{{ l }}</button></div>
           <label class="sel"><span>Sort</span><select id="sort" v-model="prefs.sort"><option v-for="[k, l] in SORTS" :key="k" :value="k">{{ l }}</option></select><Icon name="chevD" class="sel-chev" /></label>
         </div>
@@ -129,7 +137,7 @@ const onRetiredToggle = (e: Event): void => { prefs.retiredOpen = (e.target as H
           <ScopeButton level="admin" cls="btn-primary" data-act="add" @click="wizard.show()"><Icon name="plus" />Add machine</ScopeButton>
           <LockNote level="admin" />
         </EmptyState>
-        <EmptyState v-else-if="!shownLive.length && !shownRetired.length" icon="search" :title="`No machines match “${q}”`" text="Try an alias, a hostname, an OS such as Fedora, an Agent version such as 0.9.0, or a status such as Offline.">
+        <EmptyState v-else-if="!shownLive.length && !shownRetired.length" icon="search" :title="`No machines match “${prefs.search}”`" text="Try an alias, a hostname, an OS such as Fedora, an Agent version such as 0.9.0, or a status such as Offline.">
           <button type="button" class="btn btn-secondary" data-act="clear-search" @click="clearSearch">Clear search</button>
         </EmptyState>
         <template v-else>

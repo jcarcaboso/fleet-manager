@@ -31,7 +31,7 @@ watch(() => props.node.alias, a => { draft.value = a; });
           <ScopeButton level="admin" type="submit" cls="btn-primary" :disabled="node.revoked || page.renaming.value || undefined">Save alias</ScopeButton>
         </div>
         <p
-          id="rename-msg" class="field-msg" :class="page.renameMsg.value?.err ? 'is-err' : page.renameMsg.value ? 'is-ok' : undefined" role="status"
+          id="rename-msg" class="field-msg" :class="page.renameMsg.value?.err ? 'is-err' : page.renameMsg.value && !page.renameMsg.value.neutral ? 'is-ok' : undefined" role="status"
         >{{ page.renameMsg.value ? page.renameMsg.value.text : node.revoked ? 'Revoked machines cannot be renamed.' : !session.can('admin') ? session.denied('admin') : 'After renaming, update the key under nodes: in fleet.yml too.' }}</p>
       </form>
     </section>

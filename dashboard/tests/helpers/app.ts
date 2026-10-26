@@ -6,6 +6,7 @@ import { createMockServer, MOCK_API_URL, type MockOptions, type MockServer } fro
 import type { Scope } from '@/api/types';
 import { FLEET_KEY, createFleetContext, type FleetContext } from '@/context';
 import { createAppRouter } from '@/router';
+import { watchMock } from './strict';
 
 /** A token the mock accepts (32 to 1024 characters, not starting with "bad"). */
 export const TOKEN = 'operator-token-0123456789-abcdefghijkl';
@@ -68,7 +69,7 @@ export async function waitFor<T>(check: () => T | Promise<T>, { timeout = 3000, 
 
 /** Mounts the whole app (shell, router, session) against a fresh mock API. Call `unmount()` in `afterEach`. */
 export async function mountApp(options: MountOptions = {}): Promise<TestApp> {
-  const mock = createMockServer({ ...options.mock });
+  const mock = watchMock(createMockServer({ ...options.mock }));
   const ctx = createFleetContext({ config: { apiUrl: MOCK_API_URL }, fetch: mock.fetch });
   const router = createAppRouter({ session: ctx.session, history: createMemoryHistory() });
   const host = document.createElement('div');
@@ -128,7 +129,7 @@ export interface ComponentHarness {
  * and the provide for `useFleet()`. Use it as `mount(Comp, { global: harness.global })`.
  */
 export async function componentHarness(options: Partial<MockOptions> = {}): Promise<ComponentHarness & { global: { plugins: Router[]; provide: Record<symbol, FleetContext> } }> {
-  const mock = createMockServer(options);
+  const mock = watchMock(createMockServer(options));
   const ctx = createFleetContext({ config: { apiUrl: MOCK_API_URL }, fetch: mock.fetch });
   const router = createAppRouter({ session: ctx.session, history: createMemoryHistory() });
   if (!options.signedOut) await ctx.session.restore();

@@ -34,8 +34,12 @@ const page = createNodePage(() => alias, () => tab.value);
 provide(NODE_PAGE, page);
 useDocumentTitle(() => alias);
 
-/* The data of a tab is read when the machine has loaded and whenever the tab changes. */
-watch(() => [tab.value, page.node.value?.id] as const, ([t]) => { void page.loadTab(t); }, { immediate: true });
+/* The data of a tab is read when the machine has loaded and whenever the tab changes (and the machine too, when it was last read more than 15 s ago).
+   Two sources, so that replacing the record by a quiet reload (same machine, same tab) does not run this again. */
+watch([() => tab.value, () => page.node.value?.id], ([t]) => { void page.showTab(t); }, { immediate: true });
+
+/* Back, Forward or a tab link closes an open Revoke or Remove dialog, as every route change did before. */
+watch(() => route.fullPath, () => page.dismissDialog());
 
 const LABELS: Record<NodeTab, string> = { overview: 'Overview', installed: 'Installed', problems: 'Problems', activity: 'Activity', security: 'Security', settings: 'Settings' };
 const tabs = computed<TabItem[]>(() => NODE_TABS.map(key => ({

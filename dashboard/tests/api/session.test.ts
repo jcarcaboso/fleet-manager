@@ -138,6 +138,9 @@ describe('login and logout', () => {
   it('login needs the CSRF handshake: the token is fetched, then sent', async () => {
     const { mock, session } = mockApi({ signedOut: true });
     await session.login(TOKEN);
-    expect(mock.calls[1]!.headers['x-fleet-csrf']).toBe(mock.state.csrf);
+    /* The token that signed in was fetched while signed out; the Server's token changes with the identity, so the mock's has moved on. */
+    expect(mock.calls.slice(0, 2).map(c => `${c.method} ${c.path}`)).toEqual(['GET csrf', 'POST login']);
+    expect(mock.calls[1]!.headers['x-fleet-csrf']).toBeTruthy();
+    expect(mock.calls[1]!.headers['x-fleet-csrf']).not.toBe(mock.state.csrf);
   });
 });

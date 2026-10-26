@@ -1,7 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { DesiredRevisionDetail, Issue, NodeDetail, NodeListItem, RolloutDetail } from '@/api/types';
 import { DAY, HOUR, MIN } from '@/lib/format';
-import { contract, contractsAvailable } from '../helpers/contracts';
+import { contract } from '../helpers/contracts';
 import {
   DISK_CRIT, DISK_WARN, SEMVER, agentInfo, agentOutdated, certFlag, certText, commit, diskDetail, diskHot, diskLevel, diskOf, diskVolume, drift, errorCount, failuresFromIssues,
   fixSteps, fromDetail, fromList, health, isAttention, isOpen, issueBadge, issueKind, issueLevel, issueSection, issueState, issuesByNode, nodeRank, osText, patchIssue,
@@ -15,7 +15,7 @@ afterEach(() => vi.useRealTimers());
 
 const base = { revoked: false, revokedAt: null, freshness: 'fresh' as const, enrolledAt: ago(DAY), lastContactAt: ago(10_000), currentRevision: null, counts: { pending: 0, applying: 0, succeeded: 3, failed: 0, superseded: 0 } };
 
-describe.skipIf(!contractsAvailable)('contract fixtures', () => {
+describe('contract fixtures', () => {
   it('turns the GET nodes fixture into view models', () => {
     const page = contract<{ items: NodeListItem[] }>('nodes-page');
     const n = fromList(page.items[0]!);

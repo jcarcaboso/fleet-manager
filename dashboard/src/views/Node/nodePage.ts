@@ -29,8 +29,8 @@ export const DISK_WAIT_MS = 150_000;
 /** The deadline allows the last read, due at `DISK_WAIT_MS`, a moment to answer. */
 export const DISK_GRACE_MS = 1000;
 
-/** Notes for the page a rename opens: the new alias to the sentence the Settings tab shows ("Renamed from … "). Consumed by that page. */
-const pendingNotes = new Map<string, string>();
+/** How old the loaded machine may be before a tab change reads it again (the old dashboard's `cacheAt` rule). */
+export const STALE_MS = 15_000;
 
 export type DiskPhase = 'requesting' | 'waiting' | 'answered' | 'timeout' | 'error';
 export interface DiskRun {
@@ -42,6 +42,8 @@ export interface DiskRun {
 export interface FormNote {
   text: string;
   err: boolean;
+  /** Neither an error nor a success ("That is already the alias."): no `is-ok` / `is-err` class. */
+  neutral?: boolean;
 }
 export interface NodeDialog {
   kind: 'revoke' | 'remove';
@@ -69,12 +71,14 @@ const DONE: Record<'acknowledge' | 'snooze' | 'reopen', (hours?: number) => [str
 };
 
 export function createNodePage(getAlias: () => string, getTab: () => NodeTab) {
-  const { api, catalog, summary, toasts, shell, session } = useFleet();
+  const { api, catalog, summary, toasts, shell, session, renameNotes, gallery } = useFleet();
   const router = useRouter();
   const view = useView();
   const alias = getAlias();
 
   /* ---------------------------------------------------------------- the machine */
+  /** When the machine was last read successfully (`now()`); a tab change reads it again once it is older than `STALE_MS`. */
+  let loadedAt = 0;
   const core = useLoad<Loaded | Missing>(async token => {
     let detail: NodeDetail;
     try {
@@ -89,6 +93,7 @@ export function createNodePage(getAlias: () => string, getTab: () => NodeTab) {
     token.check();
     void summary.refresh(true);
     shell.markLoaded();
+    loadedAt = now();
     return { missing: false, node: fromDetail(detail), issues: issues?.items ?? [], issuesOk: !!issues };
   }, { view });
 
@@ -206,6 +211,23 @@ export function createNodePage(getAlias: () => string, getTab: () => NodeTab) {
   async function reload(): Promise<void> {
     await core.run({ quiet: true });
     await loadTab(getTab(), true);
+  }
+
+  let tabSeq = 0;
+  /**
+   * The tab (or the machine) on screen changed: read what the tab shows. When the machine was last read more than `STALE_MS` ago it is read
+   * again first, quietly (the page keeps its content, a newer read supersedes this one, as in `reload()`), so a Target that failed while the
+   * visitor was on another tab shows up on Problems.
+   */
+  async function showTab(which: NodeTab): Promise<void> {
+    const seq = ++tabSeq;
+    if (node.value && now() - loadedAt > STALE_MS) {
+      await core.run({ quiet: true });
+      if (seq !== tabSeq) return; // another tab change owns the reading now
+      await loadTab(which, true);
+      return;
+    }
+    await loadTab(which);
   }
 
   async function setRange(h: number): Promise<void> {
@@ -358,8 +380,8 @@ export function createNodePage(getAlias: () => string, getTab: () => NodeTab) {
   }
 
   /* ---------------------------------------------------------------- rename, revoke, remove */
-  const note = pendingNotes.get(alias);
-  pendingNotes.delete(alias);
+  const note = renameNotes.get(alias);
+  renameNotes.delete(alias);
   const renameMsg = ref<FormNote | null>(note ? { text: note, err: false } : null);
   const renameInvalid = ref(false);
   const renaming = ref(false);
@@ -370,7 +392,7 @@ export function createNodePage(getAlias: () => string, getTab: () => NodeTab) {
     const visit = view.visit();
     const v = raw.trim();
     if (v === n.alias) {
-      renameMsg.value = { text: 'That is already the alias.', err: false };
+      renameMsg.value = { text: 'That is already the alias.', err: false, neutral: true };
       return;
     }
     if (!v || v.length > 200) {
@@ -392,10 +414,14 @@ export function createNodePage(getAlias: () => string, getTab: () => NodeTab) {
       return;
     }
     renaming.value = false;
+    gallery.search = ''; // the old `galleryReset`: the renamed machine must be visible in the gallery
     if (visit.isCurrent()) {
-      pendingNotes.set(v, `Renamed from ${n.alias}. Update its entry in fleet.yml too.`);
+      renameNotes.set(v, `Renamed from ${n.alias}. Update its entry in fleet.yml too.`);
       toasts.push('Alias changed', { text: 'Update its entry in fleet.yml too.' });
-      await router.push(nodeRoute(v, 'settings'));
+      /* The new page takes the note when it is created. A navigation that did not happen (cancelled, or the guard sent the visitor away) must not leave it for a later page. */
+      let moved = false;
+      try { moved = !(await router.push(nodeRoute(v, 'settings'))); } catch { /* treated as not moved */ }
+      if (!moved) renameNotes.delete(v);
     } else {
       toasts.push(`${n.alias} is now ${v}`, { text: 'Update its entry in fleet.yml too.' });
     }
@@ -409,6 +435,10 @@ export function createNodePage(getAlias: () => string, getTab: () => NodeTab) {
   }
   function closeDialog(): void {
     if (dialog.value && !dialog.value.busy) dialog.value = null;
+  }
+  /** The route changed (Back, Forward, a tab link): the dialog goes, even while it is busy. Its late answer finds `dialog.value !== d` and touches nothing. */
+  function dismissDialog(): void {
+    dialog.value = null;
   }
 
   async function confirmRevoke(): Promise<void> {
@@ -445,6 +475,7 @@ export function createNodePage(getAlias: () => string, getTab: () => NodeTab) {
       return;
     }
     /* The machine is gone either way. Only the page it was removed from goes back to the list. */
+    gallery.search = ''; // the old `galleryReset`
     const stay = visit.isCurrent();
     if (dialog.value === d) dialog.value = null;
     toasts.push(`${d.alias} removed`, { text: 'Its alias is available for a new enrollment.' });
@@ -455,7 +486,7 @@ export function createNodePage(getAlias: () => string, getTab: () => NodeTab) {
     alias, core, loaded, node, issues, issuesOk, missing, failures, problems, openProblems, health, worst, os,
     hours, tab, activity, retrying, issueBusy, disk, diskBusy,
     renameMsg, renameInvalid, renaming, dialog, canAdmin: computed(() => session.can('admin')),
-    loadTab, reload, setRange, loadMoreActivity, retry, changeIssue, refreshDisk, rename, openDialog, closeDialog, confirmRevoke, confirmRemove,
+    loadTab, showTab, reload, setRange, loadMoreActivity, retry, changeIssue, refreshDisk, rename, openDialog, closeDialog, dismissDialog, confirmRevoke, confirmRemove,
   };
 }
 

@@ -73,10 +73,11 @@ dashboard/
     app.ts           createFleetApp({ config, fetch, history }) -> { app, router, ctx }
     App.vue          just <AppShell/>
     config.ts        runtime config loading and validation
+    legacyHash.ts    translates an old `#/nodes/...` bookmark into the new path at start-up (see Routes)
     context.ts       the shared context (client, session, stores) and useFleet()/useApi()/useSession()/useToasts()
     router.ts        route table, guards, route helpers
     api/             types.ts  client.ts  session.ts  messages.ts
-    api/mock/        dataset.ts  server.ts  options.ts  browser.ts  index.ts
+    api/mock/        dataset.ts  server.ts  bind.ts  options.ts  browser.ts  index.ts
     components/      shared UI (AppShell, icons, status, modal, toasts, charts, art, ...)
     composables/     useView, useLoad, catalog, summary, toasts, tooltip, modalStack, useClipboard, useNow, ...
     lib/             pure TypeScript: format, model, targets, status, icons, charts, audit, lanes, errors
@@ -115,11 +116,24 @@ History mode, no `#`. The container serves `index.html` for these paths.
   list scrolled to that revision: the router redirects any non-UUID id to `/deployments?revision=<value>` (replace), and
   `DeploymentsView` scrolls to `route.query.revision` (`isRevisionId(id)` is the test).
 - The old `#/add` route (the wizard opened over the gallery) is not a route: any page opens the wizard with
-  `useFleet().wizard.show()`; `AppShell` mounts `AddMachineWizard.vue` while `wizard.open` is true.
+  `useFleet().wizard.show()`; `AppShell` mounts `AddMachineWizard.vue` while `wizard.open` is true. `/machines?add=1` (what the old
+  `#/add` bookmark becomes) opens it over the gallery and cleans the address.
+- **Old bookmarks.** The Server redirects `/dashboard` here and browsers keep the fragment, so a bookmark
+  `https://SERVER/dashboard#/nodes/studio-mini/problems` arrives as `https://DASHBOARD/#/nodes/studio-mini/problems`. `createFleetApp`
+  (without a test history) calls `applyLegacyHash()` (`src/legacyHash.ts`) before the router reads the address; it replaces the
+  address (no history entry) by the path of the same page: `#/nodes` is `/machines`, `#/nodes/<alias>[/<tab>]` is
+  `/machines/<alias>[/<tab>]` (the alias exactly as it was encoded, `rack%2FA` stays `rack%2FA`), `#/problems`, `#/deployments[/<id>]`,
+  `#/repository`, `#/models`, `#/enrollment` and `#/audit` keep their names, `#/add` is `/machines?add=1`. Anything else (including `#/`)
+  is left alone. The table is `legacyHashPath()`, tested in `tests/legacy-hash.test.ts`.
 - `<RouterView>` renders the page with `:key="routeViewKey(route)"` (route name plus machine alias and revision ID). A page
   reused for another machine is a **new component**: its state, requests and polls are gone. Switching tabs on the same machine
-  keeps it. After a navigation the first heading that mounts takes keyboard focus (`PageHead`, `EmptyState h="h1"`,
+  keeps it: the machine and its issues are read again, quietly (no skeleton, stale answers dropped), when a tab change comes more than
+  15 s after the last read (`STALE_MS` in `views/Node/nodePage.ts`; the old dashboard's rule), and any route change (Back, Forward, a tab
+  link) closes the Revoke and Remove dialogs. After a navigation the first heading that mounts takes keyboard focus (`PageHead`, `EmptyState h="h1"`,
   `ErrorState`); when only the tab changes, `TabNav` focuses the active tab.
+- After a navigation the router also hides a tooltip that the old page left (`router.afterEach` in `AppShell`).
+- `pagehide` (the page may return from the back/forward cache as it was) clears the token field and closes the Add machine wizard, which
+  drops its one-time enrollment link and stops its polling.
 - Guards: every non-public route first restores the session once (`GET session`). Signed out: redirect to `/login`, keeping the
   intended path in `?redirect=` (not for `/` and `/machines`). `safeRedirect()` only accepts paths of this app. A session that ends
   while a page is open (401) also goes to `/login?redirect=<current>` with the notice "Your session ended. Sign in again.". If the
@@ -131,7 +145,7 @@ History mode, no `#`. The container serves `index.html` for these paths.
 ### Context: `useFleet()` (`src/context.ts`)
 
 ```ts
-const { api, session, catalog, summary, toasts, shared, wizard, shell, openState, config } = useFleet();
+const { api, session, catalog, summary, toasts, shared, wizard, shell, openState, renameNotes, gallery, enrollmentBus, config } = useFleet();
 ```
 
 | Member | Type | Use |
@@ -145,9 +159,13 @@ const { api, session, catalog, summary, toasts, shared, wizard, shell, openState
 | `wizard` | `WizardState` | `show()`, `hide()`, `open` |
 | `shell` | `ShellState` | `markLoaded()` (footer "Loaded 14:30 UTC"), `focusPending` |
 | `openState` | `Map<string, boolean>` | `<details>` open state by key (used by `DiagLine`, `FileList`) |
+| `renameNotes` | `Map<string, string>` | the "Renamed from …" sentence for the page a rename opens, by the new alias; taken by that page, dropped when the navigation fails or the session ends |
+| `gallery` | `GalleryPrefs` | grouping, sort, Retired open and the search text of the Machines page; kept between visits (like the old module-level state). The search is cleared when a link is created (`enrollmentBus.created`), when a machine is renamed or removed, and at sign-out |
+| `enrollmentBus` | `EnrollmentBus` | what the Enrollment page, the gallery and the Add machine wizard tell each other (`version`, `created`, `revoked()`, `request`, `formMsg`); reset at sign-out |
 
 `createFleetContext({ config, fetch })` builds it. The client, session, catalog, summary and toasts are reset when the session
-starts or ends. In tests use `mountApp()` / `componentHarness()` (below).
+starts or ends, and so is every other piece of state that belongs to one Operator: the wizard, the shared Sync/Refresh results, the
+rename notes, the gallery search and the enrollment bus (one watcher in `context.ts`; add new per-session state there). In tests use `mountApp()` / `componentHarness()` (below).
 
 ### API client (`src/api/client.ts`)
 
@@ -214,7 +232,7 @@ const { data, error, loading, refreshing, run, reload } = useLoad(async token =>
 - `useLoad(loader, { immediate = true, key?, view?, keepData? })`. `loader(token)` receives a `Token`. Each `run()` aborts the
   previous run's signal and starts a new generation. `data` / `error` / `loading` are committed **only if the token is still
   current**; a superseded or aborted run changes nothing. `run({ quiet: true })` refreshes in the background: `loading` stays
-  false, `refreshing` is true, the old data stays. `run()` never rejects. `key: () => route.params.x` reloads when it changes.
+  false, `refreshing` is true, the old data stays. `run()` never rejects. `key: () => route.params.x` reloads when it changes. **`reload()` is for the user's own Refresh / Try again / Check again:** like `run()`, but it sets `shell.focusPending`, so the heading that mounts when the loading state gives way to the page takes the keyboard focus (the pressed button was replaced, and focus would fall to `<body>`). Use `run({ quiet: true })` for background refreshes that keep the page.
 - `Token`: `signal` (pass it to every API call), `isCurrent()`, `check()` (throws the silent `SupersededError`; call it after an
   `await` that does not use the API client), `guard(promise)`.
 - `useView({ key? })` gives the raw pieces: `visit()` (a token for "the user is still on this page": take it before a mutation, check
@@ -329,12 +347,30 @@ Origin check (400 `invalid_origin`), then the CSRF token (400 `invalid_csrf`), t
 and lookups in the Server's order, with the same codes, `order=newest` and `(order, offset)` cursors, audit events on mutations, a
 simulated Agent that enrolls a few seconds after a link is created and answers disk refreshes after `diskdelay`. Its own tests are
 `tests/mock/contract.test.ts` (ports of the old `fixtureContract` and `fixturePhase4`, plus a shape comparison with every
-`contracts/operator/*.json`).
+`contracts/operator/*.json`) and `tests/mock/bodies.test.ts` (request bodies and the CSRF token).
+
+**Request bodies are bound like the Server binds them** (`src/api/mock/bind.ts`). The Server reads each body into a C# record with
+`UnmappedMemberHandling = Disallow`: an unknown member, a value of the wrong type (`hours: "4"`, `expiresInSeconds: 900.5`), a missing
+`[JsonRequired]` member (`id` and `action` of `issues/state`), no body, invalid JSON or a body that is not an object is
+`400 invalid_request` ("The request is malformed or a parameter is invalid.") before the route runs (after authentication, before the
+Origin, CSRF and scope checks, because ASP.NET binds the arguments first). A member that is not required and missing keeps the record's
+default and the route's own check answers (`alias` missing on `nodes/rename` is `invalid_node_alias`, `expiresInSeconds` missing is 900).
+Member names match without regard to case. The shapes are `login {token}`, `nodes/rename {currentAlias, alias}`,
+`nodes/{id}/retry {target}`, `nodes/{id}/remove {alias}`, `issues/state {id, action, hours?}`, `enrollment-links {alias, expiresInSeconds}`
+and `cliproxy/selection {baseUrl, version, policy {includeNew, disabledFamilies, modelOverrides, enabledFamilies,
+skipClaudeModelsForOtherClients}}`; the routes without a body parameter (`revoke`, `disk-usage/refresh`, `logout`, `source/rescan`,
+`cliproxy/refresh`) ignore what is posted, like the Server. When a route changes in `OperatorApi.cs` / `WireModels.cs`, change `SHAPES`.
+A refused call has `call.malformed === true`.
+
+**The CSRF token is bound to the identity**, as the real antiforgery token is: `mock.state.csrf` changes at login and at logout, and a
+request that still carries the earlier one is `400 invalid_csrf` (the client then asks for a new token and retries once; `call.status`
+shows the 400). A client that forgets `clearCsrf()` after login or logout therefore shows an extra 400 in `mock.calls`, which
+`tests/mock/bodies.test.ts` checks for.
 
 ```ts
 const mock = createMockServer({ scope: 'read', pageSize: 2 });       // options as in the table below
 const api = createApiClient({ apiUrl: MOCK_API_URL, fetch: mock.fetch });
-mock.calls   // every call: { method, path, query, body, headers, at, settled, aborted }
+mock.calls   // every call: { method, path, query, body, headers, at, settled, aborted, status, malformed }
 mock.state   // { signedIn, scope, actor, csrf }   mock.nodes / links / audit / issueStates   mock.dispose() stops the simulated Agents
 ```
 
@@ -384,10 +420,26 @@ Vitest, `@vue/test-utils`, happy-dom. `tests/helpers/`:
   `{ ctx, mock, router, global }` for mounting one component (`mount(Comp, { global })`); `TOKEN` / `BAD_TOKEN` are tokens the mock
   accepts and rejects; `textOf(el)`.
 - `mock.ts`: `mockApi(options)` gives `{ mock, api, session }` without components. `fetch.ts`: `scriptedFetch(...replies)` for client
-  tests. `contracts.ts`: reads `contracts/operator/*.json` (tests that need them skip when the directory is absent).
+  tests. `contracts.ts`: reads `contracts/operator/*.json`, found relative to the test file (`import.meta.url`), not to the working
+  directory; a missing directory **fails** the contract tests, they never skip.
+- `console.ts` and `strict.ts`: the two guards below.
 - Coverage of the foundation: config, client (CSRF retry, abort, error mapping, encoding of aliases, never touching storage), session
   and the cookie-not-sent message, route guards, the shell badges, sign-in end to end, `useLoad`/`useView`/polling, `Modal` focus trap,
   every shared component and `lib` helper, the mock against the contract, and `tests/security/source-scan.test.ts`.
+
+### Guards that every test runs under (`tests/setup.ts`)
+
+- **No console noise.** `console.error`, `console.warn` and Vue warnings (`config.global.config.warnHandler` of `@vue/test-utils`,
+  which covers every `mount()`) are recorded and fail the test that caused them, as the old `Dev/drive.js` did. A test that expects them
+  says so and gets the messages: `const logged = expectConsole('error')` (or `'warn'`, or both) from `tests/helpers/console.ts`, then
+  `expect(logged.error)…`. `tests/console-guard.test.ts` covers the guard itself.
+- **No refused request bodies.** Every mock created through `mountApp`, `componentHarness` or `mockApi` is watched; a test fails when
+  the mock refused a body as the Server would (`call.malformed`, see Mock API), so a view that sends an unknown member fails its own
+  tests. A test that sends such bodies on purpose calls `allowMalformedBodies()` (`tests/helpers/strict.ts`).
+- **Keyboard focus.** Chromium drops focus to `<body>` when a focused button becomes `disabled` (Sync repository, Refresh, Retry now …);
+  `composables/keepFocus.ts` (installed by `AppShell`) gives it back when the button is enabled again and the user has not pressed
+  anything meanwhile (`tests/composables/keepFocus.test.ts`). `tests/app/focus.test.ts` presses every Refresh, Try again, Check again and Sync button and asserts that focus is
+  on the page heading or still on the page, never on `<body>`.
 
 ## Security rules (enforced)
 

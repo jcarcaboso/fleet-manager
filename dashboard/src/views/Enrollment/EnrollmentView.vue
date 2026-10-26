@@ -14,7 +14,6 @@ import { useLoad } from '@/composables/useLoad';
 import { useFleet } from '@/context';
 import { enc, fmtFull, fmtTime, rel } from '@/lib/format';
 import { nodeRoute } from '@/router';
-import { useEnrollmentBus } from './enrollmentBus';
 import { ALIAS_HINT, aliasError, linkState } from './enrollment';
 
 /**
@@ -22,8 +21,7 @@ import { ALIAS_HINT, aliasError, linkState } from './enrollment';
  * (ported from view-enrollment.js).
  * API: GET enrollment-links, POST enrollment-links (admin, through the wizard), POST enrollment-links/{id}/revoke (admin).
  */
-const { api, session, summary, shell, toasts, wizard } = useFleet();
-const bus = useEnrollmentBus();
+const { api, session, summary, shell, toasts, wizard, enrollmentBus: bus } = useFleet();
 
 const { data, error, loading, run, reload, view } = useLoad(async token => {
   const r = await api.all<EnrollmentLink>('enrollment-links', { maxPages: 3, signal: token.signal });
