@@ -21,8 +21,10 @@ jobs:
           RELEASE_TAG: ${{ github.ref_name }}
         run: |
           python3 - <<'PY'
+          import json
           import os
           import pathlib
+          import re
           import tomllib
 
           root = pathlib.Path('clients')
@@ -40,10 +42,14 @@ jobs:
                       if isinstance(package_version, dict) and package_version.get('workspace')
                       else package_version
                   )
+          versions['dashboard/package.json'] = json.loads(pathlib.Path('dashboard/package.json').read_text())['version']
+          for dockerfile in ['Dockerfile', 'dashboard/Dockerfile']:
+              label = re.search(r'org\.opencontainers\.image\.version="([^"]+)"', pathlib.Path(dockerfile).read_text())
+              versions[dockerfile + ' label'] = label.group(1) if label else None
           wrong = {name: version for name, version in versions.items() if version != expected}
           if wrong:
-              raise SystemExit(f'{os.environ["RELEASE_TAG"]} does not match package versions: {wrong}')
-          print(f'all client packages match {os.environ["RELEASE_TAG"]}')
+              raise SystemExit(f'{os.environ["RELEASE_TAG"]} does not match package or image label versions: {wrong}')
+          print(f'all client packages, the dashboard package and the image labels match {os.environ["RELEASE_TAG"]}')
           PY
 
   linux:

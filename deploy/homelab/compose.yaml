@@ -3,6 +3,7 @@ name: fleet-manager
 x-server-environment: &server-environment
   Source__Remote: ${FLEET_SOURCE_REMOTE:-}
   Fleet__PublicUrl: ${FLEET_PUBLIC_URL:-https://${FLEET_HOSTNAME:-localhost}:${FLEET_PORT:-7443}}
+  Fleet__DashboardOrigin: ${FLEET_DASHBOARD_URL:-https://${FLEET_HOSTNAME:-localhost}:${FLEET_DASHBOARD_PORT:-7444}}
   ASPNETCORE_CONTENTROOT: /run/fleet
   HOME: /home/app
 
@@ -100,10 +101,49 @@ services:
       retries: 5
       start_period: 20s
 
+  dashboard:
+    build:
+      context: ../..
+      dockerfile: dashboard/Dockerfile
+    image: ${FLEET_DASHBOARD_IMAGE:-skorcius/fleet-manager-dashboard:0.10.0}
+    restart: unless-stopped
+    user: "1654:1654"
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    environment:
+      FLEET_API_ORIGIN: ${FLEET_PUBLIC_URL:-https://${FLEET_HOSTNAME:-localhost}:${FLEET_PORT:-7443}}
+    volumes:
+      - runtime-config:/run/fleet:ro
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,nodev,size=16m,mode=1777
+    ports:
+      - "${FLEET_BIND_IP:-127.0.0.1}:${FLEET_DASHBOARD_PORT:-7444}:8443"
+    depends_on:
+      configure: {condition: service_completed_successfully}
+      server: {condition: service_healthy}
+    healthcheck:
+      test: [CMD, curl, --fail, --silent, --show-error, --max-time, "3", --cacert, /run/fleet/tls/ca.pem, https://localhost:8443/healthz]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+    # The dashboard only serves files. It never talks to the Server (the browser does), so it joins neither
+    # the backend network nor the Server's outbound network.
+    networks: [frontend]
+    mem_limit: 2g
+    pids_limit: 256
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
 networks:
   backend:
     internal: true
   outbound: {}
+  frontend: {}
 
 volumes:
   postgres-data: {}

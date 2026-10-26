@@ -1,22 +1,43 @@
 # Fleet Manager on a homelab
 
-This stack runs the amd64 Server with PostgreSQL, database migrations, and direct
-HTTPS. Docker Compose v2, Python 3, and OpenSSL are required for setup.
+This stack runs the amd64 Server and the separate dashboard with PostgreSQL,
+database migrations, and direct HTTPS. Docker Compose v2, Python 3, and OpenSSL
+are required for setup.
 
 ## Dashboard and enrollment links
 
-After upgrading to Server `0.3.0`, open
-`https://FLEET_HOSTNAME:FLEET_PORT/dashboard` and sign in with the Operator token
-from `operator.env`. Your browser must trust the homelab CA. Choose **Add
-machine** to create a link for the Node's alias, then run `fleet-agent enroll --link` on that Node and paste it.
-The link carries public CA trust, so the Node needs no separate CA or JSON file.
+The dashboard is a separate container, the `dashboard` service, with its own
+HTTPS address: `https://FLEET_HOSTNAME:FLEET_DASHBOARD_PORT` (port 7444 by
+default) next to the Server at `https://FLEET_HOSTNAME:FLEET_PORT`. Open it and
+sign in with the Operator token from `operator.env`. Your browser must trust the
+homelab CA; the dashboard serves the Server's certificate, so one trusted CA
+covers both addresses and you must open both ports to your browser. Choose **Add
+machine** to create a link for the Node's alias, then run `fleet-agent enroll
+--link` on that Node and paste it. The link carries public CA trust, so the Node
+needs no separate CA or JSON file. Enrollment links still point at the Server.
 
-Compose supplies `Fleet__PublicUrl` from `FLEET_HOSTNAME` and `FLEET_PORT`.
-`FLEET_PUBLIC_URL` overrides that origin, useful for an IPv6 URL. Keep it aligned
-with DNS and the existing TLS certificate. Upgrading from `0.2.0` requires the
-new Compose file, image, and database migration. Keep your existing secrets.
+The browser, not the dashboard container, talks to the Server. The dashboard and
+the Server must therefore be on the same site: both HTTPS, on the same host name
+or registrable domain (ports and subdomains may differ). Setup uses one host
+name for both, so this holds by default. A dashboard on another site cannot send
+the session cookie and the dashboard says so at sign-in.
+
+Compose supplies the Server's `Fleet__PublicUrl` from `FLEET_HOSTNAME` and
+`FLEET_PORT`, and `Fleet__DashboardOrigin` (the one browser origin the Server
+allows to call its dashboard API) from `FLEET_DASHBOARD_URL`, which defaults to
+`https://FLEET_HOSTNAME:FLEET_DASHBOARD_PORT`. The dashboard container reads the
+Server's origin from `FLEET_API_ORIGIN`, which Compose sets to the same value as
+`Fleet__PublicUrl`. `FLEET_PUBLIC_URL` and `FLEET_DASHBOARD_URL` override these
+origins, useful for IPv6 URLs; keep them aligned with DNS and the existing TLS
+certificate. A request for `https://FLEET_HOSTNAME:FLEET_PORT/dashboard` (or `/`)
+on the Server is redirected to the dashboard address, so old bookmarks keep
+working once the dashboard port is reachable. If `Fleet__DashboardOrigin` is
+empty the Server answers `404` with `dashboard_not_configured`.
+
 See the [dashboard guide](../../docs/plans/enrollment-dashboard.md) for expiry,
-revocation, session behavior, and custom CA settings.
+revocation, session behavior, and custom CA settings, and the
+[separate dashboard plan](../../docs/plans/separate-dashboard.md) for the CORS,
+cookie and Origin rules.
 
 ## First start
 
@@ -32,8 +53,12 @@ docker compose up -d --wait
 Set `FLEET_HOSTNAME` to a DNS name or private IP your clients can reach. Configure
 DNS separately if using a name. The setup script generates a certificate for it
 and records it in `.env`. `--bind-ip` selects the host interface; it defaults to
-loopback, while `0.0.0.0` exposes port 7443 on all IPv4 interfaces. You can select
-a private interface instead, and change the port with `--port`.
+loopback, while `0.0.0.0` exposes ports 7443 (Server) and 7444 (dashboard) on all
+IPv4 interfaces. You can select a private interface instead, and change the
+ports with `--port` and `--dashboard-port`. Setup records the dashboard address
+in `.env` (`FLEET_DASHBOARD_URL`, `FLEET_DASHBOARD_PORT`) and in the Server's
+`DashboardOrigin` setting. The Server and the dashboard both need to be reachable
+from your browser, so open both ports in your firewall.
 
 See [.env.example](.env.example) for all configurable Compose variables and their
 defaults. Run setup first, then edit the generated `.env`. Setup refuses an
@@ -51,7 +76,11 @@ The initial server certificate expires after 90 days and the CA after 365 days;
 certificate renewal is currently manual.
 
 PostgreSQL data persists in a named volume and its port is not published. The
-Server runs as UID 1654 with a read-only root filesystem. An isolated setup
+Server runs as UID 1654 with a read-only root filesystem. The dashboard container
+runs the same way (UID 1654, read-only root, no capabilities, `no-new-privileges`)
+and mounts the same runtime volume read-only for the certificate and key. It
+serves static files only and joins neither the database network nor the Server's
+network. An isolated setup
 container copies configuration into a private volume with the correct ownership
 for both rootful and rootless Docker. Its brief root execution does not grant the
 Server root access. The Git mirror is an ephemeral cache rebuilt from the source.
@@ -136,11 +165,12 @@ docker compose up -d --force-recreate --wait
 
 ```sh
 docker compose ps
-docker compose logs --tail 100 server migrate
+docker compose logs --tail 100 server migrate dashboard
 curl --cacert secrets/tls/ca.pem https://localhost:7443/health/ready
+curl --cacert secrets/tls/ca.pem https://localhost:7444/healthz
 ```
 
-Adjust the health URL when changing the port or binding to a specific interface.
+Adjust the health URLs when changing the ports or binding to a specific interface.
 The Server terminates HTTPS itself to validate Node client certificates. A proxy
 in front must preserve TLS with TCP passthrough; ordinary HTTP termination does
 not preserve this authentication.
@@ -151,30 +181,68 @@ then run `docker compose pull` and `docker compose up -d --force-recreate --wait
 Migrations run before the Server starts. Do not run `docker compose down -v` on
 an installation whose database or configuration you want to retain.
 
+### Upgrading to the separate dashboard
+
+The dashboard used to be part of the Server image and open at
+`https://SERVER/dashboard`. It is now its own image, container and address.
+Upgrade the Server and the dashboard together; the dashboard needs a Server from
+the same release, because the Server must allow its origin. To upgrade an
+existing installation:
+
+1. Back up PostgreSQL and the private configuration as described in the
+   operations hardening guide.
+2. Replace `compose.yaml` with this release's copy. Keep `.env`, `secrets/`,
+   `operator.env`, `ssh/` and the Docker volumes, and do not rerun `setup.py`.
+3. Set `FLEET_IMAGE` in `.env` to the new Server image. The dashboard image
+   defaults to the release's `skorcius/fleet-manager-dashboard` tag; set
+   `FLEET_DASHBOARD_IMAGE` only to pin another one. Add `FLEET_DASHBOARD_PORT` if
+   7444 is taken (optionally `FLEET_DASHBOARD_URL` for a different address). An
+   existing `secrets/server.json` needs no change: Compose passes
+   `Fleet__DashboardOrigin` to the Server.
+4. Open the dashboard port (7444 by default) on the same interface and firewall
+   as the Server port. Keep the dashboard on the same site as the Server.
+5. Run `docker compose pull` and `docker compose up -d --force-recreate --wait`.
+   The `dashboard` service starts after the Server is healthy.
+6. Open `https://FLEET_HOSTNAME:7444` and sign in. Old `https://SERVER/dashboard`
+   bookmarks are redirected there. Scripts that call `/operator/v1`, enrollment
+   links and the Agent are not affected.
+
+If the dashboard shows that the Server could not be reached, check that
+`FLEET_API_ORIGIN` (see `docker compose config`) is the Server's public origin
+and that the browser trusts the CA. If it shows that the browser did not send the
+session cookie, the two addresses are not on the same site.
+
 When upgrading from `0.2.0`, first replace `compose.yaml` with this release's
-copy so it supplies the dashboard's public URL. Preserve `.env`, `secrets/`,
+copy so it supplies the Server's public URL. Preserve `.env`, `secrets/`,
 `operator.env`, `ssh/`, and Docker volumes. Set `FLEET_IMAGE` to
 `skorcius/fleet-manager:0.9.0` in `.env`. Do not rerun `setup.py` on an existing
 installation. The dashboard uses the existing Operator token and CA.
 
-Server image publication is manual; the GitHub tag workflow only publishes
-client archives and Homebrew formulas. From a clean checkout of the tested
-release commit, build the versioned image:
+Image publication is manual; the GitHub tag workflow only publishes
+client archives and Homebrew formulas. A release has two images with one
+version: `skorcius/fleet-manager` (Server) and
+`skorcius/fleet-manager-dashboard`. From a clean checkout of the tested
+release commit, build the versioned images:
 
 ```sh
-VERSION=0.9.0
+VERSION=0.10.0
 SHA=$(git rev-parse HEAD)
 docker build --platform linux/amd64 \
   --label "org.opencontainers.image.revision=$SHA" \
   -t "skorcius/fleet-manager:$VERSION" .
+docker build --platform linux/amd64 -f dashboard/Dockerfile \
+  --label "org.opencontainers.image.revision=$SHA" \
+  -t "skorcius/fleet-manager-dashboard:$VERSION" .
 ```
 
-Smoke-test that local image with a disposable Compose project, then publish
-and verify it before pushing the matching annotated Git tag:
+Smoke-test those local images together with a disposable Compose project, then
+publish and verify them before pushing the matching annotated Git tag:
 
 ```sh
 docker push "skorcius/fleet-manager:$VERSION"
+docker push "skorcius/fleet-manager-dashboard:$VERSION"
 docker buildx imagetools inspect "skorcius/fleet-manager:$VERSION"
+docker buildx imagetools inspect "skorcius/fleet-manager-dashboard:$VERSION"
 git tag -a "v$VERSION" "$SHA" -m "Fleet Manager $VERSION"
 git push origin "refs/tags/v$VERSION"
 ```

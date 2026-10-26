@@ -1,5 +1,9 @@
 #!/usr/bin/env python3
-"""Enroll a disposable real Agent through the dashboard API of a test server."""
+"""Enroll a disposable real Agent through the dashboard API of a test server.
+
+Environment: FLEET_SERVER_URL, FLEET_OPERATOR_TOKEN, FLEET_CA_CERT, and FLEET_DASHBOARD_URL. The Server accepts dashboard
+mutations only with `Origin` equal to its configured `Fleet:DashboardOrigin`, so FLEET_DASHBOARD_URL must be that value.
+"""
 import argparse
 import base64
 import http.cookiejar
@@ -17,6 +21,7 @@ parser = argparse.ArgumentParser(description=__doc__)
 parser.add_argument('--agent', type=Path, required=True)
 args = parser.parse_args()
 server = os.environ['FLEET_SERVER_URL'].rstrip('/')
+dashboard_origin = os.environ['FLEET_DASHBOARD_URL'].rstrip('/')
 operator_token = os.environ['FLEET_OPERATOR_TOKEN']
 ca = Path(os.environ['FLEET_CA_CERT'])
 context = ssl.create_default_context(cafile=ca)
@@ -28,7 +33,7 @@ csrf = ''
 
 def request(path, body=None, expected=200):
     data = None if body is None else json.dumps(body).encode()
-    headers = {'Content-Type': 'application/json', 'Origin': server, 'X-Fleet-CSRF': csrf}
+    headers = {'Content-Type': 'application/json', 'Origin': dashboard_origin, 'X-Fleet-CSRF': csrf}
     req = urllib.request.Request(server + path, data=data, headers=headers)
     try:
         response = browser.open(req, timeout=30)

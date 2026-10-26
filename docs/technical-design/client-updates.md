@@ -75,23 +75,29 @@ remain available in the meantime.
 ## Release procedure
 
 The [Fleet release skill](../../.agents/skills/fleet-release/SKILL.md) covers
-preparation, manual Server image publication, tagging, and final verification.
+preparation, manual Server and dashboard image publication, tagging, and final
+verification.
 Preparing a release does not publish it; publishing does not deploy it.
 
-1. Choose a new version and set it in `Directory.Build.props`, the Dockerfile's
-   version label, `clients/Cargo.toml`, and
+1. Choose a new version and set it in `Directory.Build.props`, the version
+   labels of `Dockerfile` and `dashboard/Dockerfile`, `dashboard/package.json`
+   and its lockfile, `clients/Cargo.toml`, and
    `clients/crates/fleet-reconcile/Cargo.toml`. Regenerate the local package
    versions in `clients/Cargo.lock` and add `docs/releases/VERSION.md`.
-2. For publication, update the documented and homelab default image pins to the
-   same version. Merge these changes after CI passes and record the exact tested
+2. For publication, update the documented and homelab default image pins (Server
+   and dashboard) to the same version. Merge these changes after CI passes and record the exact tested
    commit. Run the artifact workflow manually if the archives need hands-on testing.
 3. From a clean checkout of that commit, build
    `skorcius/fleet-manager:MAJOR.MINOR.PATCH` for `linux/amd64` using `Dockerfile`.
-   Set `org.opencontainers.image.revision` to the commit SHA. Smoke-test the
-   local image with disposable Compose configuration and volumes, then
-   manually push it to Docker Hub and verify its remote digest and labels.
-   The client artifact workflow does not build or push Server images.
-4. Only after the Server image is available, create and push an annotated
+   Build `skorcius/fleet-manager-dashboard:MAJOR.MINOR.PATCH` for `linux/amd64`
+   the same way using `dashboard/Dockerfile`. Set
+   `org.opencontainers.image.revision` to the commit SHA on both. Smoke-test the
+   local images together with disposable Compose configuration and volumes
+   (`scripts/smoke-dashboard-image.sh`, `scripts/smoke-https.py` and
+   `scripts/smoke-dashboard.py`), then manually push them to Docker Hub and verify
+   their remote digests and labels. The client artifact workflow does not build or
+   push Server or dashboard images.
+4. Only after both images are available, create and push an annotated
    `vMAJOR.MINOR.PATCH` tag on the same tested commit. Never move a published tag
    or overwrite a version image with different content.
 5. Wait for the tag workflow. It publishes the GitHub release only after all
@@ -99,7 +105,7 @@ Preparing a release does not publish it; publishing does not deploy it.
    from the published archive checksums.
 6. Check that the release has all six archives and six adjacent checksum files,
    both formulas name the release version, and archive provenance matches the
-   tagged commit. Verify downloaded checksums and the published Server image.
+   tagged commit. Verify downloaded checksums and the published Server and dashboard images.
    Report partial failures rather than calling the release complete.
 7. Deploy through the staged rollout above only when a rollout is requested.
 

@@ -1,0 +1,14 @@
+# BuildKit reads this file, not the repository's root .dockerignore, when building
+# dashboard/Dockerfile (the build context is the repository root).
+**
+!LICENSE
+!dashboard/
+!dashboard/**
+**/node_modules
+dashboard/dist
+dashboard/coverage
+**/.env
+**/.env.*
+**/*.log
+**/*.key
+**/*.pem

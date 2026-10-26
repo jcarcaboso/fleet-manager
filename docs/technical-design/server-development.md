@@ -146,6 +146,17 @@ response retry, mTLS polling, renewal, and revocation. It creates one test Node
 and revokes it before returning. Test private keys stay in a temporary directory
 and are deleted when the script finishes.
 
+With the dashboard running as well (the homelab Compose stack, or a dashboard
+container pointed at the local Server), run `python3 scripts/smoke-dashboard.py`
+with `FLEET_SERVER_URL`, `FLEET_OPERATOR_TOKEN`, `FLEET_CA_CERT` and
+`FLEET_DASHBOARD_URL` set. It checks the dashboard's files, headers and
+`config.json`, the Server's redirect from `/dashboard`, CORS for the dashboard
+origin and its rejection for other origins, and an Operator-token sign-in with
+the session cookie and CSRF flow. `scripts/smoke-dashboard-image.sh IMAGE` starts
+a dashboard image read-only with a throwaway certificate and checks its nginx
+behaviour (`make dashboard-image` builds the image and runs it). The dashboard
+itself is developed in `dashboard/` (`npm run dev:mock` needs no Server).
+
 Liveness is `/health/live`; readiness is `/health/ready`. Authenticated OpenAPI
 documents are `/openapi/operator.json` and `/openapi/agent.json`. The Agent
 contract remains provisional until the work-loop recovery conversation and

@@ -16,7 +16,8 @@ import uuid
 parser = argparse.ArgumentParser(description=__doc__)
 parser.add_argument('--host', default=os.environ.get('FLEET_HOSTNAME'), help='Private hostname or IP (default: FLEET_HOSTNAME)')
 parser.add_argument('--bind-ip', default='127.0.0.1', help='Homelab interface IP published by Docker')
-parser.add_argument('--port', type=int, default=7443)
+parser.add_argument('--port', type=int, default=7443, help='Published HTTPS port of the Server')
+parser.add_argument('--dashboard-port', type=int, default=7444, help='Published HTTPS port of the dashboard')
 parser.add_argument('--directory', type=Path, default=Path(__file__).resolve().parent)
 args = parser.parse_args()
 if not args.host:
@@ -27,6 +28,10 @@ except ValueError:
     parser.error('--bind-ip must be an IP address')
 if not 1 <= args.port <= 65535:
     parser.error('--port must be between 1 and 65535')
+if not 1 <= args.dashboard_port <= 65535:
+    parser.error('--dashboard-port must be between 1 and 65535')
+if args.dashboard_port == args.port:
+    parser.error('--dashboard-port must differ from --port')
 try:
     address = ipaddress.ip_address(args.host)
     san = 'IP:' + str(address)
@@ -72,15 +77,18 @@ config = {
     'ConnectionStrings': {'Fleet': 'Host=postgres;Database=fleet;Username=fleet;Password=' + password},
     'Fleet': {'WorkspaceId': str(uuid.uuid4()), 'Operators': {'homelab-admin': hashlib.sha256(token.encode()).hexdigest()},
               'PublicUrl': f'https://{url_host}:{args.port}',
+              'DashboardOrigin': f'https://{url_host}:{args.dashboard_port}',
               'IssuerCertificatePath': '/run/fleet/tls/ca.pem', 'IssuerKeyPath': '/run/fleet/tls/ca.key'},
     'Kestrel': {'Certificates': {'Default': {'Path': '/run/fleet/tls/server.pem', 'KeyPath': '/run/fleet/tls/server.key'}}},
     'Source': {'MirrorPath': '/var/lib/fleet/source.git'},
 }
 (private / 'server.json').write_text(json.dumps(config, indent=2) + '\n')
 bind = '[' + args.bind_ip + ']' if ':' in args.bind_ip else args.bind_ip
-(root / '.env').write_text('FLEET_IMAGE=skorcius/fleet-manager:0.9.0\n'
-                           + f'FLEET_HOSTNAME={args.host}\nFLEET_PUBLIC_URL=https://{url_host}:{args.port}\nFLEET_BIND_IP={bind}\nFLEET_PORT={args.port}\nFLEET_SOURCE_REMOTE=\n')
+(root / '.env').write_text('FLEET_IMAGE=skorcius/fleet-manager:0.9.0\nFLEET_DASHBOARD_IMAGE=skorcius/fleet-manager-dashboard:0.10.0\n'
+                           + f'FLEET_HOSTNAME={args.host}\nFLEET_PUBLIC_URL=https://{url_host}:{args.port}\nFLEET_BIND_IP={bind}\nFLEET_PORT={args.port}\n'
+                           + f'FLEET_DASHBOARD_URL=https://{url_host}:{args.dashboard_port}\nFLEET_DASHBOARD_PORT={args.dashboard_port}\nFLEET_SOURCE_REMOTE=\n')
 (root / 'operator.env').write_text('export FLEET_SERVER_URL=' + shlex.quote(f'https://{url_host}:{args.port}') + '\n'
                                    + 'export FLEET_OPERATOR_TOKEN=' + shlex.quote(token) + '\n')
 print('Created private homelab configuration. Keep secrets/ and operator.env out of source control.')
+print(f'Open the dashboard at https://{url_host}:{args.dashboard_port} (Server: https://{url_host}:{args.port}). Both ports must be reachable from your browser.')
 print('Start the stack with: docker compose up -d --wait')

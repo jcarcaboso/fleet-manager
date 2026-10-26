@@ -8,7 +8,9 @@ boundaries.
 
 - .NET SDK `10.0.302` (the version in `global.json`)
 - Rust with Cargo and rustfmt
-- Docker for Server integration tests that use PostgreSQL Testcontainers
+- Node.js 24 with npm, for the dashboard in `dashboard/`
+- Docker for Server integration tests that use PostgreSQL Testcontainers, and for
+  `make dashboard-image`
 - Python 3 for the documentation-link check
 
 Restore dependencies with:
@@ -32,6 +34,13 @@ The Rust equivalents use the locked dependency graph:
 `cargo clippy --manifest-path clients/Cargo.toml --workspace --all-targets
 --locked -- -D warnings`, and
 `cargo test --manifest-path clients/Cargo.toml --workspace --locked`.
+
+`make restore`, `make check`, `make test` and `make security` include the
+dashboard (`npm ci`, `npm run typecheck` and `npm run build`, `npm test`,
+`npm audit --omit=dev --audit-level=high`). To work on the dashboard alone,
+use `npm run dev:mock` in `dashboard/`; it needs no Server. When you change
+`dashboard/Dockerfile` or `dashboard/nginx/`, also run `make dashboard-image`,
+which builds the image and starts it read-only with a throwaway certificate.
 
 Keep HTTP, persistence, Git, YAML, and filesystem code behind their module
 interfaces. Add tests at the owning interface and document public protocol
