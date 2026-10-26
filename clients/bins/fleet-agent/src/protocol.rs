@@ -1,12 +1,24 @@
 use std::{error::Error, fmt, time::Duration};
 
-use reqwest::{Certificate, Client, Identity, Method, Response, StatusCode, Url, redirect::Policy};
+use reqwest::{
+    Certificate, Client, Identity, Method, Response, StatusCode, Url, header::CONTENT_TYPE,
+    redirect::Policy,
+};
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use uuid::Uuid;
 
 const MAX_JSON_BYTES: usize = 1024 * 1024;
 const MAX_BUNDLE_BYTES: usize = 16 * 1024 * 1024;
 const MAX_CLIPROXY_CREDENTIAL_BYTES: usize = 4096;
+const MAX_DETAIL_REQUEST_BYTES: usize = 16 * 1024;
+const MAX_DISK_USAGE_REQUEST_BYTES: usize = 4 * 1024;
+const MAX_TELEMETRY_REQUEST_BYTES: usize = 8 * 1024;
+/// Timeout of the best-effort reports (disk usage and machine information).
+const SIDE_REPORT_TIMEOUT: Duration = Duration::from_secs(10);
+/// Tells the Server which optional features this Agent understands. Only then
+/// may the poll response carry the matching fields.
+const CAPABILITIES_HEADER: &str = "x-fleet-agent-capabilities";
+const CAPABILITIES: &str = "disk-usage";
 
 #[derive(Debug)]
 pub enum ProtocolError {
@@ -14,6 +26,7 @@ pub enum ProtocolError {
     Transport(reqwest::Error),
     Http(StatusCode),
     ResponseTooLarge { limit: usize },
+    RequestTooLarge { limit: usize },
     InvalidResponse(&'static str),
     Json,
 }
@@ -37,6 +50,9 @@ impl fmt::Display for ProtocolError {
             Self::Http(status) => write!(f, "Fleet server returned HTTP {status}"),
             Self::ResponseTooLarge { limit } => {
                 write!(f, "Fleet server response exceeded {limit} bytes")
+            }
+            Self::RequestTooLarge { limit } => {
+                write!(f, "Fleet server request exceeded {limit} bytes")
             }
             Self::InvalidResponse(message) => write!(f, "invalid Fleet server response: {message}"),
             Self::Json => write!(f, "invalid Fleet server JSON"),
@@ -137,8 +153,14 @@ impl Api {
     }
 
     pub async fn poll(&self) -> Result<PollResponse, ProtocolError> {
-        self.json::<(), _>(self.authenticated()?, Method::POST, "agent/v1/poll", None)
+        let response = self
+            .authenticated()?
+            .post(self.endpoint("agent/v1/poll")?)
+            .header(CAPABILITIES_HEADER, CAPABILITIES)
+            .send()
             .await
+            .map_err(ProtocolError::Transport)?;
+        decode(response).await
     }
 
     pub async fn cliproxy_credential(&self) -> Result<Vec<u8>, ProtocolError> {
@@ -258,6 +280,84 @@ impl Api {
         .await
     }
 
+    /// Sends the failure detail of an Attempt whose failed report the Server has
+    /// accepted. The response body is never read.
+    pub async fn attempt_detail(
+        &self,
+        attempt_id: Uuid,
+        detail: &AttemptDetail,
+    ) -> Result<(), ProtocolError> {
+        let body = serde_json::to_vec(detail).map_err(|_| ProtocolError::Json)?;
+        if body.len() > MAX_DETAIL_REQUEST_BYTES {
+            return Err(ProtocolError::RequestTooLarge {
+                limit: MAX_DETAIL_REQUEST_BYTES,
+            });
+        }
+        let response = self
+            .authenticated()?
+            .post(self.endpoint(&format!("agent/v1/attempts/{attempt_id}/detail"))?)
+            .header(CONTENT_TYPE, "application/json")
+            .body(body)
+            .send()
+            .await
+            .map_err(ProtocolError::Transport)?;
+        success(response)?;
+        Ok(())
+    }
+
+    /// Sends the latest disk usage. Best effort: the response body is never
+    /// read, and the caller decides when to try again.
+    pub async fn disk_usage(&self, report: &DiskUsageReport) -> Result<(), ProtocolError> {
+        self.put_report("agent/v1/disk-usage", report, MAX_DISK_USAGE_REQUEST_BYTES)
+            .await
+    }
+
+    /// Sends the machine and Agent information. Best effort like
+    /// [`Api::disk_usage`]: the response body is never read.
+    pub async fn telemetry(&self, report: &TelemetryReport) -> Result<(), ProtocolError> {
+        self.put_report("agent/v1/telemetry", report, MAX_TELEMETRY_REQUEST_BYTES)
+            .await
+    }
+
+    async fn put_report(
+        &self,
+        path: &str,
+        report: &impl Serialize,
+        limit: usize,
+    ) -> Result<(), ProtocolError> {
+        let body = serde_json::to_vec(report).map_err(|_| ProtocolError::Json)?;
+        if body.len() > limit {
+            return Err(ProtocolError::RequestTooLarge { limit });
+        }
+        let response = self
+            .authenticated()?
+            .put(self.endpoint(path)?)
+            .header(CONTENT_TYPE, "application/json")
+            .timeout(SIDE_REPORT_TIMEOUT)
+            .body(body)
+            .send()
+            .await
+            .map_err(ProtocolError::Transport)?;
+        success(response)?;
+        Ok(())
+    }
+
+    /// A client for loopback tests that speaks plain HTTP to a mock Server.
+    #[cfg(test)]
+    pub fn for_loopback_test(base: &str) -> Self {
+        let client = Client::builder()
+            .no_proxy()
+            .redirect(Policy::none())
+            .timeout(Duration::from_secs(5))
+            .build()
+            .unwrap();
+        Self {
+            base: Url::parse(base).unwrap(),
+            anonymous: client.clone(),
+            authenticated: Some(client),
+        }
+    }
+
     pub async fn renew(&self, csr: &str) -> Result<RenewalResponse, ProtocolError> {
         self.json(
             self.authenticated()?,
@@ -304,9 +404,13 @@ impl Api {
             request = request.json(body);
         }
         let response = request.send().await.map_err(ProtocolError::Transport)?;
-        let bytes = read_bounded(success(response)?, MAX_JSON_BYTES).await?;
-        serde_json::from_slice(&bytes).map_err(|_| ProtocolError::Json)
+        decode(response).await
     }
+}
+
+async fn decode<T: DeserializeOwned>(response: Response) -> Result<T, ProtocolError> {
+    let bytes = read_bounded(success(response)?, MAX_JSON_BYTES).await?;
+    serde_json::from_slice(&bytes).map_err(|_| ProtocolError::Json)
 }
 
 fn success(response: Response) -> Result<Response, ProtocolError> {
@@ -364,6 +468,9 @@ pub struct PollResponse {
     pub node_id: Uuid,
     pub assignment: Option<Assignment>,
     pub next_poll_seconds: u64,
+    /// Set by the Server only for Agents that sent the disk-usage capability.
+    #[serde(default)]
+    pub disk_usage_requested: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -454,6 +561,57 @@ pub enum ReportOutcome {
 pub struct RenameResponse {
     pub node_id: Uuid,
     pub alias: String,
+}
+
+/// Failure detail for one Attempt, as the Server's attempt-detail route
+/// expects it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AttemptDetail {
+    pub diagnostic: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub path: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub step: Option<fleet_reconcile::Step>,
+}
+
+/// Body of `PUT agent/v1/disk-usage`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct DiskUsageReport {
+    pub volumes: Vec<DiskVolume>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DiskVolume {
+    pub label: &'static str,
+    pub total_bytes: u64,
+    pub used_bytes: u64,
+    pub available_bytes: u64,
+}
+
+/// Body of `PUT agent/v1/telemetry`. Every property is always present; a value
+/// that could not be read is `null`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TelemetryReport {
+    pub agent_version: String,
+    pub os: TelemetryOs,
+    pub arch: Option<String>,
+    pub hostname: Option<String>,
+    pub user: Option<String>,
+    /// `homebrew`, `cargo` or `binary`.
+    pub install_method: Option<&'static str>,
+    /// `systemd`, `launchd` or `none`.
+    pub service_manager: &'static str,
+    pub state_directory: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct TelemetryOs {
+    pub name: Option<String>,
+    pub version: Option<String>,
+    pub kernel: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -554,5 +712,152 @@ mod tests {
         assert!(!protocol_error.to_string().contains(secret));
         assert!(format!("{protocol_error:?}").contains("Json"));
         assert!(error.to_string().contains(secret));
+    }
+
+    const POLL: &str = r#"{"workspaceId":"00000000-0000-0000-0000-000000000001","nodeId":"00000000-0000-0000-0000-000000000002","assignment":null,"nextPollSeconds":30}"#;
+    const POLL_REQUESTED: &str = r#"{"workspaceId":"00000000-0000-0000-0000-000000000001","nodeId":"00000000-0000-0000-0000-000000000002","assignment":null,"nextPollSeconds":30,"diskUsageRequested":true}"#;
+
+    #[test]
+    fn poll_response_parses_with_and_without_disk_usage_requested() {
+        let without: PollResponse = serde_json::from_str(POLL).unwrap();
+        assert!(!without.disk_usage_requested);
+        let with: PollResponse = serde_json::from_str(POLL_REQUESTED).unwrap();
+        assert!(with.disk_usage_requested);
+        let explicit_false = POLL_REQUESTED.replace("true", "false");
+        let off: PollResponse = serde_json::from_str(&explicit_false).unwrap();
+        assert!(!off.disk_usage_requested);
+        // Other unknown fields are still rejected.
+        let unknown = POLL.replace("}", r#","somethingElse":1}"#);
+        assert!(serde_json::from_str::<PollResponse>(&unknown).is_err());
+    }
+
+    #[tokio::test]
+    async fn every_poll_request_advertises_the_disk_usage_capability() {
+        let server =
+            crate::detail::testing::MockServer::start(vec![(200, POLL), (200, POLL_REQUESTED)]);
+        let client = Api::for_loopback_test(&server.url());
+        assert!(!client.poll().await.unwrap().disk_usage_requested);
+        assert!(client.poll().await.unwrap().disk_usage_requested);
+        let requests = server.requests();
+        assert_eq!(requests.len(), 2);
+        for request in requests {
+            assert_eq!(
+                (request.method.as_str(), request.path.as_str()),
+                ("POST", "/agent/v1/poll")
+            );
+            assert_eq!(
+                request.header("x-fleet-agent-capabilities"),
+                Some("disk-usage")
+            );
+        }
+    }
+
+    fn sample_report() -> DiskUsageReport {
+        DiskUsageReport {
+            volumes: vec![
+                DiskVolume {
+                    label: "home",
+                    total_bytes: 994662584320,
+                    used_bytes: 871203905536,
+                    available_bytes: 72818462720,
+                },
+                DiskVolume {
+                    label: "state",
+                    total_bytes: 10,
+                    used_bytes: 4,
+                    available_bytes: 6,
+                },
+            ],
+        }
+    }
+
+    #[test]
+    fn disk_usage_body_has_the_wire_shape() {
+        assert_eq!(
+            serde_json::to_value(sample_report()).unwrap(),
+            serde_json::json!({"volumes":[
+                {"label":"home","totalBytes":994662584320u64,"usedBytes":871203905536u64,"availableBytes":72818462720u64},
+                {"label":"state","totalBytes":10,"usedBytes":4,"availableBytes":6}
+            ]})
+        );
+    }
+
+    #[tokio::test]
+    async fn disk_usage_is_put_and_the_response_body_is_ignored() {
+        let server = crate::detail::testing::MockServer::start(vec![(204, ""), (200, "not json")]);
+        let client = Api::for_loopback_test(&server.url());
+        client.disk_usage(&sample_report()).await.unwrap();
+        client.disk_usage(&sample_report()).await.unwrap();
+        let requests = server.requests();
+        assert_eq!(requests[0].method, "PUT");
+        assert_eq!(requests[0].path, "/agent/v1/disk-usage");
+        assert_eq!(requests[0].header("content-type"), Some("application/json"));
+        let body: serde_json::Value = serde_json::from_str(&requests[0].body).unwrap();
+        assert_eq!(body["volumes"][0]["label"], "home");
+    }
+
+    #[tokio::test]
+    async fn disk_usage_failures_are_errors_not_panics() {
+        let server = crate::detail::testing::MockServer::start(vec![(404, ""), (429, "")]);
+        let client = Api::for_loopback_test(&server.url());
+        for expected in [StatusCode::NOT_FOUND, StatusCode::TOO_MANY_REQUESTS] {
+            let error = client.disk_usage(&sample_report()).await.unwrap_err();
+            assert!(matches!(error, ProtocolError::Http(status) if status == expected));
+        }
+    }
+
+    #[tokio::test]
+    async fn oversized_disk_usage_requests_are_not_sent() {
+        let server = crate::detail::testing::MockServer::start(vec![(204, "")]);
+        let client = Api::for_loopback_test(&server.url());
+        let report = DiskUsageReport {
+            volumes: vec![sample_report().volumes[0].clone(); 200],
+        };
+        assert!(matches!(
+            client.disk_usage(&report).await,
+            Err(ProtocolError::RequestTooLarge { .. })
+        ));
+        assert!(server.requests().is_empty());
+    }
+
+    fn sample_telemetry() -> TelemetryReport {
+        crate::telemetry::fixture()
+    }
+
+    #[tokio::test]
+    async fn telemetry_is_put_and_the_response_body_is_ignored() {
+        let server = crate::detail::testing::MockServer::start(vec![(204, ""), (200, "not json")]);
+        let client = Api::for_loopback_test(&server.url());
+        client.telemetry(&sample_telemetry()).await.unwrap();
+        client.telemetry(&sample_telemetry()).await.unwrap();
+        let requests = server.requests();
+        assert_eq!(requests[0].method, "PUT");
+        assert_eq!(requests[0].path, "/agent/v1/telemetry");
+        assert_eq!(requests[0].header("content-type"), Some("application/json"));
+        let body: serde_json::Value = serde_json::from_str(&requests[0].body).unwrap();
+        assert_eq!(body["agentVersion"], "0.9.0");
+    }
+
+    #[tokio::test]
+    async fn telemetry_failures_are_errors_not_panics() {
+        let server = crate::detail::testing::MockServer::start(vec![(404, ""), (429, "")]);
+        let client = Api::for_loopback_test(&server.url());
+        for expected in [StatusCode::NOT_FOUND, StatusCode::TOO_MANY_REQUESTS] {
+            let error = client.telemetry(&sample_telemetry()).await.unwrap_err();
+            assert!(matches!(error, ProtocolError::Http(status) if status == expected));
+        }
+    }
+
+    #[tokio::test]
+    async fn oversized_telemetry_requests_are_not_sent() {
+        let server = crate::detail::testing::MockServer::start(vec![(204, "")]);
+        let client = Api::for_loopback_test(&server.url());
+        let mut report = sample_telemetry();
+        report.hostname = Some("x".repeat(MAX_TELEMETRY_REQUEST_BYTES));
+        assert!(matches!(
+            client.telemetry(&report).await,
+            Err(ProtocolError::RequestTooLarge { .. })
+        ));
+        assert!(server.requests().is_empty());
     }
 }

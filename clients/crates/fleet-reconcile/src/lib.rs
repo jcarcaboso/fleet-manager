@@ -120,11 +120,51 @@ pub enum ErrorCode {
     RecoveryFailed,
 }
 
+/// Phase of an Attempt in which a failure happened. The names are the wire
+/// values of the Operator API attempt-detail contract.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+#[non_exhaustive]
+pub enum Step {
+    Lock,
+    Download,
+    Verify,
+    Stage,
+    Activate,
+    Recover,
+    Receipt,
+    Configure,
+    Validate,
+}
+
+impl Step {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Lock => "lock",
+            Self::Download => "download",
+            Self::Verify => "verify",
+            Self::Stage => "stage",
+            Self::Activate => "activate",
+            Self::Recover => "recover",
+            Self::Receipt => "receipt",
+            Self::Configure => "configure",
+            Self::Validate => "validate",
+        }
+    }
+}
+
+/// A reconciliation failure. Its [`ErrorCode`] is the stable identity; the
+/// optional [`Step`] and Target-relative path only describe where it happened.
 #[derive(Debug)]
 pub struct ReconcileError {
     code: ErrorCode,
     message: String,
     source: Option<io::Error>,
+    step: Option<Step>,
+    /// Location relative to the Target (or Skill) that raised the error; it is
+    /// turned into `path` when the error leaves the public API.
+    entry: Option<String>,
+    path: Option<String>,
 }
 
 impl ReconcileError {
@@ -137,22 +177,147 @@ impl ReconcileError {
     pub fn diagnostic(&self) -> &str {
         &self.message
     }
+    /// Phase in which the failure happened, when it is known.
+    pub fn step(&self) -> Option<Step> {
+        self.step.or_else(|| self.code.default_step())
+    }
+    /// Path of the offending entry relative to the Home base, never absolute
+    /// and never containing `..`. `None` when it is unknown or not safe to
+    /// report.
+    pub fn path(&self) -> Option<&str> {
+        self.path.as_deref()
+    }
     fn new(code: ErrorCode, message: impl Into<String>) -> Self {
         Self {
             code,
             message: message.into(),
             source: None,
+            step: None,
+            entry: None,
+            path: None,
         }
     }
     fn io(code: ErrorCode, message: impl Into<String>, source: io::Error) -> Self {
         Self {
-            code,
-            message: message.into(),
             source: Some(source),
+            ..Self::new(code, message)
         }
     }
+    fn with_step(mut self, step: Step) -> Self {
+        self.step = Some(step);
+        self
+    }
+    fn step_if_unset(mut self, step: Step) -> Self {
+        self.step.get_or_insert(step);
+        self
+    }
+    fn at_entry(mut self, entry: impl Into<String>) -> Self {
+        self.entry = Some(entry.into());
+        self
+    }
+    /// Places an entry reported by a nested parser below `parent`.
+    fn nested_in(mut self, parent: &str) -> Self {
+        self.entry = Some(match self.entry.take() {
+            Some(inner) if !inner.is_empty() => format!("{parent}/{inner}"),
+            _ => parent.to_owned(),
+        });
+        self
+    }
+    /// Resolves the reported path below the Target path `base`. Errors that are
+    /// about the Target itself fall back to `base` (plus `default_entry`, such
+    /// as a managed file name).
+    fn anchored(mut self, base: &Path, default_entry: Option<&str>) -> Self {
+        if self.path.is_some() {
+            return self;
+        }
+        let entry = match self.entry.take() {
+            Some(entry) => Some(entry),
+            None if self.code.names_target() => Some(default_entry.unwrap_or_default().to_owned()),
+            None => None,
+        };
+        self.path = entry.and_then(|entry| {
+            if entry.is_empty() {
+                report_path(base)
+            } else {
+                report_path(&base.join(entry))
+            }
+        });
+        self
+    }
 }
+
+/// Formats `path` for reporting to the Server: only a short, portable, relative
+/// path that stays below its base (no root, `.`, `..`, empty or control
+/// characters) is returned.
+pub fn report_path(path: &Path) -> Option<String> {
+    let mut parts = Vec::new();
+    for component in path.components() {
+        let Component::Normal(part) = component else {
+            return None;
+        };
+        let part = part.to_str()?;
+        if part.is_empty() || part.contains('\\') || part.chars().any(char::is_control) {
+            return None;
+        }
+        parts.push(part);
+    }
+    let joined = parts.join("/");
+    (!joined.is_empty() && joined.encode_utf16().count() <= 512).then_some(joined)
+}
+
 impl ErrorCode {
+    /// The step that normally raises this code, used unless the raising site
+    /// knows better.
+    const fn default_step(self) -> Option<Step> {
+        match self {
+            Self::InvalidHome
+            | Self::InvalidStateDirectory
+            | Self::InvalidTarget
+            | Self::InvalidAssignment
+            | Self::InvalidSkillName
+            | Self::DuplicateSkill
+            | Self::FilesystemEscape
+            | Self::NonRegularEntry
+            | Self::OwnershipConflict
+            | Self::MissingOwnedSkill => Some(Step::Validate),
+            Self::InvalidDigest
+            | Self::BundleSizeMismatch
+            | Self::UnsupportedSchema
+            | Self::BundleDigestMismatch
+            | Self::MalformedBundle
+            | Self::BundleLimitExceeded
+            | Self::InvalidBundlePath
+            | Self::BundlePathCollision
+            | Self::OwnedSkillDrift
+            | Self::TargetChanged => Some(Step::Verify),
+            Self::CorruptReceipt => Some(Step::Receipt),
+            Self::LockFailed => Some(Step::Lock),
+            Self::RecoveryFailed => Some(Step::Recover),
+            Self::Io => None,
+        }
+    }
+
+    /// Whether an error with this code concerns the Target (or managed file)
+    /// being reconciled when it names no more specific entry.
+    const fn names_target(self) -> bool {
+        matches!(
+            self,
+            Self::InvalidTarget
+                | Self::FilesystemEscape
+                | Self::NonRegularEntry
+                | Self::OwnershipConflict
+                | Self::MissingOwnedSkill
+                | Self::OwnedSkillDrift
+                | Self::CorruptReceipt
+                | Self::TargetChanged
+                | Self::LockFailed
+                | Self::RecoveryFailed
+                | Self::UnsupportedSchema
+                | Self::BundleSizeMismatch
+                | Self::BundleDigestMismatch
+        )
+    }
+
     pub const fn as_str(self) -> &'static str {
         match self {
             Self::InvalidHome => "invalid_home",
@@ -303,6 +468,15 @@ impl Reconciler {
         target: &TargetDescriptor,
         assignment: &Assignment,
     ) -> Result<ReconcileOutcome> {
+        self.reconcile_skills(target, assignment)
+            .map_err(|error| error.anchored(&target.path, None))
+    }
+
+    fn reconcile_skills(
+        &self,
+        target: &TargetDescriptor,
+        assignment: &Assignment,
+    ) -> Result<ReconcileOutcome> {
         validate_id(&assignment.assignment_id)?;
         validate_id(&assignment.desired_revision_id)?;
         let parsed = validate_assignment(assignment)?;
@@ -324,6 +498,11 @@ impl Reconciler {
     /// Recovers an interrupted target mutation without requiring an Assignment
     /// or Bundle bytes. Call this before the first network request after startup.
     pub fn recover(&self, target: &TargetDescriptor) -> Result<()> {
+        self.recover_skills(target)
+            .map_err(|error| error.anchored(&target.path, None))
+    }
+
+    fn recover_skills(&self, target: &TargetDescriptor) -> Result<()> {
         let target_path = self.resolve_target(target)?;
         let key = hex_sha256(target_path.as_os_str().to_string_lossy().as_bytes());
         let shared = target_path
@@ -345,6 +524,15 @@ impl Reconciler {
     }
 
     pub fn reconcile_file(
+        &self,
+        target: &TargetDescriptor,
+        assignment: &FileAssignment,
+    ) -> Result<FileReconcileOutcome> {
+        self.reconcile_managed_file(target, assignment)
+            .map_err(|error| error.anchored(&target.path, Some(&assignment.file.name)))
+    }
+
+    fn reconcile_managed_file(
         &self,
         target: &TargetDescriptor,
         assignment: &FileAssignment,
@@ -375,6 +563,11 @@ impl Reconciler {
     }
 
     pub fn recover_file(&self, target: &TargetDescriptor, name: &str) -> Result<()> {
+        self.recover_managed_file(target, name)
+            .map_err(|error| error.anchored(&target.path, Some(name)))
+    }
+
+    fn recover_managed_file(&self, target: &TargetDescriptor, name: &str) -> Result<()> {
         validate_file_name(name)?;
         let target_path = self.resolve_target_for_file(target, false)?;
         let destination = target_path.join(name);
@@ -425,7 +618,8 @@ impl Reconciler {
             assignment.file.digest.is_some() || journal_path.exists(),
         )?;
         recover_file_transaction(destination, shared, &receipt_path, &journal_path)?;
-        let old = read_file_receipt(&receipt_path, target, &assignment.file.name)?;
+        let old = read_file_receipt(&receipt_path, target, &assignment.file.name)
+            .map_err(|error| error.step_if_unset(Step::Receipt))?;
         let observed = digest_regular_file(destination)?;
         if old.is_none()
             && observed
@@ -464,11 +658,13 @@ impl Reconciler {
         if tx_root.exists() {
             remove_tree(&tx_root)?;
         }
-        ensure_private_dir(&tx_root, ErrorCode::Io)?;
+        ensure_private_dir(&tx_root, ErrorCode::Io)
+            .map_err(|error| error.with_step(Step::Stage))?;
         let staged = tx_root.join("new");
         let backup = tx_root.join("old");
         if desired.is_some() {
-            write_regular_file(&staged, &assignment.file.content)?;
+            write_regular_file(&staged, &assignment.file.content)
+                .map_err(|error| error.with_step(Step::Stage))?;
         }
         let journal = FileJournal {
             version: 1,
@@ -495,11 +691,16 @@ impl Reconciler {
                 sync_parent(destination)?;
             }
             if let Some(digest) = &desired {
-                if digest_regular_file(destination)?.as_ref() != Some(digest) {
+                if digest_regular_file(destination)
+                    .map_err(|error| error.step_if_unset(Step::Verify))?
+                    .as_ref()
+                    != Some(digest)
+                {
                     return Err(ReconcileError::new(
                         ErrorCode::TargetChanged,
                         "managed file verification failed",
-                    ));
+                    )
+                    .with_step(Step::Verify));
                 }
                 write_json_atomic(
                     &receipt_path,
@@ -511,15 +712,17 @@ impl Reconciler {
                         desired_revision_id: assignment.desired_revision_id.clone(),
                         digest: digest.clone(),
                     },
-                )?;
+                )
+                .map_err(|error| error.with_step(Step::Receipt))?;
             } else if receipt_path.exists() {
-                remove_file_sync(&receipt_path)?;
+                remove_file_sync(&receipt_path).map_err(|error| error.with_step(Step::Receipt))?;
             }
             let mut committed = journal.clone();
             committed.phase = Phase::Committed;
             write_json_atomic(&journal_path, &committed)?;
             Ok(())
-        })();
+        })()
+        .map_err(|error: ReconcileError| error.step_if_unset(Step::Activate));
         if let Err(error) = operation {
             if let Err(recovery) =
                 recover_file_transaction(destination, shared, &receipt_path, &journal_path)
@@ -603,7 +806,8 @@ impl Reconciler {
         if journal_path.exists() {
             recover(target, shared, &receipt_path, &journal_path)?;
         }
-        let old = read_receipt(&receipt_path, target)?;
+        let old = read_receipt(&receipt_path, target)
+            .map_err(|error| error.step_if_unset(Step::Receipt))?;
         let desired: BTreeMap<_, _> = parsed
             .iter()
             .map(|s| (s.name.clone(), s.digest.clone()))
@@ -618,7 +822,10 @@ impl Reconciler {
                         // Computing the digest also rejects links, special files,
                         // invalid names, and over-limit observed trees before a
                         // transaction can use them as rollback material.
-                        observed_owned.insert(name.clone(), digest_tree(&path)?);
+                        observed_owned.insert(
+                            name.clone(),
+                            digest_tree(&path).map_err(|error| error.nested_in(name))?,
+                        );
                     }
                     Err(e) if e.kind() == io::ErrorKind::NotFound => {}
                     Err(e) => {
@@ -626,7 +833,8 @@ impl Reconciler {
                             ErrorCode::Io,
                             format!("cannot inspect owned Skill {name}"),
                             e,
-                        ));
+                        )
+                        .at_entry(name));
                     }
                 }
             }
@@ -640,7 +848,8 @@ impl Reconciler {
                 return Err(ReconcileError::new(
                     ErrorCode::OwnershipConflict,
                     format!("Skill {} exists without Fleet ownership", skill.name),
-                ));
+                )
+                .at_entry(&skill.name));
             }
         }
         let unchanged = old.as_ref().is_some_and(|r| r.skills == desired)
@@ -666,12 +875,16 @@ impl Reconciler {
         }
         let staged = tx_root.join("new");
         let backup = tx_root.join("old");
-        ensure_private_dir(&staged, ErrorCode::Io)?;
-        ensure_private_dir(&backup, ErrorCode::Io)?;
-        for skill in &parsed {
-            extract_skill(&staged.join(&skill.name), skill)?;
-        }
-        sync_tree(&staged)?;
+        (|| {
+            ensure_private_dir(&staged, ErrorCode::Io)?;
+            ensure_private_dir(&backup, ErrorCode::Io)?;
+            for skill in &parsed {
+                extract_skill(&staged.join(&skill.name), skill)
+                    .map_err(|error| error.nested_in(&skill.name))?;
+            }
+            sync_tree(&staged)
+        })()
+        .map_err(|error: ReconcileError| error.with_step(Step::Stage))?;
 
         let old_names = observed_owned.keys().cloned().collect();
         let journal = Journal {
@@ -702,11 +915,15 @@ impl Reconciler {
                 }
             }
             for (name, digest) in &desired {
-                if digest_tree(&target.join(name))? != *digest {
+                let actual = digest_tree(&target.join(name))
+                    .map_err(|error| error.nested_in(name).with_step(Step::Verify))?;
+                if actual != *digest {
                     return Err(ReconcileError::new(
                         ErrorCode::TargetChanged,
                         format!("verification failed for {name}"),
-                    ));
+                    )
+                    .with_step(Step::Verify)
+                    .at_entry(name));
                 }
             }
             let receipt = Receipt {
@@ -716,12 +933,14 @@ impl Reconciler {
                 desired_revision_id: assignment.desired_revision_id.clone(),
                 skills: desired.clone(),
             };
-            write_json_atomic(&receipt_path, &receipt)?;
+            write_json_atomic(&receipt_path, &receipt)
+                .map_err(|error| error.with_step(Step::Receipt))?;
             let mut committed = journal.clone();
             committed.phase = Phase::Committed;
             write_json_atomic(&journal_path, &committed)?;
             Ok(())
-        })();
+        })()
+        .map_err(|error: ReconcileError| error.step_if_unset(Step::Activate));
         if let Err(error) = operation {
             if let Err(recovery) = recover(target, shared, &receipt_path, &journal_path) {
                 return Err(ReconcileError::new(
@@ -758,70 +977,81 @@ fn validate_assignment(a: &Assignment) -> Result<Vec<ParsedSkill>> {
     let mut out = Vec::new();
     let mut total = 0u64;
     for skill in &a.skills {
-        validate_skill_name(&skill.name)?;
-        if !names.insert(skill.name.clone()) {
-            return Err(ReconcileError::new(
-                ErrorCode::DuplicateSkill,
-                "duplicate Skill name",
-            ));
-        }
-        let alias = skill
-            .name
-            .nfc()
-            .flat_map(char::to_lowercase)
-            .collect::<String>();
-        if !aliases.insert(alias) {
-            return Err(ReconcileError::new(
-                ErrorCode::DuplicateSkill,
-                "Skill names collide by case or Unicode normalization",
-            ));
-        }
-        if skill.schema != SCHEMA {
-            return Err(ReconcileError::new(
-                ErrorCode::UnsupportedSchema,
-                format!("unsupported schema for {}", skill.name),
-            ));
-        }
-        if skill.size != skill.bundle.len() as u64 {
-            return Err(ReconcileError::new(
-                ErrorCode::BundleSizeMismatch,
-                format!("size mismatch for {}", skill.name),
-            ));
-        }
-        total = total.checked_add(skill.size).ok_or_else(|| {
-            ReconcileError::new(
-                ErrorCode::BundleLimitExceeded,
-                "assignment Bundle size overflow",
-            )
-        })?;
-        if total > MAX_TOTAL {
-            return Err(ReconcileError::new(
-                ErrorCode::BundleLimitExceeded,
-                "assignment Bundles exceed 256 MiB",
-            ));
-        }
-        if skill.bundle.len() > MAX_BUNDLE {
-            return Err(ReconcileError::new(
-                ErrorCode::BundleLimitExceeded,
-                "encoded Bundle exceeds 16 MiB",
-            ));
-        }
-        parse_digest(&skill.digest)?;
-        let actual = format!("sha256:{}", hex_sha256(&skill.bundle));
-        if actual != skill.digest {
-            return Err(ReconcileError::new(
-                ErrorCode::BundleDigestMismatch,
-                format!("digest mismatch for {}", skill.name),
-            ));
-        }
-        let files = parse_bundle(&skill.bundle)?;
-        out.push(ParsedSkill {
-            name: skill.name.clone(),
-            digest: skill.digest.clone(),
-            files,
-        });
+        let parsed = validate_skill(skill, &mut names, &mut aliases, &mut total)
+            .map_err(|error| error.nested_in(&skill.name))?;
+        out.push(parsed);
     }
     Ok(out)
+}
+
+fn validate_skill(
+    skill: &DesiredSkill,
+    names: &mut BTreeSet<String>,
+    aliases: &mut BTreeSet<String>,
+    total: &mut u64,
+) -> Result<ParsedSkill> {
+    validate_skill_name(&skill.name)?;
+    if !names.insert(skill.name.clone()) {
+        return Err(ReconcileError::new(
+            ErrorCode::DuplicateSkill,
+            "duplicate Skill name",
+        ));
+    }
+    let alias = skill
+        .name
+        .nfc()
+        .flat_map(char::to_lowercase)
+        .collect::<String>();
+    if !aliases.insert(alias) {
+        return Err(ReconcileError::new(
+            ErrorCode::DuplicateSkill,
+            "Skill names collide by case or Unicode normalization",
+        ));
+    }
+    if skill.schema != SCHEMA {
+        return Err(ReconcileError::new(
+            ErrorCode::UnsupportedSchema,
+            format!("unsupported schema for {}", skill.name),
+        ));
+    }
+    if skill.size != skill.bundle.len() as u64 {
+        return Err(ReconcileError::new(
+            ErrorCode::BundleSizeMismatch,
+            format!("size mismatch for {}", skill.name),
+        ));
+    }
+    *total = total.checked_add(skill.size).ok_or_else(|| {
+        ReconcileError::new(
+            ErrorCode::BundleLimitExceeded,
+            "assignment Bundle size overflow",
+        )
+    })?;
+    if *total > MAX_TOTAL {
+        return Err(ReconcileError::new(
+            ErrorCode::BundleLimitExceeded,
+            "assignment Bundles exceed 256 MiB",
+        ));
+    }
+    if skill.bundle.len() > MAX_BUNDLE {
+        return Err(ReconcileError::new(
+            ErrorCode::BundleLimitExceeded,
+            "encoded Bundle exceeds 16 MiB",
+        ));
+    }
+    parse_digest(&skill.digest)?;
+    let actual = format!("sha256:{}", hex_sha256(&skill.bundle));
+    if actual != skill.digest {
+        return Err(ReconcileError::new(
+            ErrorCode::BundleDigestMismatch,
+            format!("digest mismatch for {}", skill.name),
+        ));
+    }
+    let files = parse_bundle(&skill.bundle)?;
+    Ok(ParsedSkill {
+        name: skill.name.clone(),
+        digest: skill.digest.clone(),
+        files,
+    })
 }
 
 fn parse_bundle(bytes: &[u8]) -> Result<Vec<BundleFile>> {
@@ -871,7 +1101,8 @@ fn parse_bundle(bytes: &[u8]) -> Result<Vec<BundleFile>> {
             return Err(ReconcileError::new(
                 ErrorCode::BundlePathCollision,
                 "Bundle paths collide or use a file as a directory",
-            ));
+            )
+            .at_entry(&path));
         }
         aliases.insert(alias);
         let executable = match p.u8()? {
@@ -881,15 +1112,16 @@ fn parse_bundle(bytes: &[u8]) -> Result<Vec<BundleFile>> {
                 return Err(ReconcileError::new(
                     ErrorCode::MalformedBundle,
                     "invalid executable flag",
-                ));
+                )
+                .at_entry(&path));
             }
         };
         let size = p.u64()?;
         if size > MAX_FILE as u64 {
-            return Err(ReconcileError::new(
-                ErrorCode::BundleLimitExceeded,
-                "file exceeds 16 MiB",
-            ));
+            return Err(
+                ReconcileError::new(ErrorCode::BundleLimitExceeded, "file exceeds 16 MiB")
+                    .at_entry(&path),
+            );
         }
         total = total.checked_add(size).ok_or_else(|| {
             ReconcileError::new(ErrorCode::BundleLimitExceeded, "content size overflow")
@@ -1026,6 +1258,35 @@ fn validate_relative(path: &Path, allow_empty: bool) -> std::result::Result<(), 
     Ok(())
 }
 
+/// Describes `at` below the Target base `home` as `~/relative`, so errors name
+/// a location without revealing where the base lives. A path outside the base
+/// is reduced to its last component.
+fn under_home(home: &Path, at: &Path) -> String {
+    match at.strip_prefix(home) {
+        Ok(rel) if rel.as_os_str().is_empty() => "~".to_owned(),
+        Ok(rel) => format!("~/{}", rel.display()),
+        Err(_) => tail_display(at),
+    }
+}
+
+/// Describes `at` by its last two components, as `.../parent/name`, never as an
+/// absolute path.
+fn tail_display(at: &Path) -> String {
+    let names: Vec<_> = at
+        .components()
+        .filter_map(|component| match component {
+            Component::Normal(name) => Some(name.to_string_lossy().into_owned()),
+            _ => None,
+        })
+        .collect();
+    let tail = &names[names.len().saturating_sub(2)..];
+    match names.len() {
+        0 => "the root directory".to_owned(),
+        1..=2 if at.is_relative() => tail.join("/"),
+        _ => format!(".../{}", tail.join("/")),
+    }
+}
+
 fn ensure_beneath(home: &Path, target: &Path, create: bool) -> Result<()> {
     if !target.starts_with(home) {
         return Err(ReconcileError::new(
@@ -1049,19 +1310,26 @@ fn ensure_beneath(home: &Path, target: &Path, create: bool) -> Result<()> {
             Ok(m) if m.file_type().is_symlink() => {
                 return Err(ReconcileError::new(
                     ErrorCode::FilesystemEscape,
-                    format!("symlink in target path: {}", at.display()),
+                    format!("symlink in target path: {}", under_home(home, &at)),
                 ));
             }
             Ok(m) if !m.is_dir() => {
                 return Err(ReconcileError::new(
                     ErrorCode::NonRegularEntry,
-                    format!("target ancestor is not a directory: {}", at.display()),
+                    format!(
+                        "target ancestor is not a directory: {}",
+                        under_home(home, &at)
+                    ),
                 ));
             }
             Ok(_) => {}
             Err(e) if e.kind() == io::ErrorKind::NotFound && create => {
                 fs::create_dir(&at).map_err(|e| {
-                    ReconcileError::io(ErrorCode::Io, format!("cannot create {}", at.display()), e)
+                    ReconcileError::io(
+                        ErrorCode::Io,
+                        format!("cannot create {}", under_home(home, &at)),
+                        e,
+                    )
                 })?;
                 sync_parent(&at)?;
             }
@@ -1069,7 +1337,7 @@ fn ensure_beneath(home: &Path, target: &Path, create: bool) -> Result<()> {
             Err(e) => {
                 return Err(ReconcileError::io(
                     ErrorCode::Io,
-                    format!("cannot inspect {}", at.display()),
+                    format!("cannot inspect {}", under_home(home, &at)),
                     e,
                 ));
             }
@@ -1095,7 +1363,7 @@ fn reject_symlink_path(path: &Path, code: ErrorCode) -> Result<()> {
         {
             return Err(ReconcileError::new(
                 code,
-                format!("symlink in path: {}", at.display()),
+                format!("symlink in path: {}", tail_display(&at)),
             ));
         }
     }
@@ -1112,20 +1380,20 @@ fn ensure_private_dir(path: &Path, code: ErrorCode) -> Result<()> {
                     code,
                     format!(
                         "private path component is not a real directory: {}",
-                        current.display()
+                        tail_display(&current)
                     ),
                 ));
             }
             Ok(_) => {}
             Err(e) if e.kind() == io::ErrorKind::NotFound => {
                 fs::create_dir(&current).map_err(|e| {
-                    ReconcileError::io(code, format!("cannot create {}", current.display()), e)
+                    ReconcileError::io(code, format!("cannot create {}", tail_display(&current)), e)
                 })?;
             }
             Err(e) => {
                 return Err(ReconcileError::io(
                     code,
-                    format!("cannot inspect {}", current.display()),
+                    format!("cannot inspect {}", tail_display(&current)),
                     e,
                 ));
             }
@@ -1308,13 +1576,15 @@ fn collect_files(
             .collect::<Result<Vec<_>>>()?
             .join("/");
         validate_bundle_path(&value)?;
-        let meta = fs::symlink_metadata(&path)
-            .map_err(|e| ReconcileError::io(ErrorCode::Io, "cannot inspect Skill entry", e))?;
+        let meta = fs::symlink_metadata(&path).map_err(|e| {
+            ReconcileError::io(ErrorCode::Io, "cannot inspect Skill entry", e).at_entry(&value)
+        })?;
         if meta.file_type().is_symlink() || (!meta.is_dir() && !meta.is_file()) {
             return Err(ReconcileError::new(
                 ErrorCode::NonRegularEntry,
-                format!("non-regular Skill entry: {}", path.display()),
-            ));
+                format!("non-regular Skill entry: {value}"),
+            )
+            .at_entry(&value));
         }
         #[cfg(unix)]
         if meta.is_file() && {
@@ -1323,8 +1593,9 @@ fn collect_files(
         } {
             return Err(ReconcileError::new(
                 ErrorCode::NonRegularEntry,
-                format!("hard-linked Skill entry: {}", path.display()),
-            ));
+                format!("hard-linked Skill entry: {value}"),
+            )
+            .at_entry(&value));
         }
         if meta.is_dir() {
             collect_files(root, &path, out, limits)?;
@@ -1553,6 +1824,16 @@ fn recover_file_transaction(
     receipt_path: &Path,
     journal_path: &Path,
 ) -> Result<()> {
+    recover_file_journal(destination, shared, receipt_path, journal_path)
+        .map_err(|error| error.step_if_unset(Step::Recover))
+}
+
+fn recover_file_journal(
+    destination: &Path,
+    shared: &Path,
+    receipt_path: &Path,
+    journal_path: &Path,
+) -> Result<()> {
     let metadata = match fs::symlink_metadata(journal_path) {
         Ok(metadata) => metadata,
         Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(()),
@@ -1721,6 +2002,16 @@ fn read_receipt(path: &Path, target: &Path) -> Result<Option<Receipt>> {
 }
 
 fn recover(target: &Path, shared: &Path, receipt_path: &Path, journal_path: &Path) -> Result<()> {
+    recover_journal(target, shared, receipt_path, journal_path)
+        .map_err(|error| error.step_if_unset(Step::Recover))
+}
+
+fn recover_journal(
+    target: &Path,
+    shared: &Path,
+    receipt_path: &Path,
+    journal_path: &Path,
+) -> Result<()> {
     let meta = fs::symlink_metadata(journal_path)
         .map_err(|e| ReconcileError::io(ErrorCode::RecoveryFailed, "cannot inspect journal", e))?;
     if !meta.is_file() || meta.file_type().is_symlink() || meta.len() > MAX_STATE_FILE {
@@ -1927,6 +2218,41 @@ mod tests {
             bundle: b,
         }
     }
+    #[test]
+    fn filesystem_errors_name_locations_without_absolute_paths() {
+        let t = TestDir::new().unwrap();
+        let state = t.path().join("external-state");
+        fs::create_dir(&state).unwrap();
+        fs::write(state.join("targets"), b"not a directory").unwrap();
+        let message = ensure_private_dir(&state.join("targets"), ErrorCode::Io)
+            .unwrap_err()
+            .to_string();
+        assert!(
+            message.ends_with("is not a real directory: .../external-state/targets"),
+            "{message}"
+        );
+
+        let home = t.path().join("home");
+        fs::create_dir_all(home.join(".claude")).unwrap();
+        std::os::unix::fs::symlink(t.path(), home.join(".claude/link")).unwrap();
+        let message = ensure_beneath(&home, &home.join(".claude/link/x"), false)
+            .unwrap_err()
+            .to_string();
+        assert!(
+            message.ends_with("symlink in target path: ~/.claude/link"),
+            "{message}"
+        );
+
+        let message = reject_symlink_path(&home.join(".claude/link"), ErrorCode::Io)
+            .unwrap_err()
+            .to_string();
+        assert!(
+            message.ends_with("symlink in path: .../.claude/link"),
+            "{message}"
+        );
+        assert!(!message.contains(t.path().to_str().unwrap()));
+    }
+
     fn setup() -> (TestDir, Reconciler, TargetDescriptor) {
         let t = TestDir::new().unwrap();
         let h = t.path().join("home");
@@ -2362,5 +2688,216 @@ mod tests {
         fs::write(deep.join("file"), b"x").unwrap();
         let error = r.reconcile(&d, &current).unwrap_err();
         assert_eq!(error.code(), ErrorCode::InvalidBundlePath);
+    }
+
+    fn target_key(r: &Reconciler, d: &TargetDescriptor) -> String {
+        hex_sha256(
+            r.home
+                .join(&d.path)
+                .as_os_str()
+                .to_string_lossy()
+                .as_bytes(),
+        )
+    }
+
+    #[test]
+    fn failures_keep_their_codes_and_report_step_and_relative_path() {
+        let (_t, r, mut d) = setup();
+        d.path = ".agents/skills".into();
+        let one = assignment("1", vec![skill("alpha", &[("SKILL.md", false, b"x")])]);
+
+        // lock: the lock file is not a regular file.
+        let shared = r
+            .home
+            .join(".agents/.fleet-reconcile")
+            .join(target_key(&r, &d));
+        fs::create_dir_all(shared.join("lock")).unwrap();
+        let error = r.reconcile(&d, &one).unwrap_err();
+        assert_eq!(error.code_str(), "lock_failed");
+        assert_eq!(error.step(), Some(Step::Lock));
+        assert_eq!(error.path(), Some(".agents/skills"));
+        fs::remove_dir(shared.join("lock")).unwrap();
+
+        // ownership conflict names the Skill directory.
+        fs::create_dir_all(r.home.join(".agents/skills/alpha")).unwrap();
+        let error = r.reconcile(&d, &one).unwrap_err();
+        assert_eq!(error.code_str(), "ownership_conflict");
+        assert_eq!(error.step(), Some(Step::Validate));
+        assert_eq!(error.path(), Some(".agents/skills/alpha"));
+        fs::remove_dir(r.home.join(".agents/skills/alpha")).unwrap();
+
+        // corrupt Receipt.
+        r.reconcile(&d, &one).unwrap();
+        let state = r.state_dir.join("targets").join(target_key(&r, &d));
+        fs::write(state.join("receipt.json"), b"{broken").unwrap();
+        let error = r.reconcile(&d, &one).unwrap_err();
+        assert_eq!(error.code_str(), "corrupt_receipt");
+        assert_eq!(error.step(), Some(Step::Receipt));
+        assert_eq!(error.path(), Some(".agents/skills"));
+
+        // corrupt recovery journal.
+        fs::write(state.join("journal.json"), b"{broken").unwrap();
+        let error = r.reconcile(&d, &one).unwrap_err();
+        assert_eq!(error.code_str(), "recovery_failed");
+        assert_eq!(error.step(), Some(Step::Recover));
+        assert_eq!(error.path(), Some(".agents/skills"));
+        let error = r.recover(&d).unwrap_err();
+        assert_eq!(error.code_str(), "recovery_failed");
+        assert_eq!(error.path(), Some(".agents/skills"));
+    }
+
+    #[test]
+    fn bundle_failures_name_the_skill_and_entry() {
+        let (_t, r, d) = setup();
+
+        let mut wrong_digest = skill("alpha", &[("SKILL.md", false, b"x")]);
+        wrong_digest.digest = format!("sha256:{}", "0".repeat(64));
+        let error = r
+            .reconcile(&d, &assignment("1", vec![wrong_digest]))
+            .unwrap_err();
+        assert_eq!(error.code_str(), "bundle_digest_mismatch");
+        assert_eq!(error.step(), Some(Step::Verify));
+        assert_eq!(error.path(), Some("skills/alpha"));
+
+        let mut wrong_size = skill("beta", &[("SKILL.md", false, b"x")]);
+        wrong_size.size += 1;
+        let error = r
+            .reconcile(&d, &assignment("2", vec![wrong_size]))
+            .unwrap_err();
+        assert_eq!(error.code_str(), "bundle_size_mismatch");
+        assert_eq!(error.path(), Some("skills/beta"));
+
+        let mut schema = skill("gamma", &[("SKILL.md", false, b"x")]);
+        schema.schema = "fleet.bundle/v0".into();
+        let error = r.reconcile(&d, &assignment("3", vec![schema])).unwrap_err();
+        assert_eq!(error.code_str(), "unsupported_schema");
+        assert_eq!(error.step(), Some(Step::Verify));
+        assert_eq!(error.path(), Some("skills/gamma"));
+
+        let collision = skill(
+            "delta",
+            &[
+                ("SKILL.md", false, b"x"),
+                ("a", false, b"1"),
+                ("a/b", false, b"2"),
+            ],
+        );
+        let error = r
+            .reconcile(&d, &assignment("4", vec![collision]))
+            .unwrap_err();
+        assert_eq!(error.code_str(), "bundle_path_collision");
+        assert_eq!(error.path(), Some("skills/delta/a/b"));
+
+        // A bundle path that is unsafe is never copied into `path`.
+        let unsafe_path = skill("eps", &[("../x", false, b"1"), ("SKILL.md", false, b"x")]);
+        let error = r
+            .reconcile(&d, &assignment("5", vec![unsafe_path]))
+            .unwrap_err();
+        assert_eq!(error.code_str(), "invalid_bundle_path");
+        assert_eq!(error.path(), Some("skills/eps"));
+
+        // Failures that are not about a path carry none.
+        let error = r
+            .reconcile(&d, &assignment(&"i".repeat(300), Vec::new()))
+            .unwrap_err();
+        assert_eq!(error.code_str(), "invalid_assignment");
+        assert_eq!(error.step(), Some(Step::Validate));
+        assert_eq!(error.path(), None);
+    }
+
+    #[test]
+    fn observed_drift_failures_name_the_entry() {
+        let (_t, r, d) = setup();
+        let current = assignment("1", vec![skill("alpha", &[("SKILL.md", false, b"x")])]);
+        r.reconcile(&d, &current).unwrap();
+        let link = r.home.join("skills/alpha/link");
+        std::os::unix::fs::symlink("SKILL.md", &link).unwrap();
+        let error = r.reconcile(&d, &current).unwrap_err();
+        assert_eq!(error.code_str(), "non_regular_entry");
+        assert_eq!(error.path(), Some("skills/alpha/link"));
+    }
+
+    #[test]
+    fn target_escape_and_managed_file_failures_report_relative_paths() {
+        let (t, r, mut d) = setup();
+        let outside = t.path().join("outside");
+        fs::create_dir(&outside).unwrap();
+        std::os::unix::fs::symlink(&outside, r.home.join(".linked")).unwrap();
+        d.path = ".linked/skills".into();
+        let error = r
+            .reconcile(
+                &d,
+                &assignment("1", vec![skill("a", &[("SKILL.md", false, b"x")])]),
+            )
+            .unwrap_err();
+        assert_eq!(error.code_str(), "filesystem_escape");
+        assert_eq!(error.path(), Some(".linked/skills"));
+        assert!(!error.diagnostic().is_empty());
+
+        d.path = ".claude".into();
+        fs::create_dir(r.home.join(".claude")).unwrap();
+        fs::write(r.home.join(".claude/CLAUDE.md"), b"personal").unwrap();
+        let error = r
+            .reconcile_file(&d, &file_assignment("2", "CLAUDE.md", Some(b"fleet")))
+            .unwrap_err();
+        assert_eq!(error.code_str(), "ownership_conflict");
+        assert_eq!(error.step(), Some(Step::Validate));
+        assert_eq!(error.path(), Some(".claude/CLAUDE.md"));
+
+        let mut schema = file_assignment("3", "AGENTS.md", Some(b"fleet"));
+        schema.file.schema = Some("fleet.file/v0".into());
+        let error = r.reconcile_file(&d, &schema).unwrap_err();
+        assert_eq!(error.code_str(), "unsupported_schema");
+        assert_eq!(error.path(), Some(".claude/AGENTS.md"));
+
+        let mut digest = file_assignment("4", "AGENTS.md", Some(b"fleet"));
+        digest.file.content = b"other".to_vec();
+        digest.file.size = Some(5);
+        let error = r.reconcile_file(&d, &digest).unwrap_err();
+        assert_eq!(error.code_str(), "bundle_digest_mismatch");
+        assert_eq!(error.step(), Some(Step::Verify));
+        assert_eq!(error.path(), Some(".claude/AGENTS.md"));
+    }
+
+    #[test]
+    fn reported_paths_are_always_safe_relative_paths() {
+        for unsafe_path in ["/etc/passwd", "../x", "a/../b", "", ".", "a\\b", "a/\u{7}b"] {
+            assert_eq!(report_path(Path::new(unsafe_path)), None, "{unsafe_path:?}");
+        }
+        assert_eq!(
+            report_path(Path::new("a/b/c.md")).as_deref(),
+            Some("a/b/c.md")
+        );
+        assert_eq!(report_path(&PathBuf::from("x".repeat(513))), None);
+        assert!(report_path(&PathBuf::from("x".repeat(512))).is_some());
+        // Non-reportable targets are omitted, not rewritten.
+        let (_t, r, mut d) = setup();
+        d.path = "../escape".into();
+        let error = r
+            .reconcile(
+                &d,
+                &assignment("1", vec![skill("a", &[("SKILL.md", false, b"x")])]),
+            )
+            .unwrap_err();
+        assert_eq!(error.code_str(), "invalid_target");
+        assert_eq!(error.path(), None);
+    }
+
+    #[test]
+    fn step_wire_names_match_the_contract() {
+        for (step, name) in [
+            (Step::Lock, "lock"),
+            (Step::Download, "download"),
+            (Step::Verify, "verify"),
+            (Step::Stage, "stage"),
+            (Step::Activate, "activate"),
+            (Step::Recover, "recover"),
+            (Step::Receipt, "receipt"),
+            (Step::Configure, "configure"),
+            (Step::Validate, "validate"),
+        ] {
+            assert_eq!(step.as_str(), name);
+            assert_eq!(serde_json::to_string(&step).unwrap(), format!("\"{name}\""));
+        }
     }
 }

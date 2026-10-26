@@ -2,10 +2,40 @@
   "items": [
     {
       "nodeId": "00000000-0000-0000-0000-000000000001",
-      "name": "linux-example",
+      "name": "studio-mini",
       "revoked": false,
-      "lastContactAt": null,
-      "freshness": "never_contacted"
+      "lastContactAt": "2026-10-25T14:29:10Z",
+      "freshness": "fresh",
+      "platform": "macos",
+      "enrolledAt": "2026-09-01T10:00:00Z",
+      "revokedAt": null,
+      "credentialNotAfter": "2026-10-30T09:00:00Z",
+      "targets": {
+        "pending": 0,
+        "applying": 0,
+        "succeeded": 4,
+        "failed": 1,
+        "superseded": 0
+      },
+      "currentRevision": "a3f9c21d0c5b4e8f9a1b2c3d4e5f60718293a4b5",
+      "disk": {
+        "label": "home",
+        "usedPercent": 92.3,
+        "usedBytes": 871203905536,
+        "availableBytes": 72818462720,
+        "totalBytes": 994662584320,
+        "measuredAt": "2026-10-25T12:00:00Z"
+      },
+      "agent": {
+        "version": "0.8.0",
+        "outdated": true,
+        "os": {
+          "name": "Fedora Linux",
+          "version": "44"
+        },
+        "arch": "x86_64",
+        "hostname": "studio-mini.home.arpa"
+      }
     }
   ],
   "nextCursor": null

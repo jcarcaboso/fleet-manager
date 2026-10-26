@@ -95,6 +95,128 @@ failed. Every report binds the Node, Target, desired revision, Rollout,
 Assignment, and Attempt identities. Terminal failures use stable error codes and
 bounded diagnostics.
 
+The failed report carries only the stable error code. After the Server accepts
+it, the Agent sends a separate, best-effort failure detail for that Attempt: a
+diagnostic, the Target-relative path of the offending file or entry when the
+failure has one, and the step in which it failed (`lock`, `download`, `verify`,
+`stage`, `activate`, `recover`, `receipt`, `configure` or `validate`). The detail
+never delays the report or the next reconciliation, and a failed delivery never
+fails a cycle. The [Operator API](../technical-design/operator-api.md#phase-2-attempt-detail)
+defines the route.
+
+The error code decides the Attempt's identity; step and path only locate it, and
+each reconciliation error carries them as optional context. The diagnostic is
+the error message and its causes. Before it leaves the Node the Agent removes
+control characters other than newline and tab, replaces the user's home
+directory with `~`, and cuts it to 2048 UTF-16 code units. Error messages
+describe a failure and never quote file contents, credentials, tokens, CLIProxy
+keys or environment values. In particular, parser errors for AI-client
+configuration report a line and column, not the offending text. A path is
+omitted unless it is relative and free of `..`.
+
+Before sending, the Agent removes control characters other than newline and
+tab and hides where things live on the machine, then truncates to 2048 UTF-16
+code units (so truncation measures the redacted text). The home directory
+becomes `~` and the Agent state directory becomes `<state-dir>`, including
+their absolute and canonical spellings (such as `/private/var` on macOS). A
+home or state directory matches only a whole path component: it must start a
+path token and end at the end of the text, a `/` or `\`, whitespace, a quote or
+closing bracket, a comma or semicolon, a colon before whitespace, or a
+sentence-ending dot. So `/home/joan+backup/x` and `/private/Users/joan/x` are
+not under `/home/joan` and `/Users/joan`. Every other absolute path (`/x/y`,
+`\\server\share`, `C:\x`) becomes `<path>/<last component>`, or `<path>` when
+that component is `.` or `..`. Reconcile errors also describe locations
+relative to the Target (`~/.claude/link`) or by their last components
+(`.../state/targets`) at the source.
+
+The Agent keeps only the newest unsent detail, with its Attempt and creation
+time, in its own state file `pending-detail.json` and not in the run state.
+Older Agents reject unknown run-state fields, so this keeps downgrades safe. The
+detail is retried on later cycles until the Server accepts it, answers with a
+client error other than 408 or 429 (a 404 also covers a Server that predates
+the route), or 24 hours have passed. Expiry is checked before waiting for the
+terminal report to be accepted, so detail whose report is never accepted still
+expires. An unreadable file is discarded.
+
+## Disk usage
+
+The Agent also reports how full its disk is, so Operators can see a machine
+filling up before reconciliation fails. After reconciliation in a cycle, and
+never able to fail it, the Agent makes one `statvfs` (Linux) or `statfs`
+(macOS) call for the volume holding the home directory and, if the state
+directory is on another device, one for that volume. It does not walk
+directories or run `df`. A volume that cannot be measured is left out, and
+nothing is sent if none can be.
+
+Those calls can block indefinitely in the kernel when the home is on a hung
+NFS, SMB or FUSE mount, so they never run on the Agent loop. One dedicated
+thread named `fleet-disk` is started the first time a measurement is due, with
+a small stack, and is detached: it is never joined, so it cannot delay exit. It
+takes one request at a time through a single-slot channel, so at most one
+measurement is ever outstanding. The loop waits at most 2 seconds for its
+result; a measurement that is slower is collected without blocking in a later
+cycle. If one is still unfinished after 60 seconds the worker is considered
+stuck: the Agent logs once, measures no more until it restarts, and never
+starts a second thread. Polling and reconciliation carry on, and a worker that
+ever returns is simply ignored. Tokio's blocking pool is not used because it
+would block runtime shutdown. The report is sent from a spawned side task with
+the existing 10-second request timeout, with at most one in flight, so it never
+delays the next poll; a report that finds the previous one still running is
+dropped. `fleet-agent run --once` waits for its report to finish before it
+exits.
+
+The Agent reports after its first successful poll, then 4 hours after the last
+attempt (successful or not), and when a poll response sets
+`diskUsageRequested`. The request is edge-triggered: the Server keeps the flag
+set until a report is stored, so only the start of a run of `true` counts, and
+a later `true` counts again only after a poll that returned `false`. A failed
+report, including 404 from an older Server or 429, is therefore logged and
+tried again only at the next 4-hour slot or a new request, not on every poll.
+The schedule lives in memory and uses a monotonic clock, so a restart reports
+again. Every poll request carries `X-Fleet-Agent-Capabilities: disk-usage`,
+which is what allows the Server to set that flag. The
+[Operator API](../technical-design/operator-api.md#disk-usage) defines the route.
+
+`fleet-agent status` does not measure disk usage: it is a separate short-lived
+process with no cached value, and a live call could hang on a stuck mount.
+Operators read the last report from the Server.
+
+Measuring the home path can trigger an automount, but the Agent already
+accesses the home for its Targets, so this adds no new access. The Agent does
+not parse the mount table to avoid such mounts.
+
+## Machine information
+
+The Agent also tells the Server what it runs on and as, so the dashboard can
+show the operating system, the Agent version and how it was installed, and flag
+outdated Agents. `telemetry.rs` builds the report from cheap local sources
+only: its crate version, `NAME` and `VERSION_ID` from `/etc/os-release` (or
+`/usr/lib/os-release`) on Linux, `ProductName` and `ProductVersion` from
+`SystemVersion.plist` on macOS, `uname`, the compile-time architecture,
+`gethostname`, `getpwuid_r` for the effective user (null if it cannot be
+resolved; `$USER` may name another account), the executable path (Homebrew prefix, `~/.cargo/bin` or other),
+`INVOCATION_ID` and `XPC_SERVICE_NAME` for the service manager, and the state
+directory with the home replaced by `~`. It starts no process and walks no
+directory. The two files are read with a 16 KiB bound and a cut-off last line
+is ignored; control characters are removed and strings are capped to the
+Server's limits before sending. A field that cannot be read is `null`, as are
+all fields on other platforms.
+
+The reads run on a second detached worker thread named `fleet-telemetry`, built
+from the disk usage worker with the same single-slot channel, 2-second wait and
+60-second stuck rule, because `getpwuid_r` can block on a hung directory
+service. The report is a side task with the 10-second request timeout and at
+most one in flight, so it never delays a poll or fails a cycle.
+
+It is sent after the first successful poll. At each following 4-hour slot, the
+disk usage schedule's, the Agent collects again and sends only if the report
+differs from the last one the Server accepted. A failed report, including 404
+from an older Server or 429, is not remembered, so the next slot sends it again.
+The schedule is in memory, so a restart reports again. The route does not need a
+capability header. The
+[Operator API](../technical-design/operator-api.md#phase-3-agent-and-machine-information)
+defines `PUT /agent/v1/telemetry`.
+
 ## Work loop
 
 For each Target, the Agent follows this order:

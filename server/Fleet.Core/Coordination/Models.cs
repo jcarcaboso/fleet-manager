@@ -2,9 +2,12 @@ using System.Text.Json.Serialization;
 
 namespace Fleet.Core.Coordination;
 
-public sealed record PageRequest(int Limit, string? Cursor = null)
+/// <summary>How a list is ordered: by ID (the default, cursor is the last ID) or newest first by its timestamp, then ID.</summary>
+public enum PageOrder { Id, Newest }
+
+public sealed record PageRequest(int Limit, string? Cursor = null, PageOrder Order = PageOrder.Id)
 {
-    public const int MaximumLimit = 200;
+    public const int MaximumLimit = 100;
 }
 
 public sealed record Page<T>(IReadOnlyList<T> Items, string? NextCursor);
@@ -142,7 +145,11 @@ public sealed record AgentAssignment(
     [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] AssignmentFile? File = null,
     [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] AiClientAssignment? AiClient = null);
 
-public sealed record PollResult(AgentAssignment? Assignment);
+/// <summary>
+/// What a poll found. <paramref name="DiskUsageRequested"/> is true while an Operator's disk refresh request is pending;
+/// the route only tells Agents that sent the <c>disk-usage</c> capability.
+/// </summary>
+public sealed record PollResult(AgentAssignment? Assignment, bool DiskUsageRequested = false);
 
 public sealed record AttemptReport(
     AttemptId AttemptId,
@@ -150,6 +157,9 @@ public sealed record AttemptReport(
     string? ErrorCode,
     string? Diagnostic,
     DateTimeOffset ReportedAt);
+
+/// <summary>Bounded description of why an Attempt failed, sent by the Agent after its terminal report.</summary>
+public sealed record AttemptDetail(string? Diagnostic, string? Path, string? Step);
 
 public enum ReportOutcome
 {
@@ -167,12 +177,149 @@ public enum FreshnessState
     NeverContacted,
 }
 
+public sealed record TargetStateCounts(int Pending, int Applying, int Succeeded, int Failed, int Superseded)
+{
+    public static TargetStateCounts None { get; } = new(0, 0, 0, 0, 0);
+}
+
 public sealed record NodeStatus(
     NodeId NodeId,
     string Name,
     bool Revoked,
     DateTimeOffset? LastContactAt,
-    FreshnessState Freshness);
+    FreshnessState Freshness,
+    string Platform,
+    DateTimeOffset EnrolledAt,
+    DateTimeOffset? RevokedAt,
+    DateTimeOffset? CredentialNotAfter,
+    TargetStateCounts Targets,
+    string? CurrentRevision,
+    NodeDiskSummary? Disk = null,
+    NodeAgentSummary? Agent = null);
+
+public sealed record NodeCredentialStatus(
+    CredentialId CredentialId,
+    DateTimeOffset NotBefore,
+    DateTimeOffset NotAfter,
+    DateTimeOffset? RevokedAt,
+    string? RevokedBy,
+    int Renewals);
+
+public sealed record NodeLatestAttempt(
+    AttemptId AttemptId,
+    ConvergenceState State,
+    string? ErrorCode,
+    string? Diagnostic,
+    string? Path,
+    string? Step,
+    DateTimeOffset UpdatedAt);
+
+public sealed record NodeAiClientStatus(string Client, string Mode, string? BaseUrl, string? Model);
+
+public sealed record NodeTargetStatus(
+    string Name,
+    string Kind,
+    string Base,
+    string Path,
+    AssignmentId AssignmentId,
+    ConvergenceState State,
+    DateTimeOffset AssignedAt,
+    DesiredRevisionStatus DesiredRevision,
+    string? LastSucceededRevision,
+    NodeLatestAttempt? LatestAttempt,
+    int FailedAttempts,
+    DateTimeOffset? FirstFailedAt,
+    IReadOnlyList<SnapshotSkill> Skills,
+    SnapshotFile? File,
+    NodeAiClientStatus? AiClient);
+
+public sealed record NodeDetail(
+    NodeId NodeId,
+    string Name,
+    string Platform,
+    DateTimeOffset EnrolledAt,
+    DateTimeOffset? LastContactAt,
+    FreshnessState Freshness,
+    bool Revoked,
+    DateTimeOffset? RevokedAt,
+    NodeCredentialStatus? Credential,
+    IReadOnlyList<NodeTargetStatus> Targets,
+    TargetStateCounts Summary,
+    NodeDisk? Disk = null,
+    NodeAgent? Agent = null);
+
+public sealed record NodeAttemptStatus(
+    AttemptId AttemptId,
+    AssignmentId AssignmentId,
+    RolloutId RolloutId,
+    string TargetName,
+    string SourceRevision,
+    ConvergenceState State,
+    string? ErrorCode,
+    string? Diagnostic,
+    string? Path,
+    string? Step,
+    DateTimeOffset UpdatedAt);
+
+/// <summary>One measured volume as an Agent reports it. <c>Label</c> is <c>home</c> or <c>state</c>.</summary>
+public sealed record DiskVolume(string Label, long TotalBytes, long UsedBytes, long AvailableBytes);
+
+public sealed record DiskUsageReport(IReadOnlyList<DiskVolume> Volumes);
+
+public sealed record NodeDiskVolume(string Label, long TotalBytes, long UsedBytes, long AvailableBytes, double UsedPercent);
+
+/// <summary>The fullest volume of a Node, shown in the Node list.</summary>
+public sealed record NodeDiskSummary(string Label, double UsedPercent, long UsedBytes, long AvailableBytes, long TotalBytes,
+    DateTimeOffset MeasuredAt);
+
+/// <summary>Latest disk report and pending refresh request of a Node. <c>MeasuredAt</c> is null until the Agent reports.</summary>
+public sealed record NodeDisk(DateTimeOffset? MeasuredAt, DateTimeOffset? RefreshRequestedAt, IReadOnlyList<NodeDiskVolume> Volumes);
+
+public sealed record DiskRefreshRequested(DateTimeOffset RefreshRequestedAt);
+
+/// <summary>What an Agent reports about itself and its machine. Only <c>AgentVersion</c> is required; the other fields are null when the Agent could not read them.</summary>
+public sealed record AgentTelemetryReport(string AgentVersion, string? OsName, string? OsVersion, string? OsKernel, string? Arch,
+    string? Hostname, string? User, string? InstallMethod, string? ServiceManager, string? StateDirectory);
+
+public sealed record NodeAgentOs(string? Name, string? Version);
+
+public sealed record NodeAgentOsDetail(string? Name, string? Version, string? Kernel);
+
+/// <summary>The Agent information shown in the Node list.</summary>
+public sealed record NodeAgentSummary(string Version, bool Outdated, NodeAgentOs Os, string? Arch, string? Hostname);
+
+/// <summary>The latest telemetry report of a Node. <c>ReportedAt</c> is when the Server received it; <c>LatestVersion</c> is the Server's own version.</summary>
+public sealed record NodeAgent(string Version, string LatestVersion, bool Outdated, NodeAgentOsDetail Os, string? Arch, string? Hostname,
+    string? User, string? InstallMethod, string? ServiceManager, string? StateDirectory, DateTimeOffset ReportedAt);
+
+public sealed record CheckinBucket(DateTimeOffset Hour, int Polls);
+
+public sealed record NodeCheckins(int Hours, IReadOnlyList<CheckinBucket> Buckets);
+
+public sealed record RetryAssignment(NodeId NodeId, string Target, string RequestedBy);
+
+public sealed record RetryResult(AssignmentId AssignmentId, AttemptId AttemptId, ConvergenceState State);
+
+public sealed record SourceScanEntry(
+    Guid ScanId,
+    string? SourceRevision,
+    SourceScanOutcome Outcome,
+    string? Code,
+    string? Diagnostic,
+    DateTimeOffset ObservedAt,
+    string? RequestedBy);
+
+public enum EnrollmentLinkState { Active, Consumed, Expired, Revoked }
+
+public sealed record EnrollmentLinkStatus(
+    Guid Id,
+    string? Alias,
+    DateTimeOffset ExpiresAt,
+    DateTimeOffset? ConsumedAt,
+    DateTimeOffset? RevokedAt,
+    string? RevokedBy,
+    NodeId? NodeId,
+    EnrollmentLinkState State);
 
 public sealed record AttemptStatus(
     AttemptId AttemptId,
@@ -180,6 +327,8 @@ public sealed record AttemptStatus(
     ConvergenceState State,
     string? ErrorCode,
     string? Diagnostic,
+    string? Path,
+    string? Step,
     DateTimeOffset UpdatedAt);
 
 public sealed record WarningStatus(
@@ -226,7 +375,8 @@ public sealed record AuditEventStatus(
     string Action,
     string Actor,
     NodeId? NodeId,
-    CredentialId? CredentialId);
+    CredentialId? CredentialId,
+    string? NodeName = null);
 
 public sealed record PersistenceMaintenancePolicy(
     TimeSpan? AuditEventRetention,
@@ -236,6 +386,7 @@ public sealed record PersistenceMaintenancePolicy(
 public sealed record PersistenceMaintenanceResult(
     int EnrollmentPayloadsScrubbed,
     int AuditEventsDeleted,
-    int SourceScansDeleted);
+    int SourceScansDeleted,
+    int CheckinsDeleted = 0);
 
 public sealed record BundleContent(string Digest, string Schema, long Size, byte[] Content);

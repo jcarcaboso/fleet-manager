@@ -1,362 +1,258 @@
 'use strict';
-const $ = selector => document.querySelector(selector);
-let csrf = '';
-let nextCursor = null;
-let enrollmentId = null;
-let modelSelections = [];
-const message = text => { $('#message').textContent = text; };
+/* Fleet dashboard: shell, hash router, sign-in and global event handling.
+   Loaded last. The other files register views and handlers on window.Fleet. */
+(function () {
+  const Fleet = window.Fleet;
+  const u = Fleet.u, ui = Fleet.ui, api = Fleet.api, model = Fleet.model;
+  const { esc, ic, glyph } = u;
 
-async function api(path, body) {
-  const response = await fetch('/dashboard/api' + path, {
-    method: body === undefined ? 'GET' : 'POST', credentials: 'same-origin', cache: 'no-store',
-    headers: body === undefined ? {} : { 'Content-Type': 'application/json', 'X-Fleet-CSRF': csrf },
-    body: body === undefined ? undefined : JSON.stringify(body)
+  const BRAND = '<svg class="brand-logo" viewBox="0 0 32 32" aria-hidden="true" focusable="false"><rect width="32" height="32" rx="9" fill="url(#gLogo)"/><g stroke="#fff" stroke-width="2" stroke-linecap="round"><path d="M16 16L9.5 10M16 16l7.5-5M16 16v7.5"/></g><g fill="#fff"><circle cx="16" cy="16" r="3.4"/><circle cx="9.5" cy="10" r="2.4"/><circle cx="23.5" cy="11" r="2.4"/><circle cx="16" cy="23.5" r="2.4"/></g></svg>';
+  let signedIn = false, booted = false, renderToken = 0, lastRendered = null;
+  const el = id => document.getElementById(id);
+
+  /* ---------------------------------------------------------------- shell */
+  function buildShell() {
+    document.body.classList.add('app');
+    el('root').innerHTML = `${Fleet.art.defs}
+    <a class="skip" href="#main" data-act="skip">Skip to content</a>
+    <header class="topbar"><div class="topbar-in">
+      <a class="brand" href="#/nodes">${BRAND}<span>Fleet</span></a>
+      <nav class="nav" id="nav" aria-label="Primary" hidden></nav>
+      <div class="me" id="me" hidden></div>
+    </div></header>
+    <main id="main" tabindex="-1"><div id="view"></div></main>
+    <footer class="foot"><span>Fleet Manager · All times in UTC</span><span id="foot-note"></span></footer>
+    <div id="modal-root" hidden></div>
+    <div id="toasts" class="toasts" role="status" aria-live="polite"></div>
+    <div id="tip" class="tip" role="tooltip" hidden></div>`;
+  }
+
+  const NAV = [['nodes', 'Machines'], ['problems', 'Problems'], ['deployments', 'Deployments'], ['repository', 'Repository'], ['models', 'Models'], ['enrollment', 'Enrollment'], ['audit', 'Audit']];
+  Fleet.renderNav = () => {
+    const nav = el('nav'), me = el('me');
+    if (!nav) return;
+    nav.hidden = me.hidden = !signedIn;
+    if (!signedIn) return;
+    const active = Fleet.nav.current?.name === 'add' ? 'nodes' : Fleet.nav.current?.name;
+    const errs = model.summary.errors;
+    nav.innerHTML = NAV.map(([k, l]) => {
+      const badge = k === 'problems' && errs ? `<span class="nav-badge" aria-label="${errs} errors">${errs}</span>` : k === 'models' && model.summary.modelsBad ? `<span class="nav-g" aria-label="A catalog is failing">${glyph('warning', 'bang')}</span>` : '';
+      return `<a href="#/${k}" ${k === active ? 'aria-current="page"' : ''}>${l}${badge}</a>`;
+    }).join('');
+    const scope = api.scopeLabel();
+    me.innerHTML = `<span class="scope-chip" data-tip="${esc(`Scope: ${scope}|${scope === 'admin' ? 'Can change anything.' : scope === 'operate' ? 'Can retry, sync and refresh. Cannot enroll or revoke.' : 'Can view everything. Cannot change anything.'}`)}">${ic(scope === 'read' ? 'lock' : 'shield')}${esc(scope)}</span>
+      ${u.avatar(api.session.actor, 'av-me')}<span class="me-name">${esc(api.session.actor)}</span>
+      <button type="button" class="btn btn-ghost btn-sm" data-act="logout">${ic('logout')}Sign out</button>`;
+  };
+
+  /* ---------------------------------------------------------------- sign in */
+  function showLogin(notice) {
+    signedIn = false; renderToken++;
+    ui.closeModal(true);
+    Fleet.nav.current = null;
+    Fleet.renderNav();
+    ui.setHtml(el('view'), `<div class="login-wrap"><section class="login-card" aria-labelledby="login-title">
+      <span class="login-logo">${BRAND}</span>
+      <h1 id="login-title" tabindex="-1">Sign in</h1>
+      <p class="login-sub">Use your Operator token to manage this Fleet Server.</p>
+      <form class="form" data-form="login" novalidate>
+        <label for="operator-token">Operator token</label>
+        <input id="operator-token" class="input" type="password" required autocomplete="off" spellcheck="false" maxlength="1024" data-autofocus aria-describedby="login-msg">
+        <p class="field-msg ${notice && notice.err ? 'is-err' : ''}" id="login-msg" role="alert">${esc(notice?.text || '')}</p>
+        <button class="btn btn-primary" type="submit">${ic('key')}Sign in</button>
+      </form>
+      <p class="muted small">The token is sent once to start a session. It is never stored in this browser.</p>
+    </section></div>`);
+    document.title = 'Sign in · Fleet Manager';
+    setTimeout(() => el('operator-token')?.focus(), 0);
+  }
+  api.onUnauthorized = () => {
+    if (!signedIn) return;
+    showLogin({ text: 'Your session ended. Sign in again.', err: false });
+  };
+  Fleet.on.submit.login = async form => {
+    const input = form.querySelector('#operator-token'), token = input.value, msg = el('login-msg'), btn = form.querySelector('button[type=submit]');
+    input.value = '';
+    if (!token) { msg.textContent = 'Enter your Operator token.'; msg.className = 'field-msg is-err'; input.focus(); return; }
+    btn.disabled = true; msg.textContent = 'Signing in…'; msg.className = 'field-msg';
+    try {
+      await api.login(token);
+      signedIn = true; Fleet.catalog.reset();
+      Fleet.renderNav();
+      if (!location.hash || location.hash === '#/' || location.hash === '#') location.hash = '#/nodes';
+      model.summary.at = 0;
+      lastRendered = null;
+      render();
+    } catch (e) { btn.disabled = false; msg.textContent = e.message; msg.className = 'field-msg is-err'; input.focus(); }
+  };
+  Fleet.actions.logout = async () => {
+    try { await api.logout(); } catch (e) { ui.fail(e, 'Could not sign out'); return; }
+    Fleet.galleryReset?.();
+    showLogin({ text: 'Signed out.', err: false });
+  };
+
+  /* ---------------------------------------------------------------- router */
+  const parse = hash => String(hash || '').replace(/^#/, '').split('?')[0].split('/').filter(Boolean).map(x => { try { return decodeURIComponent(x); } catch { return x; } });
+  const ROUTES = {
+    nodes: p => p[1] ? { view: Fleet.views.node, params: p.slice(1) } : { view: Fleet.views.gallery, params: [] },
+    add: () => ({ view: Fleet.views.gallery, params: [] }),
+    problems: () => ({ view: Fleet.views.problems, params: [] }),
+    deployments: p => ({ view: Fleet.views.deployments, params: p.slice(1) }),
+    repository: () => ({ view: Fleet.views.repository, params: [] }),
+    models: () => ({ view: Fleet.views.models, params: [] }),
+    enrollment: () => ({ view: Fleet.views.enrollment, params: [] }),
+    audit: () => ({ view: Fleet.views.audit, params: [] }),
+  };
+  Fleet.go = hash => {
+    if (location.hash === hash) { render(); return; }
+    location.hash = hash;
+  };
+
+  const describeFocus = () => {
+    const a = document.activeElement, view = el('view');
+    if (!a || a === document.body || !view.contains(a)) return null;
+    if (a.id) return '#' + CSS.escape(a.id);
+    const keys = ['data-act', 'data-v', 'data-i', 'data-flag', 'data-fam', 'data-sel-model', 'data-id', 'data-target'].filter(k => a.hasAttribute(k));
+    return keys.length ? keys.map(k => `[${k}="${CSS.escape(a.getAttribute(k))}"]`).join('') : null;
+  };
+  const place = (html, keepPosition) => {
+    const view = el('view'), focus = keepPosition ? describeFocus() : null, y = window.scrollY;
+    ui.hideTip();
+    ui.setHtml(view, html);
+    if (keepPosition) {
+      window.scrollTo(0, y);
+      if (focus) { try { view.querySelector(focus)?.focus({ preventScroll: true }); } catch { /* selector no longer valid */ } }
+    }
+  };
+
+  async function render({ quiet = false, force = false } = {}) {
+    if (!signedIn) return;
+    const token = ++renderToken;
+    const route = location.hash || '#/nodes';
+    const p = parse(route), name = p[0] || 'nodes';
+    const spec = (ROUTES[name] || (() => null))(p);
+    const changed = route !== lastRendered;
+    const prev = Fleet.nav.current;
+    if (!spec || !spec.view) {
+      Fleet.nav.current = { name: '', params: [] };
+      Fleet.renderNav();
+      place(`<div class="wrap">${ui.empty({ icon: 'search', h: 'h1', title: 'That page does not exist', text: 'Check the address, or go back to your machines.', action: '<a class="btn btn-secondary" href="#/nodes">Back to all machines</a>' })}</div>`);
+      lastRendered = route; document.title = 'Not found · Fleet Manager';
+      return;
+    }
+    Fleet.nav.current = { name, params: spec.params, view: spec.view };
+    if (prev?.view && prev.view !== spec.view) prev.view.unmount?.();
+    Fleet.renderNav();
+    const keep = quiet && !changed;
+    if (!keep) {
+      if (changed) { ui.closeModal(true); }
+      ui.setHtml(el('view'), spec.view.paintLoading ? spec.view.paintLoading() : ui.skeleton());
+    }
+    let html;
+    try { html = await spec.view.load(spec.params, { force }); }
+    catch (e) {
+      if (token !== renderToken || e.silent) return;
+      html = `<div class="wrap">${ui.errorState(e, { what: (typeof spec.view.title === 'function' ? spec.view.title(spec.params) : spec.view.title) || 'this page' })}</div>`;
+    }
+    if (token !== renderToken) return;
+    place(html, keep);
+    const title = typeof spec.view.title === 'function' ? spec.view.title(spec.params) : spec.view.title;
+    document.title = `${title || 'Fleet'} · Fleet Manager`;
+    el('foot-note').textContent = `Loaded ${u.fmtTime(new Date().toISOString())} UTC`;
+    if (!keep) {
+      const sameNode = prev && changed && name === 'nodes' && spec.params[0] && prev.name === 'nodes' && prev.params[0] === spec.params[0];
+      if (sameNode) el('view').querySelector('.tabs a[aria-current]')?.focus({ preventScroll: true });
+      else { window.scrollTo(0, 0); if (lastRendered !== null || name !== 'nodes') el('view').querySelector('h1')?.focus({ preventScroll: true }); }
+    }
+    spec.view.mount?.();
+    if (name === 'add' && !ui.modalOpen()) Fleet.openWizard();
+    lastRendered = route;
+  }
+  Fleet.reload = opts => render({ quiet: false, force: true, ...opts });
+  Fleet.repaint = () => {
+    const cur = Fleet.nav.current;
+    if (!signedIn || !cur?.view?.paint) return;
+    place(cur.view.paint(), true);
+    cur.view.mount?.();
+  };
+
+  /* ---------------------------------------------------------------- events */
+  document.addEventListener('click', e => {
+    const t = e.target.closest('[data-act]');
+    if (!t) return;
+    const act = t.dataset.act;
+    if (act !== 'locked' && t.getAttribute('aria-disabled') === 'true') { e.preventDefault(); return; }
+    const fn = Fleet.actions[act];
+    if (!fn) return;
+    if (t.tagName === 'A' && act !== 'wz-view' && act !== 'skip') e.preventDefault();
+    fn(t, e);
   });
-  if (!response.ok) {
-    if (response.status === 401) { showLogin(); throw new Error('Sign in with a valid Operator token.'); }
-    const error = await response.json().catch(() => ({}));
-    const known = {
-      invalid_csrf: 'Your session changed. Refresh the page and try again.',
-      node_alias_in_use: 'That alias is already in use.', invalid_node_name: 'Choose a nonblank alias of at most 200 characters.',
-      invalid_alias: 'Choose a nonblank alias of at most 200 characters.', node_not_found: 'That node no longer exists.',
-      node_revoked: 'That node has been revoked.', invalid_expiry: 'Choose an expiry between 1 and 60 minutes.',
-      node_alias_changed: 'This Node was renamed. Refresh the list before removing it.',
-      stale_selection: 'Another operator saved this selection. It was reloaded; review it and save again.',
-      invalid_selection: 'This selection is invalid or would leave no models enabled.',
-      catalog_unavailable: 'This model catalog is no longer available. Reload the selection.',
-      pinned_model_excluded: 'A pinned default model cannot be excluded. Keep it selected, change the pinned default, or turn off the Claude restriction for other clients.'
-    };
-    const failure = new Error(known[error.code] || `Request failed (${response.status}). Refresh and try again.`);
-    failure.code = error.code; failure.status = response.status; failure.details = error;
-    throw failure;
-  }
-  return response.json();
-}
-async function renewCsrf() { csrf = (await api('/csrf')).token; }
-function clearLink() { $('#enrollment-link').value = ''; $('#link-result').hidden = true; enrollmentId = null; }
-function showLogin() {
-  $('#login-panel').hidden = false; $('#workspace').hidden = true; $('#logout').hidden = true;
-  $('#actor').textContent = ''; $('#nodes').replaceChildren(); clearLink();
-  $('#diagnostics-issues').replaceChildren(); $('#diagnostics-checked').textContent = '';
-  $('#source-result').textContent = '';
-  $('#models-result').textContent = ''; $('#model-catalogs').replaceChildren();
-  $('#selection-result').textContent = ''; $('#model-selections').replaceChildren(); modelSelections = [];
-}
-async function showWorkspace(actor) {
-  $('#login-panel').hidden = true; $('#workspace').hidden = false; $('#logout').hidden = false;
-  $('#actor').textContent = actor; await renewCsrf(); await nodes(false);
-  await diagnostics();
-  await modelStatus().catch(error => { $('#models-result').textContent = error.message; });
-  await loadModelSelections().catch(error => { $('#selection-result').textContent = error.message; });
-}
-async function nodes(append) {
-  const page = await api('/nodes' + (append && nextCursor ? '?after=' + encodeURIComponent(nextCursor) : ''));
-  if (!append) $('#nodes').replaceChildren();
-  for (const node of page.items) {
-    const row = document.createElement('tr');
-    for (const value of [node.name, node.revoked ? 'Revoked' : ({fresh: 'Online', stale: 'Stale', never_contacted: 'Not yet contacted'}[node.freshness] ?? 'Unknown'), node.lastContactAt ? new Date(node.lastContactAt).toLocaleString() : 'Not yet']) {
-      const cell = document.createElement('td'); cell.textContent = value ?? '—'; row.append(cell);
-    }
-    const actions = document.createElement('td'); const rename = document.createElement('button');
-    rename.textContent = 'Rename'; rename.className = 'secondary'; rename.disabled = Boolean(node.revoked);
-    rename.addEventListener('click', async () => {
-      const currentAlias = node.alias ?? node.name;
-      const alias = prompt('New unique alias', currentAlias);
-      if (alias === null || alias === currentAlias) return;
-      try { await api('/nodes/rename', { currentAlias, alias }); message('Alias changed. Update its entry in fleet.yml too.'); await nodes(false); }
-      catch (error) { message(error.message); }
-    });
-    const revoke = document.createElement('button');
-    revoke.textContent = 'Revoke'; revoke.className = 'secondary'; revoke.disabled = Boolean(node.revoked);
-    revoke.addEventListener('click', async () => {
-      if (!confirm(`Revoke access for "${node.name}"? Its certificates will stop working. The Node record and installed files will remain.`)) return;
-      revoke.disabled = true;
-      try { await api('/nodes/' + encodeURIComponent(node.nodeId) + '/revoke', {}); message('Node access revoked. Stop its Agent on the machine.'); await nodes(false); }
-      catch (error) { revoke.disabled = false; message(error.message); }
-    });
-    const remove = document.createElement('button');
-    remove.textContent = 'Remove'; remove.className = 'secondary';
-    remove.addEventListener('click', async () => {
-      const alias = prompt(`Permanently remove "${node.name}" and its server credentials and assignment history? Its alias will be free. Audit history stays. This does not erase files on the machine. Stop its Agent and remove its fleet.yml entry unless you plan to enroll a replacement.\n\nType the exact alias to confirm:`);
-      if (alias === null) return;
-      if (alias !== node.name) { message('Alias did not match. Node was not removed.'); return; }
-      remove.disabled = true;
-      try { await api('/nodes/' + encodeURIComponent(node.nodeId) + '/remove', { alias }); message('Node removed. Its alias is available for a new enrollment.'); await nodes(false); }
-      catch (error) { remove.disabled = false; message(error.message); }
-    });
-    actions.append(rename, document.createTextNode(' '), revoke, document.createTextNode(' '), remove);
-    row.append(actions); $('#nodes').append(row);
-  }
-  nextCursor = page.nextCursor;
-  $('#more').hidden = !nextCursor; $('#nodes-empty').hidden = $('#nodes').children.length !== 0;
-}
-$('#login-form').addEventListener('submit', async event => {
-  event.preventDefault(); const input = $('#operator-token'); const token = input.value; input.value = '';
-  try { const result = await api('/login', { token }); message(''); await showWorkspace(result.actor); }
-  catch (error) { message(error.message); await renewCsrf().catch(() => {}); }
-});
-$('#logout').addEventListener('click', async () => {
-  try { await api('/logout', {}); showLogin(); await renewCsrf(); message('Signed out.'); }
-  catch (error) { message(error.message); }
-});
-$('#enrollment-form').addEventListener('submit', async event => {
-  event.preventDefault();
-  try {
-    const result = await api('/enrollment-links', { alias: $('#alias').value.trim(), expiresInSeconds: Number($('#expiry').value) });
-    enrollmentId = result.id; $('#enrollment-link').value = result.link; $('#link-result').hidden = false;
-    $('#link-expiry').textContent = 'Expires ' + new Date(result.expiresAt).toLocaleString(); message('Enrollment link created.');
-  } catch (error) { message(error.message); }
-});
-$('#copy-link').addEventListener('click', async () => {
-  try { await navigator.clipboard.writeText($('#enrollment-link').value); message('Link copied.'); }
-  catch { $('#enrollment-link').select(); message('Select and copy the link manually.'); }
-});
-$('#clear-link').addEventListener('click', clearLink);
-$('#revoke-link').addEventListener('click', async () => {
-  if (!enrollmentId) return;
-  try { await api('/enrollment-links/' + encodeURIComponent(enrollmentId) + '/revoke', {}); clearLink(); message('Enrollment link revoked.'); }
-  catch (error) { message(error.message); }
-});
-$('#sync-source').addEventListener('click', async () => {
-  const button = $('#sync-source');
-  if (button.disabled) return;
-  button.disabled = true;
-  $('#source-result').textContent = 'Fetching and validating repository changes…';
-  try {
-    const result = await api('/source/rescan', {});
-    const outcomes = {
-      accepted: `Repository synced. Published ${result.changedAssignmentCount} changed assignment(s). Running Agents will fetch them on their next poll.`,
-      unchanged: 'Repository is up to date. No new assignments were needed. Agents continue syncing their current assignments.',
-      disabled: 'No source repository is configured on this server.',
-      already_running: 'A repository sync is already running. Try again shortly to check for changes.',
-      invalid: 'Repository sync was rejected. Check source diagnostics with the Operator API. Current assignments remain active.',
-      failed: 'Repository sync failed. Check the server source status and Git access. Current assignments remain active.'
-    };
-    $('#source-result').textContent = outcomes[result.outcome] || 'The server returned an unknown sync result. Check source status before retrying.';
-    await diagnostics();
-  } catch (error) {
-    $('#source-result').textContent = error.message + ' Sync completion could not be confirmed.';
-  } finally { button.disabled = false; }
-});
-async function diagnostics() {
-  const button = $('#refresh-diagnostics');
-  button.disabled = true;
-  try {
-    const result = await api('/diagnostics');
-    const list = $('#diagnostics-issues'); list.replaceChildren();
-    const count = result.issues.length;
-    $('#diagnostics-count').textContent = String(count); $('#diagnostics-count').hidden = !count;
-    $('#diagnostics-summary').textContent = count ? 'Configuration and sync problems that need your attention.' : 'No issues detected in configuration, model sync, repository sync or Agent check-ins.';
-    for (const issue of result.issues) {
-      const card = document.createElement('article'); card.className = 'diagnostic-issue ' + (issue.severity === 'error' ? 'issue-error' : 'issue-warning');
-      const heading = document.createElement('div'); heading.className = 'issue-heading';
-      const badge = document.createElement('span'); badge.className = 'issue-severity'; badge.textContent = issue.severity === 'error' ? 'Needs attention' : 'Check';
-      const title = document.createElement('h3'); title.textContent = issue.title; heading.append(badge, title);
-      const detail = document.createElement('p'); detail.textContent = issue.detail;
-      const action = document.createElement('p'); action.className = 'issue-action'; action.textContent = issue.action;
-      card.append(heading, detail, action);
-      if (['models', 'repository', 'nodes-section'].includes(issue.section)) {
-        const link = document.createElement('a'); link.href = '#' + issue.section;
-        link.textContent = {models: 'View model sync', repository: 'View repository sync', 'nodes-section': 'View nodes'}[issue.section]; card.append(link);
-      }
-      list.append(card);
-    }
-    $('#diagnostics-checked').textContent = 'Checked ' + new Date(result.checkedAt).toLocaleString() + '. Status reflects the Server’s latest records.';
-  } catch (error) {
-    $('#diagnostics-summary').textContent = 'Could not check diagnostics. ' + error.message;
-    $('#diagnostics-checked').textContent = 'Previous results may be out of date.';
-  } finally { button.disabled = false; }
-}
-$('#refresh-diagnostics').addEventListener('click', diagnostics);
-function showModels(status) {
-  const seconds = status.intervalSeconds;
-  const interval = seconds % 86400 === 0 ? `${seconds / 86400} day(s)` :
-    seconds % 3600 === 0 ? `${seconds / 3600} hour(s)` : `${seconds} seconds`;
-  $('#sync-models').disabled = !status.enabled;
-  $('#models-result').textContent = !status.enabled ? 'Model sync is disabled. Configure the CLIProxy API key on the Server.' :
-    !status.catalogs.length ? 'No active Nodes are assigned to CLIProxy. Enable a client in the repository and sync it first.' :
-    `Automatic refresh every ${interval}. Agents fetch updated catalogs on their next poll.`;
-  const list = $('#model-catalogs'); list.replaceChildren();
-  for (const catalog of status.catalogs) {
-    const item = document.createElement('li');
-    const last = catalog.lastSuccess ? new Date(catalog.lastSuccess).toLocaleString() : 'never';
-    const next = new Date(catalog.nextRefresh).toLocaleString();
-    const error = catalog.errorCode ? ` Refresh failed (${catalog.errorCode}); ${catalog.modelCount ? 'keeping the previous catalog' : 'no catalog is available yet'}.` : '';
-    item.textContent = `${catalog.baseUrl}: ${catalog.modelCount} models. Last successful refresh: ${last}. Next refresh: ${next}.${error}`;
-    list.append(item);
-  }
-}
-async function modelStatus() { showModels(await api('/cliproxy/status')); }
-function familyBase(policy, familyKey) {
-  if (policy.disabledFamilies.includes(familyKey)) return false;
-  if (policy.enabledFamilies.includes(familyKey)) return true;
-  return policy.includeNew;
-}
-function familyList(entry) {
-  const groups = new Map();
-  for (const model of entry.models) {
-    const key = model.familyKey || 'other';
-    if (!groups.has(key)) groups.set(key, { key, label: model.familyLabel || 'Other models', models: [] });
-    groups.get(key).models.push(model);
-  }
-  return [...groups.values()].sort((a, b) => a.label.localeCompare(b.label));
-}
-function effectiveSelection(entry, model) {
-  if (typeof entry.policy.modelOverrides[model.id] === 'boolean') return entry.policy.modelOverrides[model.id];
-  return familyBase(entry.policy, model.familyKey || 'other');
-}
-function policySnapshot(policy) {
-  return JSON.stringify({
-    includeNew: policy.includeNew,
-    skipClaudeModelsForOtherClients: policy.skipClaudeModelsForOtherClients,
-    enabledFamilies: [...policy.enabledFamilies].sort(),
-    disabledFamilies: [...policy.disabledFamilies].sort(),
-    modelOverrides: Object.fromEntries(Object.entries(policy.modelOverrides).sort(([a], [b]) => a.localeCompare(b)))
+  Fleet.actions.locked = t => ui.toast('Not available', { tone: 'warning', text: api.denied(t.dataset.need || 'admin') });
+  Fleet.actions.reload = () => Fleet.reload();
+  Fleet.actions['modal-close'] = () => ui.closeModal();
+  Fleet.actions['toast-close'] = t => t.closest('.toast')?.remove();
+  Fleet.actions.copy = t => ui.copy(t.dataset.copy, t);
+  Fleet.actions.skip = () => { (el('view').querySelector('h1') || el('main')).focus(); };
+
+  const dispatch = (table, t) => (table[t.dataset.on] || table[t.id] || table[t.name]);
+  document.addEventListener('input', e => { const f = dispatch(Fleet.on.input, e.target); if (f) f(e.target, e); });
+  document.addEventListener('change', e => { const f = dispatch(Fleet.on.change, e.target); if (f) f(e.target, e); });
+  document.addEventListener('submit', e => {
+    const f = e.target.closest('form[data-form]');
+    if (!f) return;
+    e.preventDefault();
+    const h = Fleet.on.submit[f.dataset.form];
+    if (h) h(f, e);
   });
-}
-function selectionDirty(entry) { return policySnapshot(entry.policy) !== entry.savedPolicy; }
-function renderModelSelections() {
-  const container = $('#model-selections'); container.replaceChildren();
-  if (!modelSelections.length) {
-    const note = document.createElement('p'); note.className = 'muted'; note.textContent = 'No CLIProxy model catalogs are available yet.'; container.append(note); return;
-  }
-  for (const entry of modelSelections) {
-    const card = document.createElement('article'); card.className = 'selection-card';
-    const heading = document.createElement('div'); heading.className = 'selection-card-heading';
-    const title = document.createElement('h4'); title.textContent = entry.baseUrl; heading.append(title);
-    const count = document.createElement('span'); count.className = 'muted'; count.textContent = `${entry.models.filter(model => effectiveSelection(entry, model)).length} of ${entry.models.length} models selected`; heading.append(count);
-    card.append(heading);
-    const restrictionLabel = document.createElement('label'); restrictionLabel.className = 'future-models';
-    const restriction = document.createElement('input'); restriction.type = 'checkbox'; restriction.checked = entry.policy.skipClaudeModelsForOtherClients; restriction.dataset.selectionAction = 'skip-claude';
-    restrictionLabel.append(restriction, document.createTextNode(' Skip Claude models for other clients'));
-    const restrictionNote = document.createElement('p'); restrictionNote.className = 'muted'; restrictionNote.textContent = 'Codex and OpenCode skip Claude models when enabled. Claude Code can still use selected Claude models. Uncheck to allow them in every client.';
-    card.append(restrictionLabel, restrictionNote);
-    const futureLabel = document.createElement('label'); futureLabel.className = 'future-models';
-    const future = document.createElement('input'); future.type = 'checkbox'; future.checked = entry.policy.includeNew; future.dataset.selectionAction = 'include-new';
-    futureLabel.append(future, document.createTextNode(' Enable newly discovered families by default'));
-    const explanation = document.createElement('p'); explanation.className = 'muted'; explanation.textContent = 'New models in an enabled family follow its switch. Only families first discovered later use this default. Model checkboxes set exceptions.';
-    card.append(futureLabel, explanation);
-    const families = document.createElement('div'); families.className = 'selection-families';
-    for (const family of familyList(entry)) {
-      const box = document.createElement('fieldset'); box.className = 'selection-family';
-      const legend = document.createElement('legend');
-      const selected = family.models.filter(model => effectiveSelection(entry, model)).length;
-      const switchLabel = document.createElement('label'); switchLabel.className = 'family-toggle';
-      const toggle = document.createElement('input'); toggle.type = 'checkbox'; toggle.checked = familyBase(entry.policy, family.key);
-      toggle.dataset.selectionAction = 'family'; toggle.dataset.family = family.key;
-      switchLabel.append(toggle, document.createTextNode(` Sync ${family.label}`)); legend.append(switchLabel);
-      const tally = document.createElement('span'); tally.className = 'muted'; tally.textContent = `${selected}/${family.models.length}`; legend.append(tally);
-      box.append(legend);
-      const modelList = document.createElement('div'); modelList.className = 'selection-model-list';
-      for (const model of family.models) {
-        const modelLabel = document.createElement('label'); modelLabel.className = 'model-choice';
-        const input = document.createElement('input'); input.type = 'checkbox'; input.checked = effectiveSelection(entry, model); input.dataset.selectionAction = 'model'; input.dataset.model = model.id; input.dataset.family = family.key;
-        modelLabel.append(input, document.createTextNode(model.id));
-        if (model.reasoningLevels?.length) {
-          const levels = document.createElement('span'); levels.className = 'muted'; levels.textContent = `Reasoning: ${model.reasoningLevels.join(', ')}`; modelLabel.append(levels);
-        }
-        modelList.append(modelLabel);
-      }
-      box.append(modelList); families.append(box);
+  document.addEventListener('toggle', e => {
+    const d = e.target;
+    if (!(d instanceof HTMLDetailsElement)) return;
+    if (d.dataset.openKey) Fleet.openState.set(d.dataset.openKey, d.open);
+    for (const attr of Object.keys(Fleet.on.toggle)) if (d.hasAttribute(attr)) Fleet.on.toggle[attr](d);
+  }, true);
+  document.addEventListener('keydown', e => {
+    if (ui.modalOpen()) {
+      if (e.key === 'Escape') { e.preventDefault(); ui.closeModal(); return; }
+      if (e.key === 'Tab') ui.trapTab(e);
+      Fleet.wizardKeydown?.(e);
     }
-    card.append(families);
-    const actions = document.createElement('div'); actions.className = 'selection-actions';
-    const save = document.createElement('button'); save.textContent = 'Save selection'; save.disabled = !selectionDirty(entry) || entry.saving; save.dataset.selectionAction = 'save';
-    const reset = document.createElement('button'); reset.className = 'secondary'; reset.textContent = 'Reset changes'; reset.disabled = !selectionDirty(entry) || entry.saving; reset.dataset.selectionAction = 'reset';
-    actions.append(save, reset); card.append(actions); container.append(card);
-  }
-}
-function editFamily(entry, key, enabled) {
-  const disabled = new Set(entry.policy.disabledFamilies);
-  const enabledFamilies = new Set(entry.policy.enabledFamilies);
-  if (enabled) disabled.delete(key); else disabled.add(key);
-  if (enabled) enabledFamilies.add(key); else enabledFamilies.delete(key);
-  entry.policy.disabledFamilies = [...disabled];
-  entry.policy.enabledFamilies = [...enabledFamilies];
-  for (const model of entry.models.filter(item => (item.familyKey || 'other') === key)) {
-    delete entry.policy.modelOverrides[model.id];
-  }
-}
-function preserveVisibleFamilies(entry) {
-  const enabled = new Set(entry.policy.enabledFamilies), disabled = new Set(entry.policy.disabledFamilies);
-  for (const family of familyList(entry)) if (!enabled.has(family.key) && !disabled.has(family.key)) {
-    (familyBase(entry.policy, family.key) ? enabled : disabled).add(family.key);
-  }
-  entry.policy.enabledFamilies = [...enabled]; entry.policy.disabledFamilies = [...disabled];
-}
-async function loadModelSelections() {
-  $('#selection-result').textContent = 'Loading model selection…';
-  const result = await api('/cliproxy/selection');
-  modelSelections = result.catalogs.map(entry => {
-    const policy = { includeNew: entry.policy.includeNew, skipClaudeModelsForOtherClients: entry.policy.skipClaudeModelsForOtherClients ?? true, enabledFamilies: [...(entry.policy.enabledFamilies || [])], disabledFamilies: [...entry.policy.disabledFamilies], modelOverrides: { ...entry.policy.modelOverrides } };
-    return { ...entry, policy, savedPolicy: policySnapshot(policy) };
   });
-  $('#selection-result').textContent = modelSelections.length ? '' : 'No model selections are available. Refresh models after assigning CLIProxy to an active Node.';
-  renderModelSelections();
-}
-$('#refresh-selection').addEventListener('click', async () => {
-  const button = $('#refresh-selection'); button.disabled = true;
-  try { await loadModelSelections(); }
-  catch (error) { $('#selection-result').textContent = error.message; }
-  finally { button.disabled = false; }
-});
-$('#model-selections').addEventListener('change', event => {
-  const control = event.target; const action = control.dataset.selectionAction;
-  if (!action || action === 'save' || action === 'reset') return;
-  const card = control.closest('.selection-card'); const index = [...$('#model-selections').children].indexOf(card); const entry = modelSelections[index];
-  if (action === 'include-new') {
-    preserveVisibleFamilies(entry);
-    entry.policy.includeNew = control.checked;
-  }
-  else if (action === 'skip-claude') entry.policy.skipClaudeModelsForOtherClients = control.checked;
-  else if (action === 'family') editFamily(entry, control.dataset.family, control.checked);
-  else if (action === 'model') {
-    const model = entry.models.find(item => item.id === control.dataset.model);
-    if (control.checked === familyBase(entry.policy, control.dataset.family)) delete entry.policy.modelOverrides[model.id];
-    else entry.policy.modelOverrides[model.id] = control.checked;
-  }
-  renderModelSelections();
-});
-$('#model-selections').addEventListener('click', async event => {
-  const action = event.target.dataset.selectionAction;
-  if (action !== 'save' && action !== 'reset') return;
-  const card = event.target.closest('.selection-card'); const index = [...$('#model-selections').children].indexOf(card); const entry = modelSelections[index];
-  if (action === 'reset') { entry.policy = JSON.parse(entry.savedPolicy); renderModelSelections(); return; }
-  preserveVisibleFamilies(entry);
-  entry.saving = true; renderModelSelections(); $('#selection-result').textContent = `Saving selection for ${entry.baseUrl}…`;
-  try {
-    const result = await api('/cliproxy/selection', { baseUrl: entry.baseUrl, version: entry.version, policy: entry.policy });
-    const saved = result.catalog;
-    const policy = { includeNew: saved.policy.includeNew, skipClaudeModelsForOtherClients: saved.policy.skipClaudeModelsForOtherClients ?? true, enabledFamilies: [...(saved.policy.enabledFamilies || [])], disabledFamilies: [...saved.policy.disabledFamilies], modelOverrides: { ...saved.policy.modelOverrides } };
-    modelSelections[index] = { ...saved, policy, savedPolicy: policySnapshot(policy) };
-    $('#selection-result').textContent = `Selection saved for ${entry.baseUrl}. Agents receive it on their next poll.`;
-  } catch (error) {
-    if (error.code === 'stale_selection' || error.code === 'catalog_unavailable') {
-      const currentBaseUrl = entry.baseUrl;
-      try { await loadModelSelections(); }
-      catch (loadError) { $('#selection-result').textContent = `${error.message} Reload failed: ${loadError.message}`; return; }
-      $('#selection-result').textContent = error.message;
-      if (currentBaseUrl && !modelSelections.some(item => item.baseUrl === currentBaseUrl)) $('#selection-result').textContent += ' This catalog is no longer available.';
-    } else {
-      entry.saving = false; renderModelSelections();
-      const blocked = error.code === 'pinned_model_excluded' && error.details.models?.length ? ` Pinned models: ${error.details.models.join(', ')}.` : '';
-      $('#selection-result').textContent = error.message + blocked;
+  document.addEventListener('pointerover', e => { const t = e.target.closest?.('[data-tip]'); if (t) ui.tipFor(t); });
+  document.addEventListener('pointerout', e => { const t = e.target.closest?.('[data-tip]'); if (t && !t.contains(e.relatedTarget)) ui.hideTip(); });
+  document.addEventListener('focusin', e => { const t = e.target.closest?.('[data-tip]'); if (t) ui.tipFor(t); });
+  document.addEventListener('focusout', e => { if (e.target.closest?.('[data-tip]')) ui.hideTip(); });
+  window.addEventListener('scroll', ui.hideTip, { passive: true });
+  window.addEventListener('hashchange', () => { if (signedIn) render(); });
+  window.addEventListener('pagehide', () => { const i = el('operator-token'); if (i) i.value = ''; ui.closeModal(true); });
+
+  /* Countdowns and elapsed timers. */
+  setInterval(() => {
+    const now = u.now();
+    document.querySelectorAll('[data-countdown]').forEach(t => {
+      const left = u.ms(t.dataset.countdown) - now;
+      t.textContent = left <= 0 ? 'expired' : t.dataset.fmt === 'clock' ? u.clock(left) : left < u.MIN ? `in ${Math.ceil(left / 1000)} s` : `in ${Math.ceil(left / u.MIN)} min`;
+    });
+    document.querySelectorAll('[data-countdown-bar]').forEach(t => { t.style.width = Math.max(0, (u.ms(t.dataset.countdownBar) - now) / +t.dataset.total * 100).toFixed(2) + '%'; });
+    document.querySelectorAll('[data-elapsed]').forEach(t => { t.textContent = u.clock(now - +t.dataset.elapsed); });
+  }, 1000);
+
+  /* ---------------------------------------------------------------- boot */
+  async function boot() {
+    buildShell();
+    if (!booted) { Fleet.charts.bind(); booted = true; }
+    ui.setHtml(el('view'), ui.skeleton());
+    try {
+      await api.renewCsrf();
+      await api.loadSession();
+      signedIn = true;
+      if (!location.hash || location.hash === '#') history.replaceState(null, '', '#/nodes');
+      Fleet.renderNav();
+      render();
+    } catch (e) {
+      if (e.status === 401 || e.code === 'unauthorized') showLogin();
+      else ui.setHtml(el('view'), `<div class="wrap">${ui.errorState(e, { what: 'the dashboard', retry: false })}<div class="empty-retry"><button type="button" class="btn btn-secondary" data-act="boot-retry">${ic('retry')}Try again</button></div></div>`);
     }
   }
-});
-$('#sync-models').addEventListener('click', async () => {
-  const button = $('#sync-models');
-  if (button.disabled) return;
-  button.disabled = true;
-  $('#models-result').textContent = 'Fetching models from CLIProxy…';
-  try { showModels(await api('/cliproxy/refresh', {})); await diagnostics(); }
-  catch (error) { $('#models-result').textContent = error.message + ' Model refresh could not be confirmed.'; button.disabled = false; return; }
-  await loadModelSelections().catch(error => { $('#selection-result').textContent = error.message; });
-});
-$('#refresh').addEventListener('click', () => Promise.all([nodes(false), modelStatus()]).catch(error => message(error.message)));
-$('#more').addEventListener('click', () => nodes(true).catch(error => message(error.message)));
-addEventListener('pagehide', () => { $('#operator-token').value = ''; clearLink(); });
-(async () => {
-  try { await renewCsrf(); const session = await api('/session'); await showWorkspace(session.actor); }
-  catch (error) { if ($('#login-panel').hidden) message(error.message); }
+  Fleet.actions['boot-retry'] = () => boot();
+  boot();
 })();

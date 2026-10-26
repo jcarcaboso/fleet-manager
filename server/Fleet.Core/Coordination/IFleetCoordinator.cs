@@ -83,6 +83,43 @@ public interface IFleetCoordinator
         AttemptReport report,
         CancellationToken cancellationToken = default);
 
+    /// <summary>
+    /// Stores the detail of the Node's own failed Attempt, replacing earlier detail. The detail is sanitized and validated
+    /// with <see cref="AttemptDetailRules"/>. Throws attempt_not_found (unknown or another Node's) or attempt_not_failed.
+    /// </summary>
+    Task RecordAttemptDetailAsync(
+        NodeAuthentication authentication,
+        AttemptId attemptId,
+        AttemptDetail detail,
+        CancellationToken cancellationToken = default);
+
+    /// <summary>
+    /// Replaces the Node's stored disk volumes with the report and clears a pending refresh request, in one transaction.
+    /// The report is validated with <see cref="DiskUsageRules"/>; invalid reports throw invalid_request.
+    /// </summary>
+    Task RecordDiskUsageAsync(
+        NodeAuthentication authentication,
+        DiskUsageReport report,
+        CancellationToken cancellationToken = default);
+
+    /// <summary>
+    /// Records that an Operator wants a fresh disk report. A repeat keeps the original timestamp until the Agent reports.
+    /// Throws node_not_found, or node_revoked for a revoked Node.
+    /// </summary>
+    Task<DiskRefreshRequested> RequestDiskUsageRefreshAsync(
+        NodeId nodeId,
+        string requestedBy,
+        CancellationToken cancellationToken = default);
+
+    /// <summary>
+    /// Replaces the Node's stored telemetry with the report, in one transaction under the Node row lock.
+    /// The report is validated with <see cref="AgentTelemetryRules"/>; invalid reports throw invalid_request.
+    /// </summary>
+    Task RecordAgentTelemetryAsync(
+        NodeAuthentication authentication,
+        AgentTelemetryReport report,
+        CancellationToken cancellationToken = default);
+
     Task<Page<NodeStatus>> GetNodesAsync(
         PageRequest page,
         DateTimeOffset now,
@@ -108,6 +145,52 @@ public interface IFleetCoordinator
 
     Task<Page<AuditEventStatus>> GetAuditEventsAsync(
         PageRequest page,
+        NodeId? node = null,
+        CancellationToken cancellationToken = default);
+
+    /// <summary>
+    /// Resolves a Node ID or exact alias; a UUID-shaped value is tried as an ID first. Revoked Nodes resolve.
+    /// With <paramref name="allowRemovedId"/>, an unknown UUID is returned as is, so history of removed Nodes stays reachable.
+    /// </summary>
+    Task<NodeId> ResolveNodeAsync(
+        string nodeOrAlias,
+        bool allowRemovedId = false,
+        CancellationToken cancellationToken = default);
+
+    Task<NodeDetail> GetNodeDetailAsync(
+        NodeId nodeId,
+        DateTimeOffset now,
+        TimeSpan staleAfter,
+        CancellationToken cancellationToken = default);
+
+    Task<Page<NodeAttemptStatus>> GetNodeAttemptsAsync(
+        NodeId nodeId,
+        string? targetName,
+        PageRequest page,
+        CancellationToken cancellationToken = default);
+
+    Task<NodeCheckins> GetNodeCheckinsAsync(
+        NodeId nodeId,
+        int hours,
+        CancellationToken cancellationToken = default);
+
+    Task<RetryResult> RetryAssignmentAsync(
+        RetryAssignment command,
+        CancellationToken cancellationToken = default);
+
+    Task<Page<SourceScanEntry>> GetSourceScansAsync(
+        PageRequest page,
+        CancellationToken cancellationToken = default);
+
+    Task<Page<EnrollmentLinkStatus>> GetEnrollmentLinksAsync(
+        PageRequest page,
+        DateTimeOffset now,
+        CancellationToken cancellationToken = default);
+
+    /// <summary>One enrollment link in the shape of <see cref="GetEnrollmentLinksAsync"/>; <c>enrollment_link_not_found</c> if there is none.</summary>
+    Task<EnrollmentLinkStatus> GetEnrollmentLinkAsync(
+        Guid id,
+        DateTimeOffset now,
         CancellationToken cancellationToken = default);
 
     Task<PersistenceMaintenanceResult> MaintainPersistenceAsync(

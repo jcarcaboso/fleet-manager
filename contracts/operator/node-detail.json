@@ -1,0 +1,161 @@
+{
+  "nodeId": "00000000-0000-0000-0000-000000000001",
+  "name": "studio-mini",
+  "platform": "macos",
+  "enrolledAt": "2026-09-01T10:00:00Z",
+  "lastContactAt": "2026-10-25T14:29:10Z",
+  "freshness": "fresh",
+  "revoked": false,
+  "revokedAt": null,
+  "credential": {
+    "credentialId": "00000000-0000-0000-0000-0000000000c1",
+    "notBefore": "2026-10-23T08:59:00Z",
+    "notAfter": "2026-10-30T09:00:00Z",
+    "revokedAt": null,
+    "revokedBy": null,
+    "renewals": 6
+  },
+  "targets": [
+    {
+      "name": "agent-file/claude",
+      "kind": "agent-file",
+      "base": "home",
+      "path": ".claude",
+      "assignmentId": "00000000-0000-0000-0000-0000000000a1",
+      "state": "succeeded",
+      "assignedAt": "2026-10-25T09:00:00Z",
+      "desiredRevision": {
+        "desiredRevisionId": "00000000-0000-0000-0000-0000000000d1",
+        "sourceRevision": "a3f9c21d0c5b4e8f9a1b2c3d4e5f60718293a4b5",
+        "acceptedAt": "2026-10-25T09:00:00Z"
+      },
+      "lastSucceededRevision": "a3f9c21d0c5b4e8f9a1b2c3d4e5f60718293a4b5",
+      "latestAttempt": {
+        "attemptId": "00000000-0000-0000-0000-0000000000b1",
+        "state": "succeeded",
+        "errorCode": null,
+        "diagnostic": null,
+        "path": null,
+        "step": null,
+        "updatedAt": "2026-10-25T09:01:00Z"
+      },
+      "failedAttempts": 0,
+      "firstFailedAt": null,
+      "skills": [],
+      "file": {
+        "name": "CLAUDE.md",
+        "bundleDigest": "sha256:5d41402abc4b2a76b9719d911017c59228f4cc4bd1b2e9d3c5c0f2b0a1c9d8e7"
+      },
+      "aiClient": null
+    },
+    {
+      "name": "ai-client/claude",
+      "kind": "ai-client",
+      "base": "home",
+      "path": ".claude",
+      "assignmentId": "00000000-0000-0000-0000-0000000000a2",
+      "state": "failed",
+      "assignedAt": "2026-10-25T09:00:00Z",
+      "desiredRevision": {
+        "desiredRevisionId": "00000000-0000-0000-0000-0000000000d1",
+        "sourceRevision": "a3f9c21d0c5b4e8f9a1b2c3d4e5f60718293a4b5",
+        "acceptedAt": "2026-10-25T09:00:00Z"
+      },
+      "lastSucceededRevision": "51c0d8a7e2f14b6c8d9e0f1a2b3c4d5e6f708192",
+      "latestAttempt": {
+        "attemptId": "00000000-0000-0000-0000-0000000000b2",
+        "state": "failed",
+        "errorCode": "ai_client_reconcile_failed",
+        "diagnostic": "AI client configuration could not be written: settings.json is not valid JSON at line 12",
+        "path": ".claude/settings.json",
+        "step": "configure",
+        "updatedAt": "2026-10-25T14:20:00Z"
+      },
+      "failedAttempts": 3,
+      "firstFailedAt": "2026-10-25T09:02:00Z",
+      "skills": [],
+      "file": null,
+      "aiClient": {
+        "client": "claude",
+        "mode": "cliproxy",
+        "baseUrl": "https://proxy.home.arpa/v1",
+        "model": "claude-sonnet-5-5"
+      }
+    },
+    {
+      "name": "skills",
+      "kind": "skills",
+      "base": "home",
+      "path": ".agents/skills",
+      "assignmentId": "00000000-0000-0000-0000-0000000000a3",
+      "state": "succeeded",
+      "assignedAt": "2026-10-25T09:00:00Z",
+      "desiredRevision": {
+        "desiredRevisionId": "00000000-0000-0000-0000-0000000000d1",
+        "sourceRevision": "a3f9c21d0c5b4e8f9a1b2c3d4e5f60718293a4b5",
+        "acceptedAt": "2026-10-25T09:00:00Z"
+      },
+      "lastSucceededRevision": "a3f9c21d0c5b4e8f9a1b2c3d4e5f60718293a4b5",
+      "latestAttempt": {
+        "attemptId": "00000000-0000-0000-0000-0000000000b3",
+        "state": "succeeded",
+        "errorCode": null,
+        "diagnostic": null,
+        "path": null,
+        "step": null,
+        "updatedAt": "2026-10-25T09:01:30Z"
+      },
+      "failedAttempts": 0,
+      "firstFailedAt": null,
+      "skills": [
+        {
+          "name": "git-workflow",
+          "bundleDigest": "sha256:2c26b46b68ffc68ff99b453c1d30413413422d706483bfa0f98a5e886266e7ae"
+        },
+        {
+          "name": "code-review",
+          "bundleDigest": "sha256:fcde2b2edba56bf408601fb721fe9b5c338d10ee429ea04fae5511b68fbf8fb9"
+        }
+      ],
+      "file": null,
+      "aiClient": null
+    }
+  ],
+  "summary": {
+    "pending": 0,
+    "applying": 0,
+    "succeeded": 2,
+    "failed": 1,
+    "superseded": 0
+  },
+  "disk": {
+    "measuredAt": "2026-10-25T12:00:00Z",
+    "refreshRequestedAt": null,
+    "volumes": [
+      {
+        "label": "home",
+        "totalBytes": 994662584320,
+        "usedBytes": 871203905536,
+        "availableBytes": 72818462720,
+        "usedPercent": 92.3
+      }
+    ]
+  },
+  "agent": {
+    "version": "0.8.0",
+    "latestVersion": "0.8.1",
+    "outdated": true,
+    "os": {
+      "name": "Fedora Linux",
+      "version": "44",
+      "kernel": "7.2.11-200.fc44.x86_64"
+    },
+    "arch": "x86_64",
+    "hostname": "studio-mini.home.arpa",
+    "user": "joan",
+    "installMethod": "homebrew",
+    "serviceManager": "systemd",
+    "stateDirectory": "~/.local/state/fleet-agent",
+    "reportedAt": "2026-10-25T12:00:00Z"
+  }
+}

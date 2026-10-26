@@ -4,14 +4,16 @@ using System.Text;
 using System.Text.Json;
 using Fleet.Core.Coordination;
 using Microsoft.EntityFrameworkCore;
+using Microsoft.Extensions.Logging;
 using Npgsql;
 
 namespace Fleet.Server.Persistence;
 
-public sealed class PostgresFleetCoordinator(
+public sealed partial class PostgresFleetCoordinator(
     FleetDbContext db,
     TimeProvider clock,
-    FleetCoordinationOptions options) : IFleetCoordinator
+    FleetCoordinationOptions options,
+    ILogger<PostgresFleetCoordinator>? logger = null) : IFleetCoordinator
 {
     public async Task<EnrollmentAuthorization> CreateEnrollmentAuthorizationAsync(
         CreateEnrollmentAuthorization command, CancellationToken cancellationToken = default)
@@ -506,7 +508,18 @@ public sealed class PostgresFleetCoordinator(
     {
         if (contactedAt > clock.GetUtcNow() + TimeSpan.FromMinutes(5))
             throw Error("invalid_contact_time", "Node contact time is too far in the future.");
-        await Authenticate(authentication, contactedAt, true, cancellationToken);
+        var node = await Authenticate(authentication, contactedAt, true, cancellationToken);
+        var result = await FindPollAssignment(authentication, targetName, cancellationToken) with
+        {
+            DiskUsageRequested = node.DiskUsageRefreshRequestedAt is not null
+        };
+        // After the Assignment is found and never part of it: the check-in is telemetry and cannot fail or hold up the poll.
+        await RecordCheckin(authentication.NodeId.Value, contactedAt, cancellationToken);
+        return result;
+    }
+
+    private async Task<PollResult> FindPollAssignment(NodeAuthentication authentication, string? targetName, CancellationToken cancellationToken)
+    {
         await RetryFailedAiAssignment(authentication.NodeId.Value, targetName, cancellationToken);
         var assignment = await db.Assignments.AsNoTracking().Where(x => x.NodeId == authentication.NodeId.Value && x.IsCurrent &&
                 (x.State == (int)ConvergenceState.Pending || x.State == (int)ConvergenceState.Applying) &&
@@ -631,7 +644,9 @@ public sealed class PostgresFleetCoordinator(
         var attempt = await db.Attempts.FromSqlInterpolated($"SELECT * FROM attempts WHERE \"Id\" = {attemptId} FOR UPDATE")
             .SingleAsync(cancellationToken);
         var currentState = (ConvergenceState)attempt.State;
-        if (currentState == report.State && attempt.ErrorCode == report.ErrorCode && attempt.Diagnostic == report.Diagnostic)
+        // Agents send no diagnostic with the report; the detail route may have stored one since, which must not turn a repeat into an error.
+        if (currentState == report.State && attempt.ErrorCode == report.ErrorCode &&
+            (report.Diagnostic is null && currentState == ConvergenceState.Failed || attempt.Diagnostic == report.Diagnostic))
             return new(ReportOutcome.Duplicate, currentState);
         if (currentState is ConvergenceState.Succeeded or ConvergenceState.Failed)
             throw Error("terminal_attempt", "A terminal Attempt cannot change result.");
@@ -646,16 +661,6 @@ public sealed class PostgresFleetCoordinator(
         return new(stale ? ReportOutcome.Stale : ReportOutcome.Recorded, report.State);
     }
 
-    public async Task<Page<NodeStatus>> GetNodesAsync(PageRequest page, DateTimeOffset now, TimeSpan staleAfter, CancellationToken cancellationToken = default)
-    {
-        await EnsureWorkspace(cancellationToken);
-        var (limit, cursor) = PageArgs(page);
-        var rows = await db.Nodes.AsNoTracking().Where(x => x.WorkspaceId == options.WorkspaceId.Value && x.Id.CompareTo(cursor) > 0)
-            .OrderBy(x => x.Id).Take(limit + 1).ToListAsync(cancellationToken);
-        return MakePage(rows, limit, x => x.Id, x => new NodeStatus(new(x.Id), x.Name, x.RevokedAt != null, x.LastContactAt,
-            x.LastContactAt is null ? FreshnessState.NeverContacted : now - x.LastContactAt <= staleAfter ? FreshnessState.Fresh : FreshnessState.Stale));
-    }
-
     public async Task<Page<AttemptStatus>> GetAttemptsAsync(RolloutId rolloutId, PageRequest page, CancellationToken cancellationToken = default)
     {
         await EnsureWorkspace(cancellationToken);
@@ -663,7 +668,32 @@ public sealed class PostgresFleetCoordinator(
         var rows = await db.Attempts.AsNoTracking().Where(x => x.RolloutId == rolloutId.Value && x.Id.CompareTo(cursor) > 0)
             .OrderBy(x => x.Id).Take(limit + 1).ToListAsync(cancellationToken);
         return MakePage(rows, limit, x => x.Id, x => new AttemptStatus(new(x.Id), new(x.AssignmentId),
-            (ConvergenceState)x.State, x.ErrorCode, x.Diagnostic, x.UpdatedAt));
+            (ConvergenceState)x.State, x.ErrorCode, x.Diagnostic, x.FailurePath, x.FailureStep, x.UpdatedAt));
+    }
+
+    public async Task RecordAttemptDetailAsync(NodeAuthentication authentication, AttemptId attemptId, AttemptDetail detail,
+        CancellationToken cancellationToken = default)
+    {
+        var clean = AttemptDetailRules.Sanitize(detail);
+        await Authenticate(authentication, clock.GetUtcNow(), false, cancellationToken);
+        var id = attemptId.Value;
+        var nodeId = authentication.NodeId.Value;
+        var failed = (int)ConvergenceState.Failed;
+        // One conditional UPDATE by Attempt, Node and state: no read-modify-write, and the latest accepted detail wins.
+        // The IS DISTINCT FROM test skips the physical write (row version, WAL) when a repeat carries the stored values.
+        var updated = await db.Database.ExecuteSqlInterpolatedAsync($$"""
+            UPDATE attempts SET "Diagnostic" = {{clean.Diagnostic}}, "FailurePath" = {{clean.Path}}, "FailureStep" = {{clean.Step}}
+            WHERE "Id" = {{id}} AND "NodeId" = {{nodeId}} AND "State" = {{failed}}
+              AND ("Diagnostic" IS DISTINCT FROM {{clean.Diagnostic}} OR "FailurePath" IS DISTINCT FROM {{clean.Path}}
+                OR "FailureStep" IS DISTINCT FROM {{clean.Step}})
+            """, cancellationToken);
+        if (updated > 0) return;
+        // Zero rows is either a refusal or an unchanged repeat of an owned failed Attempt, which is still accepted.
+        var state = await db.Attempts.AsNoTracking().Where(x => x.Id == id && x.NodeId == nodeId)
+            .Select(x => (int?)x.State).SingleOrDefaultAsync(cancellationToken);
+        if (state == failed) return;
+        throw state is null ? Error("attempt_not_found", "Attempt was not found.")
+            : Error("attempt_not_failed", "Detail can only be added to a failed Attempt.");
     }
 
     public async Task<Page<WarningStatus>> GetWarningsAsync(PageRequest page, CancellationToken cancellationToken = default)
@@ -679,6 +709,17 @@ public sealed class PostgresFleetCoordinator(
     public async Task<Page<DesiredRevisionStatus>> GetDesiredRevisionsAsync(PageRequest page, CancellationToken cancellationToken = default)
     {
         await EnsureWorkspace(cancellationToken);
+        if (page.Order == PageOrder.Newest)
+        {
+            var (newestLimit, after) = OperatorPageArgs(page);
+            var query = db.DesiredRevisions.AsNoTracking().Where(x => x.WorkspaceId == options.WorkspaceId.Value);
+            if (after is var (at, cursorId))
+                query = query.Where(x => x.AcceptedAt < at || x.AcceptedAt == at && x.Id.CompareTo(cursorId) < 0);
+            var newest = await query.OrderByDescending(x => x.AcceptedAt).ThenByDescending(x => x.Id).Take(newestLimit + 1)
+                .ToListAsync(cancellationToken);
+            return MakeTimePage(newest, newestLimit, x => x.AcceptedAt, x => x.Id,
+                x => new DesiredRevisionStatus(new(x.Id), x.SourceRevision, x.AcceptedAt));
+        }
         var (limit, cursor) = PageArgs(page);
         var rows = await db.DesiredRevisions.AsNoTracking().Where(x => x.Id.CompareTo(cursor) > 0).OrderBy(x => x.Id)
             .Take(limit + 1).ToListAsync(cancellationToken);
@@ -688,27 +729,33 @@ public sealed class PostgresFleetCoordinator(
     public async Task<Page<RolloutStatus>> GetRolloutsAsync(PageRequest page, CancellationToken cancellationToken = default)
     {
         await EnsureWorkspace(cancellationToken);
-        var (limit, cursor) = PageArgs(page);
-        var rows = await db.Rollouts.AsNoTracking().Where(x => x.Id.CompareTo(cursor) > 0).OrderBy(x => x.Id)
-            .Take(limit + 1).ToListAsync(cancellationToken);
+        var newest = page.Order == PageOrder.Newest;
+        int limit;
+        List<RolloutRow> rows;
+        if (newest)
+        {
+            var (newestLimit, after) = OperatorPageArgs(page);
+            limit = newestLimit;
+            var query = db.Rollouts.AsNoTracking();
+            if (after is var (at, cursorId))
+                query = query.Where(x => x.CreatedAt < at || x.CreatedAt == at && x.Id.CompareTo(cursorId) < 0);
+            rows = await query.OrderByDescending(x => x.CreatedAt).ThenByDescending(x => x.Id).Take(limit + 1).ToListAsync(cancellationToken);
+        }
+        else
+        {
+            var (idLimit, cursor) = PageArgs(page);
+            limit = idLimit;
+            rows = await db.Rollouts.AsNoTracking().Where(x => x.Id.CompareTo(cursor) > 0).OrderBy(x => x.Id)
+                .Take(limit + 1).ToListAsync(cancellationToken);
+        }
         var ids = rows.Take(limit).Select(x => x.Id).ToArray();
         var counts = await db.Assignments.Where(x => ids.Contains(x.RolloutId)).GroupBy(x => new { x.RolloutId, x.State })
             .Select(x => new { x.Key.RolloutId, x.Key.State, Count = x.Count() }).ToListAsync(cancellationToken);
-        return MakePage(rows, limit, x => x.Id, x => new RolloutStatus(new(x.Id), new(x.DesiredRevisionId), x.CreatedAt,
-            Count(x.Id, ConvergenceState.Pending), Count(x.Id, ConvergenceState.Applying), Count(x.Id, ConvergenceState.Succeeded),
-            Count(x.Id, ConvergenceState.Failed), Count(x.Id, ConvergenceState.Superseded)));
-
         int Count(Guid rollout, ConvergenceState state) => counts.FirstOrDefault(c => c.RolloutId == rollout && c.State == (int)state)?.Count ?? 0;
-    }
-
-    public async Task<Page<AuditEventStatus>> GetAuditEventsAsync(PageRequest page, CancellationToken cancellationToken = default)
-    {
-        await EnsureWorkspace(cancellationToken);
-        var (limit, cursor) = PageArgs(page);
-        var rows = await db.AuditEvents.AsNoTracking().Where(x => x.WorkspaceId == options.WorkspaceId.Value && x.Id.CompareTo(cursor) > 0)
-            .OrderBy(x => x.Id).Take(limit + 1).ToListAsync(cancellationToken);
-        return MakePage(rows, limit, x => x.Id, x => new AuditEventStatus(x.RecordedAt, x.Action, x.Actor,
-            x.NodeId is Guid node ? new NodeId(node) : null, x.CredentialId is Guid credential ? new CredentialId(credential) : null));
+        RolloutStatus Map(RolloutRow x) => new(new(x.Id), new(x.DesiredRevisionId), x.CreatedAt,
+            Count(x.Id, ConvergenceState.Pending), Count(x.Id, ConvergenceState.Applying), Count(x.Id, ConvergenceState.Succeeded),
+            Count(x.Id, ConvergenceState.Failed), Count(x.Id, ConvergenceState.Superseded));
+        return newest ? MakeTimePage(rows, limit, x => x.CreatedAt, x => x.Id, Map) : MakePage(rows, limit, x => x.Id, Map);
     }
 
     public async Task<PersistenceMaintenanceResult> MaintainPersistenceAsync(PersistenceMaintenancePolicy policy,
@@ -733,10 +780,13 @@ public sealed class PostgresFleetCoordinator(
             ? await DeleteAuditEvents(workspaceId, now - auditRetention, policy.BatchSize, cancellationToken) : 0;
         var scansDeleted = policy.SourceScanRetention is TimeSpan scanRetention
             ? await DeleteSourceScans(workspaceId, now - scanRetention, policy.BatchSize, cancellationToken) : 0;
-        return new(scrubbed, auditDeleted, scansDeleted);
+        // Check-in history is operational telemetry with a fixed window, independent of the opt-in retention policy.
+        var checkinsDeleted = await DeleteCheckins(now.AddDays(-CheckinRetentionDays), policy.BatchSize, cancellationToken);
+        return new(scrubbed, auditDeleted, scansDeleted, checkinsDeleted);
     }
 
-    private async Task Authenticate(NodeAuthentication authentication, DateTimeOffset contact, bool updateContact, CancellationToken cancellationToken)
+    // Returns the Node row it loaded anyway, so poll reads the pending disk refresh request without another query.
+    private async Task<NodeRow> Authenticate(NodeAuthentication authentication, DateTimeOffset contact, bool updateContact, CancellationToken cancellationToken)
     {
         await EnsureWorkspace(cancellationToken);
         var now = clock.GetUtcNow();
@@ -753,6 +803,7 @@ public sealed class PostgresFleetCoordinator(
             var nodeId = authentication.NodeId.Value;
             await db.Database.ExecuteSqlInterpolatedAsync($"UPDATE nodes SET \"LastContactAt\" = GREATEST(COALESCE(\"LastContactAt\", {contact}), {contact}) WHERE \"Id\" = {nodeId}", cancellationToken);
         }
+        return valid;
     }
 
     private async Task<bool> SameTarget(AssignmentRow current, SnapshotTarget target, CancellationToken cancellationToken)
@@ -881,8 +932,9 @@ public sealed class PostgresFleetCoordinator(
 
     private static (int Limit, Guid Cursor) PageArgs(PageRequest page)
     {
-        if (page.Limit is < 1 or > PageRequest.MaximumLimit) throw Error("invalid_page", $"Page limit must be between 1 and {PageRequest.MaximumLimit}.");
-        return (page.Limit, page.Cursor is null ? Guid.Empty : Guid.TryParse(page.Cursor, out var id) ? id : throw Error("invalid_cursor", "Page cursor is invalid."));
+        if (page.Limit is < 1 or > PageRequest.MaximumLimit) throw Error("invalid_request", $"limit must be between 1 and {PageRequest.MaximumLimit}.");
+        return (page.Limit, page.Cursor is null ? Guid.Empty : Guid.TryParse(page.Cursor, out var id) ? id
+            : throw Error("invalid_request", "after is not a valid cursor for this order."));
     }
 
     private static Page<TOut> MakePage<TRow, TOut>(List<TRow> rows, int limit, Func<TRow, Guid> id, Func<TRow, TOut> map)

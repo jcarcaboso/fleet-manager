@@ -45,5 +45,12 @@ pub async fn apply(
     reconciler
         .reconcile(api, assignment.ai_client.as_ref().unwrap())
         .await
-        .map_err(|error| ActionError::new("ai_client_reconcile_failed", error))
+        .map_err(|failure| {
+            let error = ActionError::new("ai_client_reconcile_failed", failure.error)
+                .with_step(failure.step);
+            match failure.config_path {
+                Some(path) => error.with_path(&path),
+                None => error,
+            }
+        })
 }

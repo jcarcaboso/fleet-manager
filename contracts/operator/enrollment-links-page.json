@@ -1,0 +1,35 @@
+{
+  "items": [
+    {
+      "id": "00000000-0000-0000-0000-0000000000f1",
+      "alias": "office-laptop",
+      "expiresAt": "2026-10-26T10:15:00Z",
+      "consumedAt": null,
+      "revokedAt": null,
+      "revokedBy": null,
+      "nodeId": null,
+      "state": "active"
+    },
+    {
+      "id": "00000000-0000-0000-0000-0000000000f2",
+      "alias": "studio-mini",
+      "expiresAt": "2026-09-01T10:15:00Z",
+      "consumedAt": "2026-09-01T10:00:00Z",
+      "revokedAt": null,
+      "revokedBy": null,
+      "nodeId": "00000000-0000-0000-0000-000000000001",
+      "state": "consumed"
+    },
+    {
+      "id": "00000000-0000-0000-0000-0000000000f3",
+      "alias": "old-box",
+      "expiresAt": "2026-08-01T10:15:00Z",
+      "consumedAt": null,
+      "revokedAt": "2026-08-01T10:05:00Z",
+      "revokedBy": "operator",
+      "nodeId": null,
+      "state": "revoked"
+    }
+  ],
+  "nextCursor": null
+}

@@ -30,7 +30,10 @@ var app = builder.Build();
 if (args.Contains("--migrate", StringComparer.Ordinal))
 {
     using var scope = app.Services.CreateScope();
-    await scope.ServiceProvider.GetRequiredService<FleetDbContext>().Database.MigrateAsync();
+    var database = scope.ServiceProvider.GetRequiredService<FleetDbContext>().Database;
+    // Index builds on populated tables can outlast the 15-second request timeout.
+    database.SetCommandTimeout(TimeSpan.FromMinutes(30));
+    await database.MigrateAsync();
     return;
 }
 

@@ -32,6 +32,7 @@ public static class FleetServerHosting
         builder.Services.AddOptions<FleetOptions>().BindConfiguration("Fleet").ValidateDataAnnotations()
             .Validate(x => x.WorkspaceId != Guid.Empty, "A stable WorkspaceId is required.")
             .Validate(x => x.HasValidOperators(), "Configure 1 to 100 uniquely named Operators with distinct SHA-256 token digests.")
+            .Validate(x => x.HasValidOperatorScopes(), "Fleet:OperatorScopes values must be read, operate or admin.")
             .Validate(x => x.HasValidPublicUrl(), "Fleet:PublicUrl must be an HTTPS origin without a path, credentials, query, or fragment.")
             .Validate(x => x.HasValidCliProxyApiKey(), "Fleet:CliProxyApiKey must be empty or contain at most 4096 printable ASCII characters.")
             .ValidateOnStart();
@@ -47,11 +48,17 @@ public static class FleetServerHosting
         builder.Services.AddScoped<CliProxySelectionStore>();
         builder.Services.AddScoped<IFleetCoordinator>(services => new PostgresFleetCoordinator(
             services.GetRequiredService<FleetDbContext>(), services.GetRequiredService<TimeProvider>(),
-            new FleetCoordinationOptions { WorkspaceId = new WorkspaceId(services.GetRequiredService<IOptions<FleetOptions>>().Value.WorkspaceId) }));
+            new FleetCoordinationOptions
+            {
+                WorkspaceId = new WorkspaceId(services.GetRequiredService<IOptions<FleetOptions>>().Value.WorkspaceId),
+                LatestAgentVersion = services.GetRequiredService<LatestAgentVersion>().Value
+            }));
+        builder.Services.AddSingleton(new LatestAgentVersion(ServerVersion.Current));
         builder.Services.AddSingleton<IEnrolledNodeSource, RegisteredNodeSource>();
         builder.Services.AddSingleton<SourcePollingService>();
         builder.Services.AddHostedService(services => services.GetRequiredService<SourcePollingService>());
         builder.Services.ConfigureHttpJsonOptions(options => WireJson.Configure(options.SerializerOptions));
+        builder.Services.AddSingleton(services => EnrollmentLinkSettings.Load(services.GetRequiredService<IOptions<FleetOptions>>().Value));
         builder.Services.AddFleetDashboard();
         builder.Services.AddAuthentication(options => options.DefaultAuthenticateScheme = DashboardEndpoints.Scheme)
             .AddScheme<AuthenticationSchemeOptions, FleetAuthenticationHandler>("Operator", _ => { })
@@ -68,6 +75,7 @@ public static class FleetServerHosting
                 context.Connection.RemoteIpAddress?.ToString() ?? "unknown",
                 _ => new FixedWindowRateLimiterOptions { PermitLimit = 20, Window = TimeSpan.FromMinutes(1), QueueLimit = 0 }));
         });
+        builder.Services.AddSingleton(NodeRequestRateLimit.Create());
         builder.Services.AddOpenApi("agent", options => options.ShouldInclude = description => description.GroupName == "agent");
         builder.Services.AddOpenApi("operator", options => options.ShouldInclude = description => description.GroupName == "operator");
     }
@@ -111,27 +119,32 @@ public static class FleetServerHosting
                 context.Response.StatusCode = exception.Code switch
                 {
                     "unauthorized" or "invalid_credential" or "node_unauthorized" or "bundle_not_authorized" or "cliproxy_credential_not_authorized" => 403,
-                    "not_found" or "node_not_found" or "credential_not_found" or "attempt_not_found" => 404,
-                    "node_alias_in_use" or "node_revoked" or "node_alias_changed" => 409,
+                    "not_found" or "node_not_found" or "credential_not_found" or "attempt_not_found" or "target_not_found" or "enrollment_link_not_found" => 404,
+                    "node_alias_in_use" or "node_revoked" or "node_alias_changed" or "target_not_failed" or "attempt_not_failed" => 409,
                     _ => 400
                 };
-                await context.Response.WriteAsJsonAsync(new { code = exception.Code });
+                await WriteError(context, exception.Code, exception.Message);
+            }
+            catch (OperatorApiException exception)
+            {
+                context.Response.StatusCode = exception.Status;
+                await context.Response.WriteAsJsonAsync(new { code = exception.Code, message = exception.Message });
             }
             catch (BadHttpRequestException exception)
             {
                 context.Response.StatusCode = exception.StatusCode;
-                await context.Response.WriteAsJsonAsync(new { code = "invalid_request" });
+                await WriteError(context, "invalid_request", "The request is malformed or a parameter is invalid.");
             }
             catch (Exception exception) when (exception is ArgumentException or CryptographicException or System.Text.Json.JsonException)
             {
                 context.Response.StatusCode = 400;
-                await context.Response.WriteAsJsonAsync(new { code = "invalid_request" });
+                await WriteError(context, "invalid_request", "The request is malformed or a parameter is invalid.");
             }
             catch (Exception exception) when (!context.RequestAborted.IsCancellationRequested)
             {
                 app.Logger.LogError("Request failed with {ErrorType}", exception.GetType().FullName);
                 context.Response.StatusCode = 500;
-                await context.Response.WriteAsJsonAsync(new { code = "internal_error" });
+                await WriteError(context, "internal_error", "The Server could not complete the request.");
             }
         });
         app.UseRateLimiter();
@@ -139,6 +152,12 @@ public static class FleetServerHosting
         app.UseAuthentication();
         app.UseAuthorization();
     }
+
+    // Routes carrying ErrorMessages metadata (every Operator API and dashboard API route) return { code, message }. Every other route keeps { code }.
+    private static Task WriteError(HttpContext context, string code, string message) =>
+        context.GetEndpoint()?.Metadata.GetMetadata<ErrorMessages>() is null
+            ? context.Response.WriteAsJsonAsync(new { code })
+            : context.Response.WriteAsJsonAsync(new { code, message });
 
     public static void MapFleetServer(this WebApplication app)
     {
@@ -155,20 +174,10 @@ public static class FleetServerHosting
             }
             catch (Exception) { return Results.StatusCode(503); }
         });
+        // Fail fast on an unusable enrollment CA, as the dashboard did before bearer routes could create links.
+        _ = app.Services.GetRequiredService<EnrollmentLinkSettings>();
         app.MapFleetEndpoints();
         app.MapFleetDashboard();
-        app.MapGet("/operator/v1/metrics", (FleetMetrics metrics) => Results.Ok(metrics.Snapshot()))
-            .RequireAuthorization("Operator").WithGroupName("operator");
-        app.MapPost("/operator/v1/source/rescan", async (SourcePollingService source, HttpContext context, CancellationToken ct) =>
-            Results.Ok(await source.ScanNowAsync(context.User.FindFirst(System.Security.Claims.ClaimTypes.NameIdentifier)!.Value, ct)))
-            .RequireAuthorization("Operator").WithGroupName("operator");
-        app.MapGet("/operator/v1/source/status", async (IFleetCoordinator coordinator, CancellationToken ct) =>
-            Results.Ok(await coordinator.GetLatestSourceScanAsync(ct))).RequireAuthorization("Operator").WithGroupName("operator");
-        app.MapGet("/operator/v1/cliproxy/status", (CliProxyCatalog catalog) => Results.Ok(catalog.Status()))
-            .RequireAuthorization("Operator").WithGroupName("operator");
-        app.MapPost("/operator/v1/cliproxy/refresh", async (CliProxySyncService sync, CancellationToken ct) =>
-            Results.Ok(await sync.SyncNowAsync(true, ct)))
-            .RequireAuthorization("Operator").WithGroupName("operator");
         app.MapOpenApi().RequireAuthorization("Operator");
     }
 }
