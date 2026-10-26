@@ -75,6 +75,8 @@ body.app.has-modal{overflow:hidden}
 a.stag:hover{text-decoration:underline}
 .chip{display:inline-flex;align-items:center;gap:6px;height:26px;padding:0 10px 0 6px;border-radius:999px;background:var(--surface-2);box-shadow:inset 0 0 0 1px var(--line);font-size:12.5px;font-weight:580;color:var(--ink-2)}
 .chip--empty{padding-left:10px;color:var(--muted)}
+.chip--update{background:var(--warning-bg);color:var(--warning-ink);box-shadow:inset 0 0 0 1px rgba(250,178,25,.5);font-weight:650}
+.chip--update .g{width:14px;height:14px}
 .flag{display:inline-flex;align-items:center;gap:6px;font-size:12.5px;color:var(--ink-2);font-weight:560}
 .flag .g{width:14px;height:14px}
 .tag{display:inline-flex;align-items:center;gap:4px;height:20px;padding:0 7px;border-radius:6px;font-size:11.5px;font-weight:650;background:var(--neutral-bg);color:var(--ink-2);white-space:nowrap}
@@ -102,8 +104,16 @@ a.stag:hover{text-decoration:underline}
 .callout p{color:var(--ink-2);margin-top:2px}
 .callout .g{margin-top:2px}
 .callout .more{margin-top:6px}
+.callout>div{flex:1;min-width:0}
 .callout--critical{background:var(--critical-bg)}
 .callout--warning{background:var(--warning-bg)}
+/* Machine panel: the upgrade steps sit inside a warning callout; the copy blocks keep their own surface. */
+.upgrade{margin:0 0 18px;padding:14px 16px}
+.upgrade>div>p:first-of-type{margin-bottom:12px}
+.upgrade .sbody p{font-size:13.5px}
+.upgrade .cmd{margin-top:8px}
+.upgrade .small{margin-top:10px}
+.machine-none{font-size:13.5px}
 .result{display:flex;align-items:center;gap:8px;margin-top:14px;padding:10px 14px;border-radius:12px;background:var(--surface-2);border:1px solid var(--line);font-size:13.5px;color:var(--ink-2)}
 .keybar .result{margin:0}
 .spacer{flex:1}

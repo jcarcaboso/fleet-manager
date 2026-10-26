@@ -127,8 +127,9 @@ public static partial class OperatorApi
 
         // Issues and errors
         api.MapGet("/issues", async (FleetDbContext db, IFleetCoordinator coordinator, CliProxyCatalog catalog,
-            IOptions<FleetOptions> options, IConfiguration configuration, TimeProvider time, CancellationToken ct) =>
-            new { items = await OperatorIssues.ReadAsync(db, coordinator, catalog, options, configuration, time, ct) })
+            IOptions<FleetOptions> options, IConfiguration configuration, TimeProvider time, LatestAgentVersion latest,
+            CancellationToken ct) =>
+            new { items = await OperatorIssues.ReadAsync(db, coordinator, catalog, options, configuration, time, latest.Value, ct) })
             .Scope(OperatorScope.Read);
         api.MapGet("/errors", () => new { items = ErrorCatalog.All }).Scope(OperatorScope.Read);
         api.MapGet("/errors/{code}", (string code) => ErrorCatalog.Find(code) ?? throw new OperatorApiException(404, "invalid_request",

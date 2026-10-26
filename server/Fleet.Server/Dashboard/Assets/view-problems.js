@@ -34,7 +34,7 @@
     const i = p.i, cat = p.cat, retryable = i.code === 'assignment_failed' && i.nodeId && i.target;
     const explanation = cat?.explanation || i.detail || '';
     const specific = cat?.explanation && i.detail && i.detail !== cat.explanation ? i.detail : '';
-    const fix = cat?.fix?.length ? cat.fix.map(t => ({ t })) : (i.action ? [{ t: i.action }] : []);
+    const fix = model.fixSteps(i, cat);
     const factList = [['Since', i.since ? `${u.fmtFull(i.since)} UTC` : '—', i.since ? u.rel(i.since) : ''], ...(i.errorCode ? [['Error code', i.errorCode, '', true]] : []),
       ...(i.nodeName ? [['Machine', i.nodeName, '']] : []), ...(i.target ? [['Target', i.target, '', true]] : [])];
     const retrying = S.retrying.has(i.id);

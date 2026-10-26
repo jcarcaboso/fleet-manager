@@ -12,7 +12,9 @@ const MAX_BUNDLE_BYTES: usize = 16 * 1024 * 1024;
 const MAX_CLIPROXY_CREDENTIAL_BYTES: usize = 4096;
 const MAX_DETAIL_REQUEST_BYTES: usize = 16 * 1024;
 const MAX_DISK_USAGE_REQUEST_BYTES: usize = 4 * 1024;
-const DISK_USAGE_TIMEOUT: Duration = Duration::from_secs(10);
+const MAX_TELEMETRY_REQUEST_BYTES: usize = 8 * 1024;
+/// Timeout of the best-effort reports (disk usage and machine information).
+const SIDE_REPORT_TIMEOUT: Duration = Duration::from_secs(10);
 /// Tells the Server which optional features this Agent understands. Only then
 /// may the poll response carry the matching fields.
 const CAPABILITIES_HEADER: &str = "x-fleet-agent-capabilities";
@@ -306,17 +308,32 @@ impl Api {
     /// Sends the latest disk usage. Best effort: the response body is never
     /// read, and the caller decides when to try again.
     pub async fn disk_usage(&self, report: &DiskUsageReport) -> Result<(), ProtocolError> {
+        self.put_report("agent/v1/disk-usage", report, MAX_DISK_USAGE_REQUEST_BYTES)
+            .await
+    }
+
+    /// Sends the machine and Agent information. Best effort like
+    /// [`Api::disk_usage`]: the response body is never read.
+    pub async fn telemetry(&self, report: &TelemetryReport) -> Result<(), ProtocolError> {
+        self.put_report("agent/v1/telemetry", report, MAX_TELEMETRY_REQUEST_BYTES)
+            .await
+    }
+
+    async fn put_report(
+        &self,
+        path: &str,
+        report: &impl Serialize,
+        limit: usize,
+    ) -> Result<(), ProtocolError> {
         let body = serde_json::to_vec(report).map_err(|_| ProtocolError::Json)?;
-        if body.len() > MAX_DISK_USAGE_REQUEST_BYTES {
-            return Err(ProtocolError::RequestTooLarge {
-                limit: MAX_DISK_USAGE_REQUEST_BYTES,
-            });
+        if body.len() > limit {
+            return Err(ProtocolError::RequestTooLarge { limit });
         }
         let response = self
             .authenticated()?
-            .put(self.endpoint("agent/v1/disk-usage")?)
+            .put(self.endpoint(path)?)
             .header(CONTENT_TYPE, "application/json")
-            .timeout(DISK_USAGE_TIMEOUT)
+            .timeout(SIDE_REPORT_TIMEOUT)
             .body(body)
             .send()
             .await
@@ -573,6 +590,30 @@ pub struct DiskVolume {
     pub available_bytes: u64,
 }
 
+/// Body of `PUT agent/v1/telemetry`. Every property is always present; a value
+/// that could not be read is `null`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TelemetryReport {
+    pub agent_version: String,
+    pub os: TelemetryOs,
+    pub arch: Option<String>,
+    pub hostname: Option<String>,
+    pub user: Option<String>,
+    /// `homebrew`, `cargo` or `binary`.
+    pub install_method: Option<&'static str>,
+    /// `systemd`, `launchd` or `none`.
+    pub service_manager: &'static str,
+    pub state_directory: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct TelemetryOs {
+    pub name: Option<String>,
+    pub version: Option<String>,
+    pub kernel: Option<String>,
+}
+
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 struct EnrollmentRequest<'a> {
@@ -774,6 +815,47 @@ mod tests {
         };
         assert!(matches!(
             client.disk_usage(&report).await,
+            Err(ProtocolError::RequestTooLarge { .. })
+        ));
+        assert!(server.requests().is_empty());
+    }
+
+    fn sample_telemetry() -> TelemetryReport {
+        crate::telemetry::fixture()
+    }
+
+    #[tokio::test]
+    async fn telemetry_is_put_and_the_response_body_is_ignored() {
+        let server = crate::detail::testing::MockServer::start(vec![(204, ""), (200, "not json")]);
+        let client = Api::for_loopback_test(&server.url());
+        client.telemetry(&sample_telemetry()).await.unwrap();
+        client.telemetry(&sample_telemetry()).await.unwrap();
+        let requests = server.requests();
+        assert_eq!(requests[0].method, "PUT");
+        assert_eq!(requests[0].path, "/agent/v1/telemetry");
+        assert_eq!(requests[0].header("content-type"), Some("application/json"));
+        let body: serde_json::Value = serde_json::from_str(&requests[0].body).unwrap();
+        assert_eq!(body["agentVersion"], "0.9.0");
+    }
+
+    #[tokio::test]
+    async fn telemetry_failures_are_errors_not_panics() {
+        let server = crate::detail::testing::MockServer::start(vec![(404, ""), (429, "")]);
+        let client = Api::for_loopback_test(&server.url());
+        for expected in [StatusCode::NOT_FOUND, StatusCode::TOO_MANY_REQUESTS] {
+            let error = client.telemetry(&sample_telemetry()).await.unwrap_err();
+            assert!(matches!(error, ProtocolError::Http(status) if status == expected));
+        }
+    }
+
+    #[tokio::test]
+    async fn oversized_telemetry_requests_are_not_sent() {
+        let server = crate::detail::testing::MockServer::start(vec![(204, "")]);
+        let client = Api::for_loopback_test(&server.url());
+        let mut report = sample_telemetry();
+        report.hostname = Some("x".repeat(MAX_TELEMETRY_REQUEST_BYTES));
+        assert!(matches!(
+            client.telemetry(&report).await,
             Err(ProtocolError::RequestTooLarge { .. })
         ));
         assert!(server.requests().is_empty());

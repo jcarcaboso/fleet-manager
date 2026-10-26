@@ -58,10 +58,14 @@ public sealed partial class PostgresFleetCoordinator
         // At most two rows per Node; the fullest volume is picked here because used + available can be 0.
         var disks = (await db.NodeDiskUsages.AsNoTracking().Where(x => ids.Contains(x.NodeId)).ToListAsync(cancellationToken))
             .GroupBy(x => x.NodeId).ToDictionary(x => x.Key, x => FullestVolume(x));
+        // One row per Node, read for the page only.
+        var agents = (await db.NodeTelemetries.AsNoTracking().Where(x => ids.Contains(x.NodeId)).ToListAsync(cancellationToken))
+            .ToDictionary(x => x.NodeId, x => new NodeAgentSummary(x.AgentVersion,
+                AgentTelemetryRules.IsOutdated(x.AgentVersion, options.LatestAgentVersion), new(x.OsName, x.OsVersion), x.Arch, x.Hostname));
         return MakePage(rows, limit, x => x.Node.Id, x => new NodeStatus(new(x.Node.Id), x.Node.Name, x.Node.RevokedAt != null,
             x.Node.LastContactAt, Freshness(x.Node.LastContactAt, now, staleAfter), x.Node.Platform, x.Node.EnrolledAt,
             x.Node.RevokedAt, x.CredentialNotAfter, StateCounts(counts.Where(c => c.NodeId == x.Node.Id).Select(c => (c.State, c.Count))),
-            x.CurrentRevision, disks.GetValueOrDefault(x.Node.Id)));
+            x.CurrentRevision, disks.GetValueOrDefault(x.Node.Id), agents.GetValueOrDefault(x.Node.Id)));
     }
 
     private static NodeDiskSummary FullestVolume(IEnumerable<NodeDiskUsageRow> rows)
@@ -144,11 +148,16 @@ public sealed partial class PostgresFleetCoordinator
             : new NodeDisk(stored.Count == 0 ? null : stored.Max(x => x.MeasuredAt), node.DiskUsageRefreshRequestedAt,
                 stored.Select(x => new NodeDiskVolume(x.Label, x.TotalBytes, x.UsedBytes, x.AvailableBytes,
                     DiskUsageRules.UsedPercent(x.UsedBytes, x.AvailableBytes))).ToList());
+        var telemetry = await db.NodeTelemetries.AsNoTracking().SingleOrDefaultAsync(x => x.NodeId == id, cancellationToken);
+        var agent = telemetry is null ? null : new NodeAgent(telemetry.AgentVersion, options.LatestAgentVersion.Text,
+            AgentTelemetryRules.IsOutdated(telemetry.AgentVersion, options.LatestAgentVersion),
+            new(telemetry.OsName, telemetry.OsVersion, telemetry.OsKernel), telemetry.Arch, telemetry.Hostname, telemetry.User,
+            telemetry.InstallMethod, telemetry.ServiceManager, telemetry.StateDirectory, telemetry.ReportedAt);
         return new(new(node.Id), node.Name, node.Platform, node.EnrolledAt, node.LastContactAt,
             Freshness(node.LastContactAt, now, staleAfter), node.RevokedAt != null, node.RevokedAt,
             newest is null ? null : new(new(newest.Id), newest.NotBefore, newest.NotAfter, newest.RevokedAt, newest.RevokedBy,
                 credentialCount - 1),
-            targets, StateCounts(current.Select(x => (x.Assignment.State, 1))), disk);
+            targets, StateCounts(current.Select(x => (x.Assignment.State, 1))), disk, agent);
     }
 
     private sealed record LatestAttemptRow(Guid Id, int State, string? ErrorCode, string? Diagnostic, string? FailurePath, string? FailureStep,
@@ -258,6 +267,33 @@ public sealed partial class PostgresFleetCoordinator
         await db.Database.ExecuteSqlInterpolatedAsync(
             $"UPDATE nodes SET \"DiskUsageRefreshRequestedAt\" = NULL WHERE \"Id\" = {nodeId} AND \"DiskUsageRefreshRequestedAt\" <= {now}",
             cancellationToken);
+        await transaction.CommitAsync(cancellationToken);
+    }
+
+    public async Task RecordAgentTelemetryAsync(NodeAuthentication authentication, AgentTelemetryReport report,
+        CancellationToken cancellationToken = default)
+    {
+        var sanitized = AgentTelemetryRules.Sanitize(report);
+        await Authenticate(authentication, clock.GetUtcNow(), false, cancellationToken);
+        var nodeId = authentication.NodeId.Value;
+        await using var transaction = await db.Database.BeginTransactionAsync(IsolationLevel.ReadCommitted, cancellationToken);
+        // The Node row lock serializes reports of one Node, and a Node removed in the meantime cannot violate the foreign key.
+        var node = await db.Nodes.FromSqlInterpolated($"SELECT * FROM nodes WHERE \"Id\" = {nodeId} FOR UPDATE").AsNoTracking()
+            .SingleOrDefaultAsync(cancellationToken);
+        if (node is null || node.RevokedAt is not null) throw Error("node_unauthorized", "Node credential is not active.");
+        var now = TruncateToMicroseconds(clock.GetUtcNow());
+        await db.Database.ExecuteSqlInterpolatedAsync($$"""
+            INSERT INTO node_telemetry ("NodeId", "AgentVersion", "OsName", "OsVersion", "OsKernel", "Arch", "Hostname", "User",
+                "InstallMethod", "ServiceManager", "StateDirectory", "ReportedAt")
+            VALUES ({{nodeId}}, {{sanitized.AgentVersion}}, {{sanitized.OsName}}, {{sanitized.OsVersion}}, {{sanitized.OsKernel}},
+                {{sanitized.Arch}}, {{sanitized.Hostname}}, {{sanitized.User}}, {{sanitized.InstallMethod}}, {{sanitized.ServiceManager}},
+                {{sanitized.StateDirectory}}, {{now}})
+            ON CONFLICT ("NodeId") DO UPDATE SET "AgentVersion" = EXCLUDED."AgentVersion", "OsName" = EXCLUDED."OsName",
+                "OsVersion" = EXCLUDED."OsVersion", "OsKernel" = EXCLUDED."OsKernel", "Arch" = EXCLUDED."Arch",
+                "Hostname" = EXCLUDED."Hostname", "User" = EXCLUDED."User", "InstallMethod" = EXCLUDED."InstallMethod",
+                "ServiceManager" = EXCLUDED."ServiceManager", "StateDirectory" = EXCLUDED."StateDirectory",
+                "ReportedAt" = EXCLUDED."ReportedAt"
+            """, cancellationToken);
         await transaction.CommitAsync(cancellationToken);
     }
 

@@ -14,11 +14,25 @@ public sealed class WireContractTests
             "studio-mini", false, new DateTimeOffset(2026, 10, 25, 14, 29, 10, TimeSpan.Zero), FreshnessState.Fresh, "macos",
             new DateTimeOffset(2026, 9, 1, 10, 0, 0, TimeSpan.Zero), null, new DateTimeOffset(2026, 10, 30, 9, 0, 0, TimeSpan.Zero),
             new(0, 0, 4, 1, 0), "a3f9c21d0c5b4e8f9a1b2c3d4e5f60718293a4b5",
-            new("home", 92.3, 871203905536, 72818462720, 994662584320, new DateTimeOffset(2026, 10, 25, 12, 0, 0, TimeSpan.Zero)))], null);
+            new("home", 92.3, 871203905536, 72818462720, 994662584320, new DateTimeOffset(2026, 10, 25, 12, 0, 0, TimeSpan.Zero)),
+            new("0.8.0", true, new("Fedora Linux", "44"), "x86_64", "studio-mini.home.arpa"))], null);
         var options = new JsonSerializerOptions(JsonSerializerDefaults.Web);
         WireJson.Configure(options);
         var actual = JsonSerializer.SerializeToNode(page, options);
         var expected = JsonNode.Parse(File.ReadAllText(Path.Combine(AppContext.BaseDirectory, "contracts/operator/nodes-page.json")));
+        Assert.True(JsonNode.DeepEquals(expected, actual));
+    }
+
+    [Fact]
+    public void Node_detail_agent_matches_the_fixture_read_by_the_Rust_CLI()
+    {
+        var agent = new NodeAgent("0.8.0", "0.8.1", true, new("Fedora Linux", "44", "7.2.11-200.fc44.x86_64"), "x86_64",
+            "studio-mini.home.arpa", "joan", "homebrew", "systemd", "~/.local/state/fleet-agent",
+            new DateTimeOffset(2026, 10, 25, 12, 0, 0, TimeSpan.Zero));
+        var options = new JsonSerializerOptions(JsonSerializerDefaults.Web);
+        WireJson.Configure(options);
+        var actual = JsonSerializer.SerializeToNode(agent, options);
+        var expected = JsonNode.Parse(File.ReadAllText(Path.Combine(AppContext.BaseDirectory, "contracts/operator/node-detail.json")))!["agent"];
         Assert.True(JsonNode.DeepEquals(expected, actual));
     }
 

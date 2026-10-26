@@ -70,6 +70,13 @@
     }
   }
 
+  /* Phase 3 helpers. */
+  const $$ = s => [...document.querySelectorAll(s)];
+  const cardOf = alias => $$('.card').find(c => c.querySelector('h3')?.textContent === alias);
+  const names = () => $$('.card h3').map(h => h.textContent);
+  const secTitles = () => $$('.gsec h2').map(h => { const c = h.cloneNode(true); c.querySelectorAll('.cnt,.gsec-ic').forEach(x => x.remove()); return c.textContent.trim() + ':' + h.querySelector('.cnt').textContent; });
+  const kv = label => { const d = $$('#machine-panel dt').find(x => x.textContent === label); return d ? d.nextElementSibling.textContent.trim() : null; };
+
   const S = {
     async login() {
       await until(() => $('#operator-token'), 'login form');
@@ -1016,6 +1023,170 @@
       expect(hostile() && bad() === 0, 'Problems: the label in the issue text shows as text (' + bad() + ')');
       location.hash = '#/nodes/homelab-nuc/problems'; await until(() => $('.prob'), 'machine problems'); await wait(100);
       expect(bad() === 0, 'machine Problems tab: no injected element (' + bad() + ')');
+      await wait(300);
+      expect(alerts === 0, 'alert was never called');
+    },
+    /* ---------------------------------------------------------------- phase 3: Agent and machine information */
+    /* Cards: OS and version, Agent version, the update chip, the platform fallback. Open: ?drive=agentGallery#/nodes */
+    async agentGallery() {
+      await until(() => $('.card'), 'cards');
+      const c = cardOf('studio-mini');
+      expect(/macOS 15\.0 · aarch64/.test(c.querySelector('.card-sub').textContent), 'card shows OS name and version with the architecture: ' + c.querySelector('.card-sub').textContent);
+      expect(/studio-mini\.lan/.test(c.querySelector('.card-host').textContent), 'card shows the hostname');
+      expect(/Agent 0\.9\.0$/.test(c.querySelector('.agent-badge').textContent.trim()) && !c.querySelector('.chip--update'), 'an up-to-date Agent shows its version and no update chip');
+      const o = cardOf('fedora-ws'), chip = o.querySelector('.chip--update');
+      expect(chip && /Update available/.test(chip.textContent) && chip.querySelector('svg'), 'an outdated Agent has the Update available chip with an icon');
+      expect(o.querySelector('.agent-badge.is-old') && /0\.9\.0-rc\.2/.test(o.querySelector('.agent-badge').textContent), 'its badge shows the old version in the warning style');
+      expect(/Fedora Linux 44 · x86_64/.test(o.querySelector('.card-sub').textContent), 'Linux card shows Fedora Linux 44');
+      expect(/Arch Linux · x86_64/.test(cardOf('gpu-box').querySelector('.card-sub').textContent), 'an OS without a version shows just its name: ' + cardOf('gpu-box').querySelector('.card-sub').textContent);
+      const k = cardOf('kitchen-mini');
+      expect(/^macOS · enrolled /.test(k.querySelector('.card-sub').textContent) && !k.querySelector('.card-host') && !k.querySelector('.chip--update'), 'no Agent report: falls back to the platform, no host line, no chip');
+      expect(/macOS$/.test(k.querySelector('.agent-badge').textContent.trim()), 'no Agent report: badge shows the platform');
+      document.querySelector('.retired').open = true; await wait(100);
+      const r = cardOf('old-laptop');
+      expect(r && !r.querySelector('.chip--update'), 'a revoked machine gets no update chip even though its Agent is outdated');
+      expect($$('.chip--update').length === 4, 'four outdated Agents carry the chip: ' + $$('.chip--update').length);
+    },
+    /* Search matches OS, hostname and Agent version. Open: ?drive=agentSearch#/nodes */
+    async agentSearch() {
+      await until(() => $('#q'), 'search');
+      type($('#q'), 'nuc.lab'); await wait(150);
+      expect(names().join() === 'homelab-nuc', 'search by hostname finds homelab-nuc: ' + names());
+      type($('#q'), 'Anas-MacBook'); await wait(150);
+      expect(names().join() === 'laptop-ana', 'hostname search is case-insensitive: ' + names());
+      type($('#q'), 'ubuntu 24.04'); await wait(150);
+      expect(names().sort().join() === 'build-runner-01,build-runner-02,build-runner-03', 'search by OS name and version: ' + names());
+      type($('#q'), 'rc.1'); await wait(150);
+      expect(names().sort().join() === 'build-runner-03,mba-travel', 'search by Agent version: ' + names());
+      type($('#q'), 'outdated'); await wait(150);
+      expect(names().length === 4, 'search for "outdated" finds the four Agents with an update: ' + names());
+      type($('#q'), 'x86_64 fedora'); await wait(150);
+      expect(names().sort().join() === 'fedora-ws,homelab-nuc', 'several words must all match: ' + names());
+      type($('#q'), 'nothing-like-this'); await wait(150);
+      expect(/No machines match/.test($('#gallery-body').textContent) && /hostname/.test($('#gallery-body').textContent), 'empty result explains what can be searched');
+      type($('#q'), 'studio-mini.lan'); await wait(150);
+    },
+    /* Group by OS and sort by outdated Agents. Open: ?drive=agentGroup#/nodes */
+    async agentGroup() {
+      await until(() => $('.card'), 'cards');
+      click($('[data-act=group][data-v=os]')); await wait(150);
+      const heads = secTitles();
+      expect(heads.join('|') === 'Arch Linux:1|Fedora Linux:2|macOS:5|Ubuntu:3|OS not reported:2', 'groups by OS name, unreported last: ' + heads.join('|'));
+      expect(/macOS 15\.1, 15\.0 and 14\.6/.test($('#sec-os-macos .gsec-head p')?.textContent || ''), 'a group lists its OS versions: ' + $('#sec-os-macos .gsec-head p')?.textContent);
+      expect(/Agents before 0\.9\.0 do not send machine details/.test($('#sec-os-none')?.textContent || ''), 'the unreported group explains why');
+      click($('[data-act=group][data-v=platform]')); await wait(150);
+      expect(secTitles().join() === 'macOS:6,Linux:7', 'Platform grouping still works: ' + secTitles());
+      click($('[data-act=group][data-v=status]')); await wait(100);
+      expect([...$('#sort').options].some(o => o.value === 'outdated' && o.textContent === 'Outdated Agents first'), 'the sort is offered as "Outdated Agents first"');
+      type($('#sort'), 'outdated'); await wait(150);
+      const n = names();
+      expect(n.slice(0, 4).sort().join() === 'build-runner-03,fedora-ws,laptop-ana,mba-travel', 'outdated Agents come first: ' + n.slice(0, 5));
+      expect(/^Agent update available:4\|Needs attention:/.test(secTitles().join('|')), 'in their own section ahead of the health sections: ' + secTitles().join('|'));
+      expect(!$$('#sec-attention .chip--update, #sec-ok .chip--update').length, 'and not repeated further down');
+    },
+    /* Header and Machine panel. Open: ?drive=agentNode#/nodes/studio-mini */
+    async agentNode() {
+      await until(() => $('#machine-panel .kv'), 'machine panel');
+      const sub = $('.nhero-sub').textContent;
+      expect(/studio-mini\.lan/.test(sub) && /signed in as joan/.test(sub) && /macOS 15\.0/.test(sub) && /aarch64/.test(sub), 'header line: host, user, OS, arch: ' + sub);
+      const f = [...document.querySelectorAll('.facts > div')].find(d => d.querySelector('dt').textContent === 'Agent');
+      expect(f && /0\.9\.0/.test(f.textContent) && /Homebrew/.test(f.textContent) && !f.querySelector('svg'), 'Agent fact shows version and install method, no warning: ' + f?.textContent);
+      const want = { Hostname: 'studio-mini.lan', User: 'joan', 'Operating system': 'macOS 15.0', Kernel: '24.0.0', Architecture: 'aarch64', 'Install method': 'Homebrew', 'Service manager': 'launchd LaunchAgent', 'State directory': '~/.local/state/fleet-agent' };
+      for (const [k, v] of Object.entries(want)) expect(kv(k) === v, `Machine panel ${k}: ${kv(k)}`);
+      expect(/^0\.9\.0 latest release$/.test(kv('Agent version')), 'Agent version vs latest: ' + kv('Agent version'));
+      expect(/UTC · /.test(kv('Reported')), 'reported time: ' + kv('Reported'));
+      expect(!$('#agent-upgrade') && !$('#machine-panel .chip--update'), 'an up-to-date Agent has no callout and no chip');
+      expect(/Agent is up to date/.test($('.hchecks').textContent), 'health check says the Agent is up to date');
+      location.hash = '#/nodes/gpu-box'; await until(() => kv('Hostname') === 'gpu-box', 'gpu-box');
+      expect(kv('Operating system') === 'Arch Linux' && kv('Service manager') === 'None (not run as a service)', 'null OS version and no service manager: ' + kv('Operating system') + ' / ' + kv('Service manager'));
+      location.hash = '#/nodes/studio-mini'; await until(() => kv('Hostname') === 'studio-mini.lan', 'back');
+    },
+    /* Upgrade callout for each install method. Open: ?drive=agentUpgrade#/nodes/fedora-ws */
+    async agentUpgrade() {
+      const cmds = () => [...document.querySelectorAll('#agent-upgrade .cmd')].map(c => c.querySelector('button').dataset.copy);
+      const t = () => $('#agent-upgrade').textContent;
+      await until(() => $('#agent-upgrade'), 'callout');
+      expect(/Update available: Agent 0\.9\.0-rc\.2 → 0\.9\.0/.test(t()), 'title names both versions: ' + t().slice(0, 60));
+      expect(/Download the v0\.9\.0 archive, replace the binary at the same path and restart the service/.test(t()), 'binary: archive text');
+      expect(cmds().join() === 'systemctl --user restart fleet-agent.service', 'binary on systemd: restart command ' + cmds());
+      expect($('#agent-upgrade a')?.getAttribute('href') === 'https://github.com/jcarcaboso/fleet-manager/releases/tag/v0.9.0' && $('#agent-upgrade a').rel.includes('noopener'), 'binary: release link');
+      expect(/Update available/.test($('#machine-panel .chip--update')?.textContent || '') && /latest 0\.9\.0/.test(kv('Agent version')), 'Agent version cell: chip and latest');
+      const f = [...document.querySelectorAll('.facts > div')].find(d => d.querySelector('dt').textContent === 'Agent');
+      expect(f.querySelector('svg') && /0\.9\.0 available/.test(f.textContent), 'header Agent fact warns: ' + f.textContent);
+      expect(/Agent update available/.test($('.hchecks').textContent), 'health check warns');
+      expect($('#agent-upgrade .cmd .copy')?.dataset.act === 'copy', 'the command has a copy button');
+      location.hash = '#/nodes/mba-travel'; await until(() => $('#agent-upgrade[data-method=homebrew]'), 'homebrew callout');
+      expect(cmds().join('|') === 'brew upgrade fleet-agent|brew services restart fleet-agent', 'Homebrew: brew upgrade, then restart: ' + cmds().join('|'));
+      location.hash = '#/nodes/laptop-ana'; await until(() => $('#agent-upgrade[data-method=cargo]'), 'cargo callout');
+      expect(cmds()[0] === 'cargo install --locked --force \\\n    --git https://github.com/jcarcaboso/fleet-manager \\\n    --tag v0.9.0 \\\n    fleet fleet-agent', 'Cargo: release-tag install command from cli-installation.md: ' + JSON.stringify(cmds()[0]));
+      expect(cmds()[1] === 'launchctl kickstart -k "gui/$(id -u)/dev.fleet.agent"', 'Cargo on launchd: restart with the real label: ' + cmds()[1]);
+      location.hash = '#/nodes/build-runner-03'; await until(() => $('#agent-upgrade[data-method=binary]') && kv('Hostname') === 'runner-03', 'binary without a service');
+      expect(cmds().length === 0 && /restart the service/.test(t()), 'binary, no service manager: text only, no restart command');
+      location.hash = '#/nodes/old-laptop'; await until(() => kv('Hostname') === 'old-laptop', 'revoked');
+      expect(!$('#agent-upgrade') && !$('#machine-panel .chip--update'), 'a revoked machine gets no upgrade callout');
+      location.hash = '#/nodes/fedora-ws'; await until(() => $('#agent-upgrade'), 'back to fedora-ws');
+    },
+    /* An Agent that never reported. Open: ?drive=agentNull#/nodes/kitchen-mini */
+    async agentNull() {
+      await until(() => $('#machine-panel'), 'machine panel');
+      expect($('#machine-panel .machine-none')?.textContent === 'Not reported. Agents before 0.9.0 do not send machine details.', 'one quiet line: ' + $('#machine-panel').textContent);
+      expect(!$('#machine-panel dl') && !$('#agent-upgrade'), 'no fields, no callout');
+      expect(/macOS machine · enrolled/.test($('.nhero-sub').textContent), 'header falls back to the platform: ' + $('.nhero-sub').textContent);
+      const f = [...document.querySelectorAll('.facts > div')].find(d => d.querySelector('dt').textContent === 'Agent');
+      expect(f && /not reported/.test(f.textContent), 'Agent fact says not reported');
+      expect(!/Agent (is up to date|update available)/.test($('.hchecks').textContent), 'no Agent health check');
+      location.hash = '#/nodes/lab-vm-07'; await until(() => $('.machine-none') && /lab-vm-07/.test($('h1').textContent), 'lab-vm-07');
+      expect($('.machine-none') && !$('#agent-upgrade'), 'a machine that never polled shows the same line');
+    },
+    /* A Server before phase 3 sends no agent property at all. Open: ?drive=agentOldServer&agent=0#/nodes */
+    async agentOldServer() {
+      await until(() => $('.card'), 'cards');
+      expect(!$('.chip--update') && $$('.card-host').length === 0, 'cards: no chips, no host lines');
+      expect(/^Linux · enrolled /.test(cardOf('fedora-ws').querySelector('.card-sub').textContent), 'cards fall back to the platform');
+      click($('[data-act=group][data-v=os]')); await wait(100);
+      expect(secTitles().join() === 'OS not reported:13', 'OS grouping puts everything under "not reported"');
+      location.hash = '#/nodes/fedora-ws'; await until(() => $('.machine-none'), 'node page');
+      expect(!$('#agent-upgrade'), 'node page: not reported line, no callout');
+      location.hash = '#/problems'; await until(() => $('.prow'), 'problems');
+      expect(![...document.querySelectorAll('.prow b')].some(b => /Agent is outdated/.test(b.textContent)), 'no agent_outdated issue');
+    },
+    /* agent_outdated on Problems and on the machine. Open: ?drive=agentProblems#/problems */
+    async agentProblems() {
+      await until(() => $('.prow'), 'problems');
+      const rows = [...document.querySelectorAll('.prow')].filter(r => /Agent is outdated/.test(r.querySelector('b').textContent));
+      expect(rows.length === 4, 'one issue per outdated, non-revoked machine: ' + rows.length);
+      rows.forEach(r => { r.open = true; }); await wait(100);
+      const r = rows.find(x => /fedora-ws/.test(x.textContent));
+      expect(/Warning/.test(r.querySelector('summary').textContent) && /fedora-ws: Agent is outdated/.test(r.querySelector('b').textContent), 'warning with the title');
+      expect(/lower than the Server/.test(r.querySelector('.prob-expl').textContent) && /runs version 0\.9\.0-rc\.2; the latest version is 0\.9\.0/.test(r.querySelector('.prob-expl').textContent), 'catalog text and the specific detail: ' + r.querySelector('.prob-expl').textContent);
+      const steps = [...r.querySelectorAll('.fix li')].map(l => l.textContent);
+      expect(/release archive/.test(steps[0]) && steps.length === 6, 'the action for the install method comes first, then the catalog steps: ' + steps.length);
+      expect([...r.querySelectorAll('.cmd code')].map(c => c.textContent).join() === 'fleet nodes show fedora-ws', 'command: fleet nodes show');
+      const h = rows.find(x => /mba-travel/.test(x.textContent));
+      expect(/Upgrade with brew upgrade fleet-agent/.test(h.querySelector('.fix li').textContent), 'Homebrew machine: the action is the first step');
+      const c = rows.find(x => /laptop-ana/.test(x.textContent));
+      expect(/--tag v0\.9\.0/.test(c.querySelector('.fix li').textContent), 'Cargo machine: action has the release tag');
+      expect(!document.body.textContent.includes('old-laptop: Agent is outdated'), 'revoked machine has no issue');
+      location.hash = '#/nodes/fedora-ws/problems'; await until(() => $('.prob h3'), 'machine problems');
+      const p = [...document.querySelectorAll('.prob')].find(x => /Agent is outdated/.test(x.querySelector('h3').textContent));
+      expect(p && /release archive/.test(p.querySelector('.fix').textContent) && /fleet nodes show fedora-ws/.test(p.textContent), 'machine Problems tab shows it too');
+      expect(/Problems\s*\d/.test($('.tabs').textContent), 'the Problems tab counts it');
+    },
+    /* Hostile hostname, OS name, user and state directory. Open: ?drive=agentXss&xss=1#/nodes */
+    async agentXss() {
+      let alerts = 0; window.alert = () => { alerts++; };
+      const bad = () => document.querySelectorAll('#root img, #root script, #root svg[onload], #root [onerror], #root [onclick], #root [onload]').length;
+      const shown = s => document.body.textContent.includes(s);
+      await until(() => $('.card'), 'cards');
+      expect(shown('<img src=x onerror=alert(1)>.lab') && bad() === 0, 'gallery card: hostname is text (' + bad() + ')');
+      type($('#q'), 'onerror'); await wait(150);
+      expect(names().join() === 'homelab-nuc', 'the hostile hostname is searchable as text: ' + names());
+      type($('#q'), '');
+      click($('[data-act=group][data-v=os]')); await wait(150);
+      expect(shown('<svg onload=alert(7)> Linux') && bad() === 0, 'OS grouping: the hostile OS name is a title as text (' + bad() + ')');
+      location.hash = '#/nodes/homelab-nuc'; await until(() => $('#machine-panel .kv'), 'node page');
+      expect(bad() === 0 && kv('Hostname') === '<img src=x onerror=alert(1)>.lab' && kv('User').includes('<script>') && kv('Operating system').startsWith('<svg onload=alert(7)> Linux') && kv('State directory').includes('<img'), 'Machine panel shows every hostile value as text (' + bad() + ')');
+      expect($('.nhero-sub').textContent.includes('<img src=x onerror=alert(1)>.lab') && bad() === 0, 'header line is text');
       await wait(300);
       expect(alerts === 0, 'alert was never called');
     },

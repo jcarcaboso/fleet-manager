@@ -426,3 +426,81 @@ one decimal, which is how `df` computes it.
   `disk_space_critical` (error, 95% used or more), one per Node, using the
   fullest volume. `since` is `measuredAt`. `commands` include
   `fleet nodes disk <alias>` and `fleet nodes disk <alias> --refresh`.
+
+## Phase 3: Agent and machine information
+
+Agents report who and what they run as, so the dashboard can show OS, Agent
+version and install details, and flag outdated Agents.
+
+### Agent behaviour
+
+- The Agent builds the report from cheap local sources only:
+  - `agentVersion`: its own crate version.
+  - `os.name` and `os.version`: on Linux, `NAME` and `VERSION_ID` from
+    `/etc/os-release` (or `/usr/lib/os-release`); on macOS, `ProductName` and
+    `ProductVersion` from `/System/Library/CoreServices/SystemVersion.plist`.
+  - `os.kernel`: the `uname` release.
+  - `arch`: the compile-time architecture, such as `x86_64` or `aarch64`.
+  - `hostname`: from `gethostname`.
+  - `user`: the login name of the effective user.
+  - `installMethod`: derived from the executable path. `homebrew` if it is
+    under a Homebrew prefix (`/opt/homebrew`, `/usr/local/Cellar`,
+    `/home/linuxbrew`, `.linuxbrew`), `cargo` if it is under `~/.cargo/bin`,
+    otherwise `binary`.
+  - `serviceManager`: `systemd` when `INVOCATION_ID` is set, `launchd` when
+    `XPC_SERVICE_NAME` is set and is not `0`, otherwise `none`.
+  - `stateDirectory`: with the home directory replaced by `~`.
+- It never runs subprocesses or walks directories. A field it cannot read is
+  `null`.
+- It sends the report after the first successful poll, then whenever the
+  values change, checked at the same 4-hour slot as disk usage. A failed
+  report is retried at the next slot. HTTP 404 means an older Server.
+
+### `PUT /agent/v1/telemetry` (Node mTLS)
+
+```json
+{
+  "agentVersion": "0.9.0",
+  "os": { "name": "Fedora Linux", "version": "44", "kernel": "7.2.11-200.fc44.x86_64" },
+  "arch": "x86_64",
+  "hostname": "studio-mini.home.arpa",
+  "user": "joan",
+  "installMethod": "homebrew",
+  "serviceManager": "launchd",
+  "stateDirectory": "~/.local/state/fleet-agent"
+}
+```
+
+- Every property is present. `os` is an object whose fields may be `null`.
+  Other fields may be `null`, except `agentVersion`, which must be
+  `MAJOR.MINOR.PATCH` with an optional `-prerelease` tag.
+- Strings have control characters removed and are at most 128 characters
+  (`stateDirectory`: 512). `installMethod` is `homebrew`, `cargo` or `binary`.
+  `serviceManager` is `systemd`, `launchd` or `none`.
+- 204 on success. 400 `invalid_request`. 429 `rate_limited`, from the shared
+  per-Node limiter. The Server stores only the latest report per Node, with
+  `reportedAt` set to the time it received the report.
+
+### Operator API
+
+`latestVersion` is the Server's own version: Server and Agent releases share
+version numbers. `outdated` is true when `agentVersion` is lower than
+`latestVersion` under semantic versioning, where a prerelease sorts below its
+release.
+
+- `GET nodes` items gain `agent`:
+  `{ "version", "outdated", "os": { "name", "version" }, "arch", "hostname" }`,
+  or `null` if the Node never reported.
+- `GET nodes/{node}` gains `agent`:
+  `{ "version", "latestVersion", "outdated", "os": { "name", "version", "kernel" }, "arch", "hostname", "user", "installMethod", "serviceManager", "stateDirectory", "reportedAt" }`,
+  or `null`.
+- `GET issues` adds `agent_outdated` (warning), one per non-revoked Node with
+  `outdated: true`. `since` is `reportedAt`. `commands` include
+  `fleet nodes show <alias>`. Its `detail` names the running and the latest
+  version, and its `action` gives the upgrade command for the install
+  method:
+  - Homebrew: `brew upgrade fleet-agent`.
+  - Cargo: reinstall with Cargo from the release tag, as in
+    `cli-installation.md`.
+  - Binary: replace the binary from the release archive and restart the
+    service.

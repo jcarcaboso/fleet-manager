@@ -48,7 +48,12 @@ public static class FleetServerHosting
         builder.Services.AddScoped<CliProxySelectionStore>();
         builder.Services.AddScoped<IFleetCoordinator>(services => new PostgresFleetCoordinator(
             services.GetRequiredService<FleetDbContext>(), services.GetRequiredService<TimeProvider>(),
-            new FleetCoordinationOptions { WorkspaceId = new WorkspaceId(services.GetRequiredService<IOptions<FleetOptions>>().Value.WorkspaceId) }));
+            new FleetCoordinationOptions
+            {
+                WorkspaceId = new WorkspaceId(services.GetRequiredService<IOptions<FleetOptions>>().Value.WorkspaceId),
+                LatestAgentVersion = services.GetRequiredService<LatestAgentVersion>().Value
+            }));
+        builder.Services.AddSingleton(new LatestAgentVersion(ServerVersion.Current));
         builder.Services.AddSingleton<IEnrolledNodeSource, RegisteredNodeSource>();
         builder.Services.AddSingleton<SourcePollingService>();
         builder.Services.AddHostedService(services => services.GetRequiredService<SourcePollingService>());

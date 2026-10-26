@@ -114,6 +114,15 @@ from the catalog entry for the issue's `errorCode`, else for its `code`, and is
 `error`. The command exits 0 when `ok` is true and 10 when it is false; warnings
 alone exit 0. The document is printed in both cases.
 
+### `nodes list` and `nodes show`: `agent`
+
+Both print the Server's JSON unchanged, so the phase 3 `agent` property flows through ([Operator API](operator-api.md), "Phase 3: Agent and machine
+information"). Items of `nodes list` carry `{"version", "outdated", "os": {"name", "version"}, "arch", "hostname"}`; `nodes show` adds `latestVersion`,
+`os.kernel`, `user`, `installMethod`, `serviceManager`, `stateDirectory` and `reportedAt`. `agent` is `null` when the Node never reported (always the case for
+Agents before 0.9.0) and absent from a Server that predates phase 3; neither is an error. `fleet doctor` and `fleet issues list` print the `agent_outdated`
+warning like any other issue: `action` names the upgrade command for the install method and `commands` holds `fleet nodes show <node>`. There is no command
+that upgrades an Agent; the operator tells the person who owns the machine.
+
 ### `nodes disk`
 
 `fleet nodes disk <node>` reads `GET nodes/{node}` and prints only the Node's alias and its `disk` object, so the output is small and the same shape every

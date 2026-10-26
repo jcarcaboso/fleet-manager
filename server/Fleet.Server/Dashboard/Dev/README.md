@@ -32,7 +32,8 @@ Query switches go before the `#`:
 | `slow=<ms>` | Delay every response. Shows the loading skeletons. |
 | `pagesize=<n>` | Cap page size to exercise cursors and "load more". |
 | `diag=0` | Attempts carry no phase 2 detail at all (`diagnostic`, `path` and `step` are `null`), like a Server or Agents before phase 2. |
-| `xss=1` | Every failed Attempt that has detail carries a hostile `diagnostic` and `path` (`<img src=x onerror=alert(1)>`, `"><script>`) so the escaping can be checked. The fullest volume of `homelab-nuc` also gets a hostile `label`. |
+| `xss=1` | Every failed Attempt that has detail carries a hostile `diagnostic` and `path` (`<img src=x onerror=alert(1)>`, `"><script>`) so the escaping can be checked. The fullest volume of `homelab-nuc` also gets a hostile `label`, and its Agent report a hostile `hostname`, `user`, `os.name` and `stateDirectory`. |
+| `agent=0` | No Node carries the `agent` property and no `agent_outdated` issue exists, like a Server before phase 3. |
 | `diskdelay=<ms>` | How long a refreshed Agent takes to answer `POST nodes/{node}/disk-usage/refresh` (default 7000). Agents before 0.9.0 and machines that are not checking in never answer. |
 | `enroll=0` | The wizard's simulated enrollment never happens. |
 | `enroll=link` | The link is consumed and the Node exists, but the Agent never checks in. |
@@ -105,6 +106,43 @@ Run each on `harness.html` and `harness-csp.html`; the CSP harness must log no v
 The gallery cards are taller with the disk meter, so the scenarios that need the first row of strips on screen under `iostub=1` (`stripsScroll`, `stripsRetry`,
 `stripsAway`) need a window at least 1100 px high (`--window-size=1440,1100`).
 
+## Agent and machine information (phase 3)
+
+The fixture follows `docs/technical-design/operator-api.md`, "Phase 3: Agent and machine information": `agent` on `GET nodes` items
+(`version`, `outdated`, `os.name`, `os.version`, `arch`, `hostname`) and on `GET nodes/{node}` (adds `latestVersion`, `os.kernel`, `user`, `installMethod`,
+`serviceManager`, `stateDirectory`, `reportedAt`), `null` for a Node that never reported, and the `agent_outdated` warning on `GET issues` (the Server's own wording,
+`since` is `reportedAt`, `action` names the upgrade command for the install method, `commands` is `fleet nodes show <alias>`) with its catalog entry.
+`latestVersion` is `0.9.0` and `outdated` is computed with semantic versioning (a prerelease sorts below its release). `data.js` predates phase 3: its OS strings,
+hostnames, users and install methods are mapped onto the contract (`archive` and `systemd` become `binary`, `amd64` becomes `x86_64`).
+Only Agents from 0.9.0 report, so the outdated ones are prereleases of 0.9.0 (an Agent before 0.9.0 reports nothing, the same story as disk usage and `kitchen-mini`).
+
+| Machine | `agent` |
+|---|---|
+| `fedora-ws` | `0.9.0-rc.2`, `binary`, `systemd`: outdated |
+| `build-runner-03` | `0.9.0-rc.1`, `binary`, `none`: outdated (and offline) |
+| `mba-travel` | `0.9.0-rc.1`, `homebrew`, `launchd`: outdated |
+| `laptop-ana` | `0.9.0-beta.4`, `cargo`, `launchd`: outdated |
+| `gpu-box` | `0.9.0`, `binary`, `none`; Arch Linux has no `VERSION_ID`, so `os.version` is `null` |
+| `old-laptop` (revoked) | `0.9.0-beta.2`: `outdated` is true but there is no issue and the dashboard shows no chip |
+| `kitchen-mini`, `lab-vm-07` | `null` (Agent before 0.9.0; never polled) |
+| all others | `0.9.0`, up to date |
+
+| Scenario | Open |
+|---|---|
+| `agentGallery` | `?drive=agentGallery#/nodes` (OS and version, architecture, hostname and Agent version on cards; Update available chip with icon on the four outdated Agents, none on a revoked one; platform fallback and no host line without a report) |
+| `agentSearch` | `?drive=agentSearch#/nodes` (search by hostname, OS name and version, Agent version, "outdated"; several words; empty state) |
+| `agentGroup` | `?drive=agentGroup#/nodes` (Group by OS with versions and an "OS not reported" group; Platform still works; "Outdated Agents first" lifts those machines into their own section) |
+| `agentNode` | `?drive=agentNode#/nodes/studio-mini` (header line, Agent fact, every Machine panel field, health check, `null` fields shown as "Not reported") |
+| `agentUpgrade` | `?drive=agentUpgrade#/nodes/fedora-ws` (upgrade callout per install method: binary with the systemd restart command and release link, Homebrew, Cargo with the release-tag command and the launchd restart, binary without a service; none for a revoked machine) |
+| `agentNull` | `?drive=agentNull#/nodes/kitchen-mini` (one quiet line: "Not reported. Agents before 0.9.0 do not send machine details.") |
+| `agentOldServer` | `?drive=agentOldServer&agent=0#/nodes` (no `agent` property anywhere: fallbacks, no chips, no issue) |
+| `agentProblems` | `?drive=agentProblems#/problems` (one `agent_outdated` warning per outdated, non-revoked machine, with catalog text, the install-method action first, `fleet nodes show`; also on the machine's Problems tab) |
+| `agentXss` | `?drive=agentXss&xss=1#/nodes` (hostile hostname, user, OS name and state directory render as text on the gallery, in OS grouping, in search and on the machine page) |
+
+Run each on `harness.html` and `harness-csp.html`; the CSP harness must log no violation.
+Cards are taller with the Agent lines. Run `stripsDrop` and `stripsCancel` in the 3000 px window as before and do not run many Chrome instances at once:
+`stripsDrop` is timing-sensitive under load.
+
 ## Fixture and the Server
 
 The fixture's mutations are checked against the Server, not against the contract's prose. What differs from a naive fake:
@@ -132,7 +170,7 @@ The `fixtureContract` scenario asserts these.
 Add `--enable-logging=stderr --v=0 --dump-dom` to see console messages and the DOM. With `?drive=scan#/route` the
 page appends a PASS/FAIL log (stray `undefined`/`NaN` text, `h1`, horizontal overflow) to the DOM dump.
 Other scenarios: `login`, `logout`, `retry`, `revoke`, `revokeConfirm`, `remove`, `removeConfirm`, `rename`, `wizard`,
-`wizardStep2`, `wizardStep3`, `revokeLink`, `scopeRead`, `models`, `sync`, `range`, `search`, `expire`, `forbid`, `fixtureContract`, the phase 2 `detail*` scenarios and the `disk*` scenarios below.
+`wizardStep2`, `wizardStep3`, `revokeLink`, `scopeRead`, `models`, `sync`, `range`, `search`, `expire`, `forbid`, `fixtureContract`, the phase 2 `detail*` scenarios, the `disk*` scenarios and the phase 3 `agent*` scenarios.
 
 Scenarios that need switches and a route:
 

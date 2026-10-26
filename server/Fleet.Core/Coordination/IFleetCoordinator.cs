@@ -111,6 +111,15 @@ public interface IFleetCoordinator
         string requestedBy,
         CancellationToken cancellationToken = default);
 
+    /// <summary>
+    /// Replaces the Node's stored telemetry with the report, in one transaction under the Node row lock.
+    /// The report is validated with <see cref="AgentTelemetryRules"/>; invalid reports throw invalid_request.
+    /// </summary>
+    Task RecordAgentTelemetryAsync(
+        NodeAuthentication authentication,
+        AgentTelemetryReport report,
+        CancellationToken cancellationToken = default);
+
     Task<Page<NodeStatus>> GetNodesAsync(
         PageRequest page,
         DateTimeOffset now,

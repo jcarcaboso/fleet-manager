@@ -36,7 +36,8 @@ public static partial class OperatorIssues
     private sealed record FailedAssignment(Guid NodeId, string NodeName, string TargetName, DateTimeOffset? FirstFailedAt, LatestFailure? Latest);
 
     public static async Task<IReadOnlyList<OperatorIssue>> ReadAsync(FleetDbContext db, IFleetCoordinator coordinator,
-        CliProxyCatalog catalog, IOptions<FleetOptions> options, IConfiguration configuration, TimeProvider clock, CancellationToken ct)
+        CliProxyCatalog catalog, IOptions<FleetOptions> options, IConfiguration configuration, TimeProvider clock,
+        SemanticVersion latestAgentVersion, CancellationToken ct)
     {
         var settings = options.Value;
         var now = clock.GetUtcNow();
@@ -58,6 +59,7 @@ public static partial class OperatorIssues
         }
 
         issues.AddRange(await DiskIssuesAsync(db, nodes, ct));
+        issues.AddRange(await OutdatedAgentIssuesAsync(db, nodes, latestAgentVersion, ct));
 
         var failed = from assignment in db.Assignments.AsNoTracking()
                      join node in nodes on assignment.NodeId equals node.Id
@@ -145,6 +147,32 @@ public static partial class OperatorIssues
                 [$"fleet nodes disk {alias}", $"fleet nodes disk {alias} --refresh"]));
         }
         return issues;
+    }
+
+    private sealed record TelemetryRow(Guid NodeId, string NodeName, string AgentVersion, string? InstallMethod, DateTimeOffset ReportedAt);
+
+    // One issue per Node that is not revoked and runs an older Agent than the Server. One row per Node is read, with only the columns used here.
+    private static async Task<IEnumerable<OperatorIssue>> OutdatedAgentIssuesAsync(FleetDbContext db, IQueryable<NodeRow> nodes,
+        SemanticVersion latest, CancellationToken ct)
+    {
+        var rows = await (from telemetry in db.NodeTelemetries.AsNoTracking()
+                          join node in nodes on telemetry.NodeId equals node.Id
+                          orderby node.Name, node.Id
+                          select new TelemetryRow(node.Id, node.Name, telemetry.AgentVersion, telemetry.InstallMethod, telemetry.ReportedAt))
+            .ToListAsync(ct);
+        return rows.Where(row => AgentTelemetryRules.IsOutdated(row.AgentVersion, latest)).Take(MaximumItems).Select(row =>
+        {
+            var alias = Quote(row.NodeName);
+            return new OperatorIssue($"agent_outdated:{row.NodeId:D}", "agent_outdated", "warning", $"{row.NodeName}: Agent is outdated",
+                $"The Agent runs version {row.AgentVersion}; the latest version is {latest.Text}. Reported at {row.ReportedAt:u}.",
+                row.InstallMethod switch
+                {
+                    "homebrew" => "Upgrade with `brew upgrade fleet-agent`, then restart the service with `brew services restart fleet-agent`.",
+                    "cargo" => $"Reinstall with Cargo from the release tag v{latest.Text}: `cargo install --locked --force --git https://github.com/jcarcaboso/fleet-manager --tag v{latest.Text} fleet fleet-agent`, then restart the service (see cli-installation.md).",
+                    _ => "Replace the binary with the one from the release archive, then restart the Agent service (see cli-installation.md)."
+                },
+                "nodes", null, row.NodeId, row.NodeName, null, row.ReportedAt, [$"fleet nodes show {alias}"]);
+        });
     }
 
     private static string FormatBytes(long bytes)

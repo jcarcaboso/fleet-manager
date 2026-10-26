@@ -110,6 +110,17 @@ public static class FleetEndpoints
             await coordinator.RecordDiskUsageAsync(Node(context), new(volumes), ct);
             return Results.NoContent();
         }).LimitPerNode();
+        // The Agent reports its version and machine information. The latest report replaces the stored one.
+        agents.MapPut("/telemetry", async (TelemetryRequest request, HttpContext context, IFleetCoordinator coordinator,
+            CancellationToken ct) =>
+        {
+            if (request.Os is null) throw new CoordinationException("invalid_request", "os is required.");
+            if (request.AgentVersion is null) throw new CoordinationException("invalid_request", "agentVersion is required.");
+            await coordinator.RecordAgentTelemetryAsync(Node(context), new(request.AgentVersion, request.Os.Name, request.Os.Version,
+                request.Os.Kernel, request.Arch, request.Hostname, request.User, request.InstallMethod, request.ServiceManager,
+                request.StateDirectory), ct);
+            return Results.NoContent();
+        }).LimitPerNode();
         agents.MapPost("/credentials/renew", async (RenewalRequest request, HttpContext context, IFleetCoordinator coordinator,
             NodeCertificateIssuer issuer, TimeProvider time, CancellationToken ct) =>
         {
@@ -153,7 +164,8 @@ public static class FleetEndpoints
 }
 
 /// <summary>
-/// Per-Node limit shared by <c>POST /agent/v1/attempts/{attemptId}/detail</c> and <c>PUT /agent/v1/disk-usage</c>: a bucket of 30
+/// Per-Node limit shared by <c>POST /agent/v1/attempts/{attemptId}/detail</c>, <c>PUT /agent/v1/disk-usage</c> and
+/// <c>PUT /agent/v1/telemetry</c>: a bucket of 30
 /// that refills one request every 2 seconds (30 a minute sustained), with no queue. A healthy Agent sends one detail per failed
 /// Attempt plus retries, and one disk report every few hours, far below this. Partitions exist only for authenticated Nodes
 /// and the framework removes idle ones.
