@@ -71,7 +71,10 @@ body.app h1[tabindex="-1"]:focus,body.app h2[tabindex="-1"]:focus,body.app #main
   .tabs a{padding:8px 12px}
   .panel{padding:16px 16px}
   .cols{gap:0}
-  .sumrow{grid-template-columns:1fr 1fr}
+  .sumrow{grid-template-columns:repeat(2,minmax(0,1fr))}
+  /* A long label wraps instead of pushing the page sideways on a narrow screen. */
+  .btn{white-space:normal;height:auto;min-height:40px;padding-top:6px;padding-bottom:6px;text-align:center}
+  .btn-sm{min-height:32px;padding-top:4px;padding-bottom:4px}
   .grid{grid-template-columns:minmax(0,1fr)}
   .login-card{padding:24px 20px 20px}
   .fams{grid-template-columns:1fr}

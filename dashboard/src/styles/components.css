@@ -88,8 +88,8 @@ input[disabled]{background:var(--surface-2);color:var(--muted)}
 .form label:first-child{margin-top:0}
 .form>.btn{align-self:flex-start;margin-top:8px}
 .input-row{display:flex;gap:8px}
-.sel{position:relative;display:inline-flex;align-items:center;gap:8px;font-size:13px;color:var(--muted);font-weight:600}
-.sel select{appearance:none;-webkit-appearance:none;font:inherit;font-weight:600;color:var(--ink);height:38px;padding:0 34px 0 12px;border-radius:10px;border:1px solid var(--line-2);background:#fff;cursor:pointer}
+.sel{position:relative;display:inline-flex;align-items:center;gap:8px;font-size:13px;color:var(--muted);font-weight:600;max-width:100%;min-width:0}
+.sel select{min-width:0;max-width:100%;text-overflow:ellipsis;appearance:none;-webkit-appearance:none;font:inherit;font-weight:600;color:var(--ink);height:38px;padding:0 34px 0 12px;border-radius:10px;border:1px solid var(--line-2);background:#fff;cursor:pointer}
 .sel select:focus{border-color:var(--accent);box-shadow:var(--focus)}
 .sel-chev{position:absolute;right:10px;pointer-events:none;color:var(--muted)}
 .sel--block{display:flex}
