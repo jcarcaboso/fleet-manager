@@ -65,6 +65,20 @@ jobs:
       - run: npm ci
       - run: npm run typecheck
       - run: npm test
+      - name: Install the browser for the e2e suite
+        run: npx playwright install --with-deps chromium
+      - name: End-to-end tests (mock API, production Content-Security-Policy)
+        run: npm run e2e
+      - name: Playwright report
+        if: failure()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: dashboard-e2e-report
+          path: |
+            dashboard/playwright-report
+            dashboard/test-results
+          if-no-files-found: ignore
+          retention-days: 7
       - run: npm run build
       - run: npm audit --omit=dev --audit-level=high
 

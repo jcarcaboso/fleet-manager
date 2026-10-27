@@ -23,6 +23,9 @@ Node 24 or newer. Everything runs from `dashboard/`.
 | `npm run dev:mock` | Dev server against the **in-browser mock API**. No Server and no `config.json` needed. Switches are URL parameters, see [Mock API](#mock-api). |
 | `npm test` | `vitest run`: unit, component and contract tests (happy-dom). No network, no Server. |
 | `npm run test:watch` | Vitest in watch mode. |
+| `npm run e2e` | Browser tests (Playwright) of the mock bundle under the production Content-Security-Policy. See [End-to-end tests](#end-to-end-tests-playwright). |
+| `npm run e2e:ui` | The same suite in Playwright's UI mode, for debugging. |
+| `npm run e2e:real` | The real-stack journeys against a running Server and dashboard; skipped without `FLEET_E2E_*` variables. `scripts/e2e-stack.sh` builds, seeds, runs and removes a disposable stack. |
 | `npm run typecheck` | `vue-tsc --noEmit` over `src/`, `tests/` and `vite.config.ts` (TypeScript `strict`). |
 | `npm run build` | Typecheck, then `vite build` into `dist/` (hashed assets, the CSS in its own file, nothing inlined). |
 | `npm run preview` | Serves `dist/` on `http://127.0.0.1:4173` for a visual check. |
@@ -84,6 +87,8 @@ dashboard/
     styles/          tokens.css base.css components.css layout.css pages.css overlays.css live.css (imported by styles/index.ts)
     views/           one folder per page (see Routes)
   tests/             helpers/ (app, mock, fetch, contracts) and the tests
+  e2e/               Playwright: mock/ (the browser suite), real/ (journeys against a real stack), support/ (fixture rules, helpers)
+  playwright.config.ts  playwright.real.config.ts
 ```
 
 The old dashboard's `style.css` is ported verbatim (every class name and rule; only the `body:not(.app)` rules of the Server's
@@ -440,6 +445,89 @@ Vitest, `@vue/test-utils`, happy-dom. `tests/helpers/`:
   `composables/keepFocus.ts` (installed by `AppShell`) gives it back when the button is enabled again and the user has not pressed
   anything meanwhile (`tests/composables/keepFocus.test.ts`). `tests/app/focus.test.ts` presses every Refresh, Try again, Check again and Sync button and asserts that focus is
   on the page heading or still on the page, never on `<body>`.
+
+## End-to-end tests (Playwright)
+
+`npm test` runs components in happy-dom. `e2e/` runs the real bundle in a real browser, in two modes. `@playwright/test` is a pinned
+**dev** dependency only; the runtime dependencies are still `vue` and `vue-router`.
+
+### Mock mode: `npm run e2e`
+
+Fast, no Server, runs in CI. `playwright.config.ts` starts a `webServer` that builds the mock bundle (`vite build --mode mock`) into the
+private, git-ignored directory `.e2e-dist/` and serves it with `vite preview` on `http://127.0.0.1:4179` (`e2e/support/vite.e2e.config.ts`).
+The preview sends the **production** `Content-Security-Policy` (read from `nginx/entrypoint.sh`, so it cannot drift; `connect-src 'self'`
+because the mock API runs in the page), `Referrer-Policy`, `X-Content-Type-Options` and `Cache-Control: no-store`, and answers the
+application routes with `index.html` exactly as `nginx.conf` does, including aliases with dots (`/machines/build.box`). A CSP violation
+therefore fails a test instead of passing unnoticed.
+
+Browser: Playwright's own Chromium (`npx playwright install --with-deps chromium`, what CI does), or any Chromium-family binary named by
+`PLAYWRIGHT_CHROMIUM_EXECUTABLE` (for example a `chrome-headless-shell` already on the machine); nothing is downloaded globally by the suite.
+Each test starts a fresh page and therefore a fresh mock; the mock's switches ([Mock API](#mock-api)) are URL parameters:
+`open(page, '/machines', { scope: 'read' })`. `window.__MOCK.calls` tells a test which requests the page made (`mockCalls`, `mockWrites`),
+which is how "a locked control sends no request" is checked. Time-dependent behaviour uses Playwright's clock (`page.clock.install()`,
+`page.clock.runFor(150_000)` for the 150 s disk-refresh limit, the wizard's expiry and first check-in) instead of waiting.
+
+| File (`e2e/mock/`) | Journeys |
+|---|---|
+| `session.spec.ts` | sign in (token never stored), wrong token, empty field, sign out, a 401 while a page is open returns to it after signing in, `?redirect=` only to this app, the "same site" message, an unreachable Server |
+| `machines.spec.ts` | cards, search, group by status/platform/OS, sort, disk meters, lazily loaded check-in strips |
+| `machine-page.spec.ts` | the six tabs, retry a failed Target, disk refresh answered and unanswered, rename (and its errors), revoke, remove with alias confirmation |
+| `problems.spec.ts` | tabs and counts, acknowledge, snooze, reopen, retry, the navigation badge |
+| `deployments.spec.ts` | rollout, machine filters, revision page (diff, per-machine progress), compare with the previous revision, load older, attempts, short-SHA address |
+| `repository-models.spec.ts` | sync, recent scans, model selection edit / save / reset / pinned-model refusal, refresh |
+| `enrollment.spec.ts` | Add machine wizard to the first check-in, validation, revoking, expiry, the links list, the form |
+| `audit.spec.ts` | list, filters, search, load older |
+| `scopes.spec.ts` | `read`, `operate`, `admin`: locked controls explain themselves and send no request; a 403 from the Server |
+| `routing.spec.ts` | old `#/…` bookmarks, deep links and reload on encoded and dotted aliases, titles, Back and Forward |
+| `layout.spec.ts` | 390 × 844: no sideways scrolling on any page, dialogs inside the screen; accessibility smoke (below) |
+| `focus.spec.ts` | keyboard focus after Refresh / Check again / Sync, focus trap and Escape in dialogs |
+| `states.spec.ts` | error, empty and loading states, hostile text rendered as text |
+| `guard.spec.ts` | the fixture rules below notice what they claim to, and the preview serves the production headers |
+
+**Fixture rules** (`e2e/support/fixtures.ts`, `guard.ts`). Every test fails on: console errors and warnings, uncaught page errors and
+unhandled rejections, Content-Security-Policy violations (a `securitypolicyviolation` listener installed with `addInitScript`, and Chromium's
+own report), and requests that fail or answer 400 or above. (A request the page cancels itself, `net::ERR_ABORTED`, is not a failure: the
+dashboard aborts the requests of a view that is gone, by design.) A test that expects one says so *before*, with the `allow` fixture:
+`allow.console(/…/)`, `allow.pageError(/…/)`, `allow.csp(/…/)`, `allow.request(/…/)`. An allowance that matched nothing fails the test too, so
+a stale one cannot hide a regression. `guard.spec.ts` proves each rule by provoking it. There is no `test.skip` in the mock suite and no
+retry (`retries: 0`): a flaky test is fixed.
+
+**Accessibility smoke, without axe-core.** `layout.spec.ts` checks, on every page, from the browser's accessibility tree (`ariaSnapshot`)
+and the DOM: exactly one `h1`, `lang`, a distinct title, the `banner`, `Primary` navigation, `main` and `contentinfo` landmarks, the skip
+link, an accessible name for every button, link, field and control, labelled form fields, no duplicate ids, no dangling
+`aria-labelledby` / `aria-describedby`, and that dialogs are modal and named. `axe-core` was left out on purpose: it would add a
+dev dependency (`@axe-core/playwright` and `axe-core`, a large rule set) for what is mostly colour contrast and ARIA validity, which this
+design system's tokens and the component tests already pin down; the structural checks above catch the regressions that actually happened
+in the old dashboard. Add `@axe-core/playwright` if accessibility becomes a release gate.
+
+### Real-stack mode: `npm run e2e:real`
+
+A smaller set of journeys (`e2e/real/`, `playwright.real.config.ts`, one worker, no traces because a trace would record the token that
+was typed) against a **running** Server and dashboard: the Server's `/dashboard` redirect; sign in, wrong token and sign out; real
+Agents with OS and disk in the gallery; a machine and its six tabs; a disk refresh answered when the Agent runs once; acknowledge and
+reopen a problem; Add machine creating a link of the form `SERVER/enroll#fleet-v1=…` that is then revoked; every page loading; the session
+cookie (`__Host-Fleet-Session`: `HttpOnly`, `Secure`, `SameSite=Strict`, no `Domain`) with the token in no storage, URL, DOM or header;
+CORS (the dashboard's origin only, preflight from any other origin 403) and a real page on a third origin that cannot read the API; and,
+with the optional tokens, the `read` and `operate` scopes.
+
+| Variable | Meaning |
+|---|---|
+| `FLEET_E2E_DASHBOARD_URL`, `FLEET_E2E_SERVER_URL` | the two origins, for example `https://localhost:7444` and `https://localhost:7443` |
+| `FLEET_E2E_OPERATOR_TOKEN` | an `admin` Operator token; read from the environment only |
+| `FLEET_E2E_READ_TOKEN`, `FLEET_E2E_OPERATE_TOKEN` | optional; the scope journeys are skipped without them |
+| `FLEET_E2E_IGNORE_HTTPS_ERRORS=1` | accept certificates of a private CA (off by default) |
+| `FLEET_E2E_AGENT_ALIAS`, `FLEET_E2E_IDLE_ALIAS` | an enrolled machine that has reported, and one that never has |
+| `FLEET_E2E_AGENT_RUN` | a command called as `COMMAND ALIAS` that runs that machine's Agent once (the disk-refresh journey) |
+
+Without the first three, every real-stack test is skipped and the run succeeds. **`scripts/e2e-stack.sh`** does all of it on a disposable
+stack: it builds the Server image (`--platform linux/amd64`) and the dashboard image (`deploy/homelab/compose.build.yaml`) under local
+tags `fleet-e2e-*` (never `skorcius/*`), runs `deploy/homelab/setup.py` in a temporary directory on two free loopback ports, starts it
+under a unique Compose project name, builds the Rust clients with `CARGO_TARGET_DIR` in the temporary directory, enrolls two real Agents,
+adds a `read` and an `operate` Operator, runs `npm run e2e:real` and removes containers, volumes, networks, images and the directory on
+exit, also on failure or Ctrl-C. It needs Docker (Compose v2), Python 3, `cargo`, `npm ci` done in `dashboard/`, and a browser. The token is
+never printed or put on a command line. `--keep` leaves the stack and a private `e2e.env` for re-running single journeys;
+`FLEET_E2E_CARGO_TARGET_DIR` reuses a Cargo cache; arguments after `--` go to Playwright (`scripts/e2e-stack.sh -- -g "disk refresh"`).
+CI does not run this mode.
 
 ## Security rules (enforced)
 

@@ -230,9 +230,13 @@ pinned unprivileged nginx stage serves `dist/` over HTTPS on 8443.
 
 ## CI
 
-A `dashboard` job runs `npm ci`, `npm run typecheck`, `npm test`,
-`npm run build` and `npm audit --omit=dev --audit-level=high` in `dashboard/`
-with a pinned Node version and pinned action SHAs like the other jobs.
+A `dashboard` job runs `npm ci`, `npm run typecheck`, `npm test`, the browser
+suite (`npx playwright install --with-deps chromium`, then `npm run e2e`, which
+uploads its report as an artifact when it fails), `npm run build` and
+`npm audit --omit=dev --audit-level=high` in `dashboard/` with a pinned Node
+version and pinned action SHAs like the other jobs. The real-stack journeys
+(`npm run e2e:real`, `scripts/e2e-stack.sh`) need Docker images and run on
+demand, not in CI.
 
 ## Cleanup
 

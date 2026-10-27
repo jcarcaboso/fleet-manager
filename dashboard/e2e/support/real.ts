@@ -1,0 +1,73 @@
+import { execFile } from 'node:child_process';
+import { promisify } from 'node:util';
+import { expect, type Page } from '@playwright/test';
+import { test as base } from './fixtures';
+import type { Allow } from './guard';
+
+/**
+ * Settings of the real-stack journeys, all from the environment (see playwright.real.config.ts). The Operator token is read here
+ * and used only to fill the sign-in field; it is never logged, written to disk, put in a URL or attached to a report.
+ */
+export interface Stack {
+  dashboard: string;
+  server: string;
+  token: string;
+  readToken?: string;
+  operateToken?: string;
+  agentAlias?: string;
+  idleAlias?: string;
+  agentRun?: string;
+}
+
+const env = (name: string): string | undefined => process.env[name]?.trim() || undefined;
+const origin = (url: string): string => new URL(url).origin;
+
+export function stackFromEnv(): Stack | null {
+  const dashboard = env('FLEET_E2E_DASHBOARD_URL');
+  const server = env('FLEET_E2E_SERVER_URL');
+  const token = env('FLEET_E2E_OPERATOR_TOKEN');
+  if (!dashboard || !server || !token) return null;
+  return {
+    dashboard: origin(dashboard),
+    server: origin(server),
+    token,
+    readToken: env('FLEET_E2E_READ_TOKEN'),
+    operateToken: env('FLEET_E2E_OPERATE_TOKEN'),
+    agentAlias: env('FLEET_E2E_AGENT_ALIAS'),
+    idleAlias: env('FLEET_E2E_IDLE_ALIAS'),
+    agentRun: env('FLEET_E2E_AGENT_RUN'),
+  };
+}
+
+export const stack = stackFromEnv();
+export const NOT_CONFIGURED = 'real-stack mode needs FLEET_E2E_DASHBOARD_URL, FLEET_E2E_SERVER_URL and FLEET_E2E_OPERATOR_TOKEN (scripts/e2e-stack.sh sets them)';
+
+/** `test` for the real-stack journeys: the same fixture rules as the mock suite, and a clean skip without a stack. */
+export const test = base.extend<{ stack: Stack }>({
+  // eslint-disable-next-line no-empty-pattern
+  stack: async ({}, use, testInfo) => {
+    testInfo.skip(!stack, NOT_CONFIGURED);
+    await use(stack as Stack);
+  },
+});
+export { expect };
+
+/**
+ * Signs in through the page. A visitor without a session is answered 401 by `GET session` (the Server's way of saying "sign in"), which
+ * the browser logs as a failed resource; the test says it expects that.
+ */
+export async function signIn(page: Page, s: Stack, allow: Allow, token = s.token): Promise<void> {
+  allow.request(/GET \S+\/dashboard\/api\/session -> 401$/);
+  allow.console(/Failed to load resource: the server responded with a status of 401/);
+  await page.goto('/login');
+  await page.getByLabel('Operator token').fill(token);
+  await page.getByRole('button', { name: 'Sign in' }).click();
+  await expect(page).toHaveURL(url => !url.pathname.startsWith('/login'));
+  await expect(page.getByRole('heading', { level: 1 })).toBeVisible();
+}
+
+/** Runs the Agent of an enrolled machine once, through the command the stack provides (`FLEET_E2E_AGENT_RUN ALIAS`). */
+export async function runAgentOnce(s: Stack, alias: string): Promise<void> {
+  if (!s.agentRun) throw new Error('FLEET_E2E_AGENT_RUN is not set: the stack gave no way to run an Agent');
+  await promisify(execFile)(s.agentRun, [alias], { timeout: 60_000 });
+}

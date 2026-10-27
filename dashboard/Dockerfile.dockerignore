@@ -7,6 +7,12 @@
 **/node_modules
 dashboard/dist
 dashboard/coverage
+# The e2e suite (Playwright) runs against the source tree, never inside the image build.
+dashboard/e2e
+dashboard/playwright*.ts
+dashboard/.e2e-dist
+dashboard/test-results
+dashboard/playwright-report
 **/.env
 **/.env.*
 **/*.log
