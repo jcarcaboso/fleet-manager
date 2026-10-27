@@ -1,0 +1,21 @@
+/* Design tokens of the Fleet Manager dashboard (colours, radii, shadows, fonts). Ported verbatim from the Server's dashboard style.css. */
+:root{
+  --canvas:#f6f4ef;--surface:#fff;--surface-2:#fbfaf7;
+  --ink:#1d1b18;--ink-2:#4b463f;--muted:#6b655c;--faint:#9a948a;
+  --line:#ebe6dc;--line-2:#dcd5c8;--hair:rgba(29,27,24,.08);
+  --accent:#2f6ae0;--accent-ink:#1f56c3;--accent-bg:#eaf1fd;
+  --good:#0ca30c;--good-bg:#e8f6e8;--good-ink:#0b6b0b;
+  --warning:#fab219;--warning-bg:#fff4da;--warning-ink:#7a5300;
+  --serious:#ec835a;--serious-bg:#fdeee6;--serious-ink:#9a3e19;
+  --critical:#d03b3b;--critical-bg:#fcebea;--critical-ink:#a42727;
+  --info:#3577e6;--info-bg:#e9f1fd;--info-ink:#1f56c3;
+  --neutral:#9a958c;--neutral-bg:#f0ede7;--neutral-ink:#55504a;
+  --series:#5a83d8;--series-hi:#2a56b8;--track:#e7e2d8;
+  --r-xl:24px;--r-lg:18px;--r-md:12px;
+  --sh-1:0 1px 2px rgba(60,42,12,.06),0 1px 1px rgba(60,42,12,.03);
+  --sh-2:0 1px 2px rgba(60,42,12,.05),0 6px 18px -6px rgba(60,42,12,.10),0 22px 40px -26px rgba(60,42,12,.20);
+  --sh-3:0 2px 4px rgba(60,42,12,.06),0 16px 32px -10px rgba(60,42,12,.18),0 36px 64px -32px rgba(60,42,12,.30);
+  --font:system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,"Helvetica Neue",Arial,sans-serif;
+  --mono:ui-monospace,"SF Mono",SFMono-Regular,Menlo,Consolas,"Liberation Mono",monospace;
+  --focus:0 0 0 3px rgba(47,106,224,.38);
+}

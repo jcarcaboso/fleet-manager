@@ -19,6 +19,8 @@ public sealed class FleetOptions
     public bool AllowLoopbackHttp { get; set; }
     // Empty disables the browser dashboard. Never derive enrollment origins from Host headers.
     public string PublicUrl { get; set; } = "";
+    // The separate dashboard's HTTPS origin. Empty means the dashboard API is not served and CORS is off.
+    public string DashboardOrigin { get; set; } = "";
     public string EnrollmentCaCertificatePath { get; set; } = "";
     // Optional deployment setting. The manifest never contains this credential.
     public string CliProxyApiKey { get; set; } = "";
@@ -28,6 +30,11 @@ public sealed class FleetOptions
         (Uri.TryCreate(PublicUrl, UriKind.Absolute, out var uri) && uri.Scheme == "https" &&
          uri.Host.Length > 0 && uri.UserInfo.Length == 0 && uri.AbsolutePath == "/" &&
          uri.Query.Length == 0 && uri.Fragment.Length == 0);
+
+    public bool HasValidDashboardOrigin() => DashboardOrigin.Length == 0 ||
+        (DashboardOrigin.Length <= 200 && Uri.TryCreate(DashboardOrigin, UriKind.Absolute, out var uri) && uri.Scheme == "https" &&
+         uri.Host.Length > 0 && uri.UserInfo.Length == 0 && uri.AbsolutePath == "/" &&
+         uri.Query.Length == 0 && uri.Fragment.Length == 0 && !DashboardOrigin.Contains('?') && !DashboardOrigin.Contains('#'));
 
     public bool HasValidCliProxyApiKey() => CliProxyApiKey.Length <= 4_096 &&
         CliProxyApiKey.All(character => character is >= '!' and <= '~');

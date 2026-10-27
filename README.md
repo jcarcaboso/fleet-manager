@@ -6,14 +6,17 @@ Node runs an Agent that polls the Server over mutual TLS and reconciles its own
 filesystem. Nodes need no inbound listener, SSH access, Git checkout, or source
 repository credentials.
 
-Fleet Manager contains three parts:
+Fleet Manager contains four parts:
 
 - The .NET Server scans the canonical Git source, validates desired state,
-  publishes immutable assignments, serves the Operator dashboard and API, and
-  coordinates Node enrollment and polling through PostgreSQL.
+  publishes immutable assignments, serves the Operator API and the API behind the
+  dashboard, and coordinates Node enrollment and polling through PostgreSQL.
 - `fleet` is the Operator CLI. It creates enrollment authorizations, lists and
   renames Nodes, revokes credentials, rescans the source, and reads rollout
   status and diagnostics.
+- The dashboard (`dashboard/`) is the Operator's web interface, a Vue application
+  served by its own nginx container. It talks to the Server only through its
+  `/dashboard/api` routes.
 - `fleet-agent` enrolls one Node, installs its assigned Skills, repairs managed
   files from verified cached bundles, and reports results. Its private key and
   state stay on the Node.
@@ -26,9 +29,10 @@ the [architecture overview](docs/architecture/overview.md) and
 
 ## Run the Server and dashboard
 
-The homelab deployment runs the Server, dashboard, PostgreSQL, and database
-migrations with Docker Compose. The dashboard is part of the Server image, so
-it does not need a separate container. Follow the
+The homelab deployment runs the Server, the dashboard, PostgreSQL, and database
+migrations with Docker Compose. The dashboard is its own image and container
+(`skorcius/fleet-manager-dashboard`) at its own HTTPS address, by default port
+7444 next to the Server's 7443. Follow the
 [homelab setup](deploy/homelab/README.md) for a first installation.
 
 The amd64 Server image is `skorcius/fleet-manager:0.9.0`.
@@ -42,11 +46,24 @@ docker compose up -d --force-recreate --wait
 ```
 
 The migration container updates the database before the Server starts. Do not
-rerun setup or remove volumes during an upgrade. Compose derives the dashboard
-origin from `FLEET_HOSTNAME` and `FLEET_PORT`; set `FLEET_PUBLIC_URL` when the
-public HTTPS origin differs. The browser must trust the Server CA.
+rerun setup or remove volumes during an upgrade. Compose derives the Server
+origin from `FLEET_HOSTNAME` and `FLEET_PORT` (override it with
+`FLEET_PUBLIC_URL`) and the dashboard origin from `FLEET_HOSTNAME` and
+`FLEET_DASHBOARD_PORT` (override it with `FLEET_DASHBOARD_URL`). The browser must
+trust the Server CA.
 
-Open `https://YOUR_SERVER/dashboard` and sign in with an Operator token. The
+Upgrading from a release where the Server served the dashboard adds the
+`dashboard` service and a port to open (7444 by default); `/dashboard` on the
+Server redirects to the new address, so old bookmarks keep working. The
+dashboard and the Server must be on the same site (HTTPS, same host name or
+registrable domain), because the session cookie is `SameSite=Strict`. The
+dashboard has its own certificate and volume, so run `python3 setup.py
+--add-dashboard` once in the deployment directory. The
+[upgrade steps](deploy/homelab/README.md#upgrading-to-the-separate-dashboard)
+list the changes to make.
+
+Open the dashboard address, for example `https://YOUR_SERVER:7444`, and sign in
+with an Operator token. The
 dashboard shows each machine with its Targets, problems, check-ins, disk usage
 and Agent details, lists deployments and their progress, and manages aliases,
 enrollment links, CLIProxy models and the audit log. **Add machine** creates an
@@ -54,7 +71,8 @@ enrollment link. Each link is bound to its chosen alias, includes the public CA,
 expires after 15 minutes by default, with a maximum lifetime of one hour. It can be revoked
 before use. Treat it as a secret until it expires or enrollment succeeds. The
 [dashboard enrollment guide](docs/plans/enrollment-dashboard.md) explains its
-trust checks and session behavior.
+trust checks and session behavior. Developing the dashboard is covered in
+`dashboard/README.md`.
 
 The dashboard's Node actions distinguish revocation from removal. **Revoke**
 blocks all of the Node's certificates and keeps its record visible. **Remove**

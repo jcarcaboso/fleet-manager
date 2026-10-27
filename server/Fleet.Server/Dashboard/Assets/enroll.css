@@ -1,0 +1,19 @@
+/* Stylesheet of the standalone enrollment page, served at /enroll/enroll.css under style-src 'self'. */
+*{box-sizing:border-box}
+body{margin:0;font-family:system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;color:#172c30;background:#f4f6f3;line-height:1.55;font-synthesis:none}
+header{display:flex;align-items:center;gap:1.3rem;padding:1.2rem max(5vw,1rem);background:#163c3a;color:#fff;font-weight:700}
+main{max-width:1000px;padding:2.5rem 1.2rem;margin:auto}
+h1{font-size:2.2rem;letter-spacing:-.04em;margin:.2rem 0 1.5rem}
+p{max-width:75ch}
+section{background:#fff;border:1px solid #dbe3da;border-radius:12px;padding:1.5rem;margin:1.5rem 0}
+label{display:block;font-size:.9rem;font-weight:650;margin:.8rem 0 .3rem}
+textarea{font:13px ui-monospace,monospace;border:1px solid #a8b9b1;border-radius:6px;padding:.65rem;width:100%;resize:vertical}
+button{font:inherit;background:#216453;color:#fff;border:1px solid transparent;border-radius:6px;padding:.6rem 1rem;cursor:pointer}
+button:hover{background:#174f40}
+button:disabled{opacity:.5;cursor:default}
+:focus-visible{outline:3px solid #5f9dca;outline-offset:3px}
+code{font-family:ui-monospace,monospace;background:#eef3ee;border-radius:4px;padding:.15rem .3rem}
+pre{overflow:auto}
+.muted{color:#5c7268;font-size:.85rem}
+#message:not(:empty){padding:.8rem 1rem;background:#e4eee5;border-radius:6px;border-left:3px solid #38755b}
+@media(max-width:600px){main{padding:1.5rem .8rem}section{padding:1rem}header{flex-wrap:wrap}h1{font-size:1.8rem}}

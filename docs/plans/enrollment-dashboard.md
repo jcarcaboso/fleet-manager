@@ -6,7 +6,9 @@ with CA/token files remain supported.
 
 ## Enroll a Node
 
-1. Open `https://your-server:7443/dashboard` and sign in with an Operator token.
+1. Open the dashboard at `https://your-server:7444` and sign in with an Operator
+   token. The dashboard is a separate container; the Server's old
+   `https://your-server:7443/dashboard` address redirects there.
 2. Choose **Add machine**, enter a unique alias and create a link. It expires
    after 15 minutes by default, with a maximum lifetime of one hour.
 3. Run `fleet-agent enroll --link` on the Node and paste the link at the prompt.
@@ -38,8 +40,10 @@ unpadded base64url of UTF-8 JSON with exactly these fields:
 Embedding the public CA allows normal TLS certificate and hostname verification
 from the first request. There is no unverified download or TLS bypass. Changing
 the CA requires a new link; leaf certificate rotation under the same CA does not.
-The Operator's browser must trust the dashboard certificate, which may require
-installing the homelab CA on that Operator machine once.
+The Operator's browser must trust the Server and dashboard certificates (the
+homelab dashboard has its own certificate from the same CA), which may require
+installing the homelab CA on that Operator machine once. Enrollment links name the Server
+(`/enroll` stays on the Server), not the dashboard.
 
 The Agent accepts at most 16 KiB, requires matching HTTPS origins and exact
 paths, rejects extra fields and expired payloads, and never follows redirects.
@@ -88,19 +92,30 @@ actions are available in Server `0.4.0`.
 ### Browser sessions
 
 Operator tokens create 30-minute Secure, HttpOnly, SameSite=Strict browser
-sessions. Mutations require an antiforgery token and the configured Origin.
+sessions. The dashboard runs at its own origin and calls the Server's
+`/dashboard/api` with credentials, so the dashboard and the Server must be on the
+same site (HTTPS, same host name or registrable domain; ports and subdomains may
+differ). Mutations require an antiforgery token and `Origin` equal to the
+configured dashboard origin. See the
+[separate dashboard plan](separate-dashboard.md) for the CORS, cookie and Origin
+rules.
 Removing or rotating an Operator credential invalidates its sessions. Restarting
 the server also ends sessions, whose encryption keys are held in memory.
 Dashboard cookies cannot authenticate Operator bearer API or Node mTLS calls.
 The server continues to terminate Node mTLS directly.
 
-Set `Fleet__PublicUrl` to the externally reachable HTTPS origin without a path.
-An empty value disables the dashboard. Enrollment links never use an untrusted
-Host header, and the dashboard rejects requests through another origin.
+Set `Fleet__PublicUrl` to the Server's externally reachable HTTPS origin without
+a path and `Fleet__DashboardOrigin` to the dashboard's. Without either, the
+dashboard API is not available; with an empty `Fleet__DashboardOrigin`, `/` and
+`/dashboard` on the Server answer `404 dashboard_not_configured`. Enrollment links
+never use an untrusted Host header, and the dashboard API rejects requests that
+reach the Server through another origin.
 
-Homelab Compose derives the URL from `FLEET_HOSTNAME` and `FLEET_PORT`, with an
-optional `FLEET_PUBLIC_URL` override. Use an explicit bracketed URL for IPv6.
-These settings do not change DNS or regenerate TLS certificates.
+Homelab Compose derives the Server URL from `FLEET_HOSTNAME` and `FLEET_PORT`, with
+an optional `FLEET_PUBLIC_URL` override, and the dashboard URL from
+`FLEET_HOSTNAME` and `FLEET_DASHBOARD_PORT` (default 7444), with an optional
+`FLEET_DASHBOARD_URL` override. Use an explicit bracketed URL for IPv6. These
+settings do not change DNS or regenerate TLS certificates.
 
 `Fleet__EnrollmentCaCertificatePath` optionally selects another public CA file
 for server TLS trust. It defaults to `Fleet__IssuerCertificatePath`, matching the
@@ -111,7 +126,7 @@ Apply `BindAndRevokeEnrollmentAuthorizations` before starting the upgraded
 server. Homelab Compose runs migrations during deployment. Back up PostgreSQL
 before upgrading using the existing backup procedure.
 
-Server tests cover session isolation, CSRF/Origin rejection, trust payload,
+Server tests cover session isolation, CORS, CSRF/Origin rejection, trust payload,
 alias binding, expiry, revocation, exact CSR retries, and alias collisions.
 Agent tests cover bounded line input, malformed payloads, secret redaction,
 origin/path validation, expiry, and flag conflicts.

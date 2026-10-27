@@ -11,7 +11,7 @@ LINK = re.compile(r"\[[^\]]+\]\(([^)]+)\)")
 errors: list[str] = []
 
 for document in ROOT.rglob("*.md"):
-    if ".git" in document.parts or "target" in document.parts:
+    if {".git", "target", "node_modules"} & set(document.parts):
         continue
     text = document.read_text(encoding="utf-8")
     for raw in LINK.findall(text):

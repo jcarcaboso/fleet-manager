@@ -26,6 +26,23 @@ CSR loading uses the platform's signature verification with default options,
 as documented by
 [CertificateRequest.LoadSigningRequestPem](https://learn.microsoft.com/en-us/dotnet/api/system.security.cryptography.x509certificates.certificaterequest.loadsigningrequestpem?view=net-10.0).
 
+## Dashboard dependencies
+
+The dashboard in `dashboard/` is a separate application. Its two runtime npm
+dependencies, Vue and Vue Router (both MIT), are bundled into static files at
+build time; the page loads nothing from a third party. Build and test tooling
+(Vite, TypeScript, Vitest, Vue Test Utils, happy-dom) never reaches the image.
+All versions are exact in `dashboard/package.json` and recorded with integrity
+hashes in `dashboard/package-lock.json`. CI runs `npm ci` and
+`npm audit --omit=dev --audit-level=high` on every change.
+
+`dashboard/Dockerfile` builds with the official `node` Alpine image and serves
+with `nginxinc/nginx-unprivileged` (Alpine). Both base images are pinned by tag
+and digest in the Dockerfile; update them together with a review of the upstream
+release notes and rebuild. The final image contains nginx, the static files, the
+project's nginx configuration and start-up script, and the license, with no Node
+runtime.
+
 ## Node Agent dependencies
 
 The Agent adds these direct dependencies to the Rust workspace. Versions below

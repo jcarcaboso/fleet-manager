@@ -1,0 +1,8 @@
+node_modules
+dist
+dist-mock
+*.tsbuildinfo
+# Playwright (npm run e2e): the private mock bundle, traces and the HTML report
+.e2e-dist
+test-results
+playwright-report

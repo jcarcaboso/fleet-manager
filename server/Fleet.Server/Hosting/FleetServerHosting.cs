@@ -34,6 +34,7 @@ public static class FleetServerHosting
             .Validate(x => x.HasValidOperators(), "Configure 1 to 100 uniquely named Operators with distinct SHA-256 token digests.")
             .Validate(x => x.HasValidOperatorScopes(), "Fleet:OperatorScopes values must be read, operate or admin.")
             .Validate(x => x.HasValidPublicUrl(), "Fleet:PublicUrl must be an HTTPS origin without a path, credentials, query, or fragment.")
+            .Validate(x => x.HasValidDashboardOrigin(), "Fleet:DashboardOrigin must be an HTTPS origin of at most 200 characters without a path, credentials, query, or fragment.")
             .Validate(x => x.HasValidCliProxyApiKey(), "Fleet:CliProxyApiKey must be empty or contain at most 4096 printable ASCII characters.")
             .ValidateOnStart();
         builder.Services.AddSingleton<NodeCertificateIssuer>();
@@ -59,6 +60,7 @@ public static class FleetServerHosting
         builder.Services.AddHostedService(services => services.GetRequiredService<SourcePollingService>());
         builder.Services.ConfigureHttpJsonOptions(options => WireJson.Configure(options.SerializerOptions));
         builder.Services.AddSingleton(services => EnrollmentLinkSettings.Load(services.GetRequiredService<IOptions<FleetOptions>>().Value));
+        builder.Services.AddSingleton(services => DashboardSettings.Load(services.GetRequiredService<IOptions<FleetOptions>>().Value));
         builder.Services.AddFleetDashboard();
         builder.Services.AddAuthentication(options => options.DefaultAuthenticateScheme = DashboardEndpoints.Scheme)
             .AddScheme<AuthenticationSchemeOptions, FleetAuthenticationHandler>("Operator", _ => { })
@@ -148,6 +150,9 @@ public static class FleetServerHosting
                 await WriteError(context, "internal_error", "The Server could not complete the request.");
             }
         });
+        // Before the rate limiter and authentication so preflights are answered without a session and 401/429 responses still carry CORS headers.
+        app.UseDashboardApiHeaders();
+        app.UseDashboardRedirect();
         app.UseRateLimiter();
         app.UseRequestTimeouts();
         app.UseAuthentication();

@@ -7,7 +7,7 @@ route below exists under both prefixes:
 | Prefix | Auth | Client |
 |---|---|---|
 | `/operator/v1` | `Authorization: Bearer <token>` | `fleet` |
-| `/dashboard/api` | `__Host-Fleet-Session` cookie; non-GET requests also need the Origin and CSRF checks | dashboard |
+| `/dashboard/api` | `__Host-Fleet-Session` cookie; non-GET requests also need `Origin: <Fleet:DashboardOrigin>` and the CSRF token. Called cross-origin, with [CORS](operations-hardening.md#dashboard-origin-cors-and-csrf), by the separate dashboard | dashboard |
 
 Each handler is written once and mapped into both groups. Existing routes keep
 their current paths, shapes and behaviour unless this document says otherwise.
@@ -292,14 +292,16 @@ The error catalog for every Agent error code and every issue code.
 
 Bodies and responses are unchanged.
 
-## Dashboard assets
+## Dashboard address and enrollment page
 
-`GET /dashboard/{file}` serves any embedded file in
-`server/Fleet.Server/Dashboard/Assets/` whose name matches
-`^[a-z0-9][a-z0-9-]*\.(js|css|html|svg)$`, with the matching content type and
-the existing security headers. It replaces the per-file routes. `GET
-/dashboard` still serves `index.html`, and `/enroll` still serves
-`enroll.html`. Other names return 404.
+The Server no longer serves the dashboard. `GET /`, `GET /dashboard` and any
+`GET /dashboard/...` path that is not under `/dashboard/api` answer `302` with
+`Location: <Fleet:DashboardOrigin>`, or `404 { "code": "dashboard_not_configured",
+"message": "..." }` while `Fleet:DashboardOrigin` is empty. The old
+`/dashboard/{file}` asset route is gone. `/enroll` is unchanged and serves its
+script and stylesheet at exactly `/enroll/enroll.js` and `/enroll/enroll.css`;
+no other `/enroll/...` path exists. The dashboard application is built and
+served by its own container (see [operations hardening](operations-hardening.md)).
 
 ## Phase 2: attempt detail
 

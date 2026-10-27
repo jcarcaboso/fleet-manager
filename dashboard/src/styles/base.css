@@ -1,0 +1,30 @@
+/* Base: reset, body, typography, focus ring, screen-reader text, icon and glyph sizes, tone variables. */
+*{box-sizing:border-box}
+html{-webkit-text-size-adjust:100%;scroll-padding-top:84px}
+body.app{margin:0;background:var(--canvas);color:var(--ink);font:14px/1.5 var(--font);-webkit-font-smoothing:antialiased;text-rendering:optimizeLegibility}
+body.app.has-modal{overflow:hidden}
+:where(body.app) a{color:var(--accent-ink);text-decoration:none}
+:where(body.app) a:hover{text-decoration:underline}
+:where(body.app) button{font:inherit;color:inherit}
+:where(body.app) :is(h1,h2,h3,h4){margin:0;font-weight:680;letter-spacing:-.01em}
+:where(body.app) p{margin:0}
+:where(body.app) code,.mono{font-family:var(--mono);font-size:.92em}
+:where(body.app) code{overflow-wrap:anywhere}
+:where(body.app) :focus-visible{outline:3px solid rgba(47,106,224,.5);outline-offset:2px}
+:where(body.app) :is(input,select):focus-visible{outline:none}
+.sr{position:absolute!important;width:1px;height:1px;overflow:hidden;clip:rect(0 0 0 0);clip-path:inset(50%);white-space:nowrap}
+.defs{position:absolute;width:0;height:0;overflow:hidden}
+.skip{position:fixed;left:12px;top:-60px;z-index:100;background:var(--ink);color:#fff;padding:8px 14px;border-radius:10px;font-weight:600}
+.skip:focus{top:12px;text-decoration:none}
+.muted{color:var(--muted)}
+.small{font-size:12.5px}
+.ic{width:16px;height:16px;fill:none;stroke:currentColor;stroke-width:1.9;stroke-linecap:round;stroke-linejoin:round;flex:none;vertical-align:middle}
+.g{width:16px;height:16px;flex:none;vertical-align:middle}
+.spin{animation:spin 1s linear infinite}
+.t-good{--tc:var(--good);--tb:var(--good-bg);--ti:var(--good-ink)}
+.t-info{--tc:var(--info);--tb:var(--info-bg);--ti:var(--info-ink)}
+.t-warning{--tc:var(--warning);--tb:var(--warning-bg);--ti:var(--warning-ink)}
+.t-serious{--tc:var(--serious);--tb:var(--serious-bg);--ti:var(--serious-ink)}
+.t-critical{--tc:var(--critical);--tb:var(--critical-bg);--ti:var(--critical-ink)}
+.t-neutral,.t-pending{--tc:var(--neutral);--tb:var(--neutral-bg);--ti:var(--neutral-ink)}
+
