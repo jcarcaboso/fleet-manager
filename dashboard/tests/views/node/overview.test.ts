@@ -32,7 +32,8 @@ describe('the header', () => {
     expect(heroFact('Certificate')!.find('.meter').attributes('aria-label')).toMatch(/^Certificate: \d+ d \d+ h left$/);
     expect((heroFact('Certificate')!.find('.meter span').element as HTMLElement).style.width).toMatch(/^\d+\.\d%$/);
     expect(heroFact('Targets')!.text()).toBe('Targets54 succeeded and 1 failed');
-    expect(heroFact('Enrolled')!.text()).toMatch(/^EnrolledSep 18\d+ days ago$/);
+    // The mock fleet is shifted to the real clock, so the calendar date moves every day; only its shape is stable.
+    expect(heroFact('Enrolled')!.text()).toMatch(/^Enrolled[A-Z][a-z]{2} \d{1,2}\d+ days ago$/);
     const actions = t.findAll('.nhero-actions > *');
     expect(actions.map(a => a.text())).toEqual(['Fix 1 problem', 'Rename', 'Revoke', 'Remove']);
     expect(actions[0]!.attributes('href')).toBe('/machines/studio-mini/problems');
