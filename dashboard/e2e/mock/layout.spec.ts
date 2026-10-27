@@ -26,6 +26,23 @@ async function firstRevisionPath(page: Page): Promise<string> {
   return new URL(page.url()).pathname;
 }
 
+/*
+ * 320 px leaves room for fonts wider than the ones on the machine running the tests. CI's Linux fonts once made the
+ * Machines page 402 px wide in a 390 px window while it fitted locally, because grid columns could not shrink below their
+ * content. Every page must fit the narrowest common phone width.
+ */
+test.describe('narrow phone (320 × 640)', () => {
+  test.use({ viewport: { width: 320, height: 640 } });
+
+  for (const [name, path] of PAGES) {
+    test(`${name} does not scroll sideways`, async ({ page }) => {
+      await open(page, path);
+      await expect(h1(page)).toBeVisible();
+      await expectNoHorizontalOverflow(page);
+    });
+  }
+});
+
 test.describe('mobile (390 × 844)', () => {
   test.use({ viewport: { width: 390, height: 844 } });
 

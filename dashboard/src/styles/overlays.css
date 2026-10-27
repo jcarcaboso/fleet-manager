@@ -132,7 +132,7 @@
   .facts>div:nth-last-child(-n+3){border-bottom:1px solid var(--line)}
   .facts>div:nth-last-child(-n+2){border-bottom:0}
   .fams{grid-template-columns:1fr}
-  .grid{grid-template-columns:repeat(auto-fill,minmax(300px,1fr));gap:18px}
+  .grid{grid-template-columns:repeat(auto-fill,minmax(min(100%,300px),1fr));gap:18px}
   .trows li{grid-template-columns:22px minmax(0,1fr) auto}
   .trow-t{display:none}
   .srv{display:none}

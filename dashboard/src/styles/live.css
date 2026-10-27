@@ -72,7 +72,7 @@ body.app h1[tabindex="-1"]:focus,body.app h2[tabindex="-1"]:focus,body.app #main
   .panel{padding:16px 16px}
   .cols{gap:0}
   .sumrow{grid-template-columns:1fr 1fr}
-  .grid{grid-template-columns:1fr}
+  .grid{grid-template-columns:minmax(0,1fr)}
   .login-card{padding:24px 20px 20px}
   .fams{grid-template-columns:1fr}
   .kv--grid,.kv--3{grid-template-columns:1fr}
