@@ -31,7 +31,8 @@ the [architecture overview](docs/architecture/overview.md) and
 
 The homelab deployment runs the Server, the dashboard, PostgreSQL, and database
 migrations with Docker Compose. The dashboard is its own image and container
-(`skorcius/fleet-manager-dashboard`) at its own HTTPS address, by default port
+(`skorcius/fleet-manager:dashboard-VERSION`, next to the Server's
+`skorcius/fleet-manager:VERSION`) at its own HTTPS address, by default port
 7444 next to the Server's 7443. Follow the
 [homelab setup](deploy/homelab/README.md) for a first installation.
 

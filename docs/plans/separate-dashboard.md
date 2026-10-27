@@ -217,14 +217,14 @@ pinned unprivileged nginx stage serves `dist/` over HTTPS on 8443.
   immutable caching for hashed assets, and an `index.html` fallback for the
   route paths.
 - Compose gets a `dashboard` service with only
-  `image: ${FLEET_DASHBOARD_IMAGE:-skorcius/fleet-manager-dashboard:0.10.0}`
+  `image: ${FLEET_DASHBOARD_IMAGE:-skorcius/fleet-manager:dashboard-0.10.0}`
   (`compose.yaml` never builds; local builds use the override
   `compose.build.yaml`),
   published on `${FLEET_BIND_IP}:${FLEET_DASHBOARD_PORT:-7444}`. The Server
   service gets `Fleet__DashboardOrigin` from `FLEET_DASHBOARD_URL`
   (default `https://${FLEET_HOSTNAME}:${FLEET_DASHBOARD_PORT:-7444}`).
   `setup.py` writes both values and `.env.example` documents them.
-- Release: a second image, `skorcius/fleet-manager-dashboard:VERSION`, built and
+- Release: a second image, `skorcius/fleet-manager:dashboard-VERSION`, built and
   pushed manually with the Server image. Image pins in Compose and the guides
   are updated by the release preparation PR, not by this change.
 
