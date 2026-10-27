@@ -55,8 +55,20 @@ public CA certificate. It cannot read the CA key, the Server key, the database
 password, the Operator token digests, the SSH configuration or the Server's
 volume, and the Server cannot read the dashboard's. Stealing the dashboard key
 lets an attacker impersonate the dashboard address to a browser that trusts the
-CA, as the Server key does for the Server, but yields no Node credentials, no
-API access and no database access.
+CA, as the Server key does for the Server, but yields no Node credentials and no
+database access.
+
+This does **not** make the dashboard container harmless. It serves the code that
+runs in the Operator's browser with the Operator's session, so an attacker who
+controls that container can serve a modified dashboard and act as any Operator who
+opens it, whatever the cookies' scope. Cookies are scoped to a host, not a port:
+when the Server and the dashboard share a host name and differ only by port (the
+default), the browser also sends the session cookie to the dashboard container with
+every request for its files, so a compromised container can replay it. Using a
+different host name for the dashboard, under the same registrable domain, for
+example `fleet.home.arpa` and `dashboard.home.arpa`, keeps the `__Host-` cookie out
+of those requests, but not the modified-code risk. Treat the dashboard image like
+the Server image: pin it by digest and update it with the Server.
 
 An installation created before the dashboard had its own certificate has no
 `dashboard.pem`. `configure` then stops with a message that points at

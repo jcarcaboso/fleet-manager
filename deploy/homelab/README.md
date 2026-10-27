@@ -256,7 +256,9 @@ existing installation:
 5. Open the dashboard port (7444 by default) on the same interface and firewall
    as the Server port. Keep the dashboard on the same site as the Server.
 6. Run `docker compose pull` and `docker compose up -d --force-recreate --wait`.
-   The `dashboard` service starts after the Server is healthy.
+   The `dashboard` service starts after the Server is healthy. If `--wait`
+   reports that `configure` did not complete, run `docker compose logs configure`:
+   the reason, such as a missing dashboard certificate, is only in that log.
 7. Open `https://FLEET_HOSTNAME:7444` and sign in. Old `https://SERVER/dashboard`
    bookmarks are redirected there. Scripts that call `/operator/v1`, enrollment
    links and the Agent are not affected.
