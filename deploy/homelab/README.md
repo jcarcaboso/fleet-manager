@@ -250,7 +250,7 @@ existing installation:
    an installation whose address is an IPv6 literal must be reissued with a DNS
    name first.
 4. Set `FLEET_IMAGE` in `.env` to the new Server image. The dashboard image
-   defaults to the release's `skorcius/fleet-manager-dashboard` tag; set
+   defaults to the release's `skorcius/fleet-manager:dashboard-VERSION` tag; set
    `FLEET_DASHBOARD_IMAGE` only to pin another one. Edit `FLEET_DASHBOARD_URL` in
    `.env` only for a different dashboard address.
 5. Open the dashboard port (7444 by default) on the same interface and firewall
@@ -277,8 +277,8 @@ dashboard uses the existing Operator token and CA.
 
 Image publication is manual; the GitHub tag workflow only publishes
 client archives and Homebrew formulas. A release has two images with one
-version: `skorcius/fleet-manager` (Server) and
-`skorcius/fleet-manager-dashboard`. From a clean checkout of the tested
+version, both in the `skorcius/fleet-manager` repository: the Server as `VERSION`
+and the dashboard as `dashboard-VERSION`. From a clean checkout of the tested
 release commit, build the versioned images:
 
 ```sh
@@ -289,7 +289,7 @@ docker build --platform linux/amd64 \
   -t "skorcius/fleet-manager:$VERSION" .
 docker build --platform linux/amd64 -f dashboard/Dockerfile \
   --label "org.opencontainers.image.revision=$SHA" \
-  -t "skorcius/fleet-manager-dashboard:$VERSION" .
+  -t "skorcius/fleet-manager:dashboard-$VERSION" .
 ```
 
 Smoke-test those local images together with a disposable Compose project, then
@@ -297,9 +297,9 @@ publish and verify them before pushing the matching annotated Git tag:
 
 ```sh
 docker push "skorcius/fleet-manager:$VERSION"
-docker push "skorcius/fleet-manager-dashboard:$VERSION"
+docker push "skorcius/fleet-manager:dashboard-$VERSION"
 docker buildx imagetools inspect "skorcius/fleet-manager:$VERSION"
-docker buildx imagetools inspect "skorcius/fleet-manager-dashboard:$VERSION"
+docker buildx imagetools inspect "skorcius/fleet-manager:dashboard-$VERSION"
 git tag -a "v$VERSION" "$SHA" -m "Fleet Manager $VERSION"
 git push origin "refs/tags/v$VERSION"
 ```

@@ -89,7 +89,7 @@ Preparing a release does not publish it; publishing does not deploy it.
    commit. Run the artifact workflow manually if the archives need hands-on testing.
 3. From a clean checkout of that commit, build
    `skorcius/fleet-manager:MAJOR.MINOR.PATCH` for `linux/amd64` using `Dockerfile`.
-   Build `skorcius/fleet-manager-dashboard:MAJOR.MINOR.PATCH` for `linux/amd64`
+   Build `skorcius/fleet-manager:dashboard-MAJOR.MINOR.PATCH` for `linux/amd64`
    the same way using `dashboard/Dockerfile`. Set
    `org.opencontainers.image.revision` to the commit SHA on both. Smoke-test the
    local images together with disposable Compose configuration and volumes

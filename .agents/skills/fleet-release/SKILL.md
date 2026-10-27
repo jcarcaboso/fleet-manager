@@ -9,11 +9,11 @@ Run from the Fleet Manager repository root. Read
 `docs/technical-design/client-updates.md`, `deploy/homelab/README.md`,
 `Dockerfile`, `dashboard/Dockerfile`, and `.github/workflows/client-artifacts.yml`
 before releasing. The project's GitHub repository is `jcarcaboso/fleet-manager`.
-Its Docker Hub repositories are `skorcius/fleet-manager` (the Server) and
-`skorcius/fleet-manager-dashboard` (the dashboard). Confirm the destination
-before publishing from a fork or to another registry. If a Docker Hub repository
-does not exist yet, ask the user to create it; do not assume it exists or try to
-create it.
+Its Docker Hub repository is `skorcius/fleet-manager`, which holds both images:
+the Server as `skorcius/fleet-manager:VERSION` and the dashboard as
+`skorcius/fleet-manager:dashboard-VERSION`. Do not publish to another repository
+(an earlier `skorcius/fleet-manager-dashboard` repository is not used). Confirm
+the destination before publishing from a fork or to another registry.
 
 ## Scope
 
@@ -54,7 +54,7 @@ archives (workflow), and the Homebrew formulas (workflow).
    version; the tag workflow's version check fails a tag when any of them differs.
 3. Add `docs/releases/VERSION.md` and its README link. For publication, update
    the Server image pins (`skorcius/fleet-manager:VERSION`) and the dashboard
-   image pins (`skorcius/fleet-manager-dashboard:VERSION`) in README, the CLIProxy
+   image pins (`skorcius/fleet-manager:dashboard-VERSION`) in README, the CLIProxy
    operations guide, and `deploy/homelab/{README.md,compose.yaml,setup.py,.env.example}`.
    Leave Homebrew formulas
    to the release workflow; never invent archive checksums.
@@ -132,7 +132,7 @@ architectures, registries, or a mutable `latest` tag without a request.
 VERSION=X.Y.Z
 SHA=$(git rev-parse HEAD)
 SERVER_IMAGE="skorcius/fleet-manager:$VERSION"
-DASHBOARD_IMAGE="skorcius/fleet-manager-dashboard:$VERSION"
+DASHBOARD_IMAGE="skorcius/fleet-manager:dashboard-$VERSION"
 docker build --platform linux/amd64 \
   --label "org.opencontainers.image.revision=$SHA" -t "$SERVER_IMAGE" .
 docker build --platform linux/amd64 -f dashboard/Dockerfile \
@@ -186,12 +186,10 @@ Clean up only that temporary Compose project and its volumes, and the local test
 images you do not intend to publish.
 
 The image pushes are manual because no workflow publishes them. They need Docker
-Hub credentials for `skorcius/fleet-manager` and
-`skorcius/fleet-manager-dashboard` in the local credential store. Check
-`docker login` state without printing credentials, and ask the user to log in if
-it is missing; do not look for tokens in files or the environment. If the
-dashboard repository does not exist on Docker Hub yet, ask the user to create it
-and wait. Publishing the images and pushing the tag are separate outward-facing
+Hub credentials for `skorcius/fleet-manager` in the local credential store.
+Check `docker login` state without printing credentials, and ask the user to log
+in if it is missing; do not look for tokens in files or the environment.
+Publishing the images and pushing the tag are separate outward-facing
 steps: build and smoke-test first, report both image IDs and labels, and push only
 when the user has asked for publication.
 

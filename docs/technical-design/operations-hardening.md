@@ -26,7 +26,7 @@ is not implemented.
 
 ## Dashboard container
 
-The dashboard is not part of the Server. `skorcius/fleet-manager-dashboard` is an
+The dashboard is not part of the Server. `skorcius/fleet-manager:dashboard-VERSION` is an
 unprivileged nginx image that serves the built Vue application over HTTPS on
 8443 (published as `FLEET_DASHBOARD_PORT`, 7444 by default). It has its own TLS
 identity and does not share secrets with the Server. It allows TLS 1.2 and 1.3
