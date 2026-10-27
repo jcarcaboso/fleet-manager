@@ -17,7 +17,7 @@ import shlex
 import subprocess
 import uuid
 
-SERVER_IMAGE = 'skorcius/fleet-manager:0.9.0'
+SERVER_IMAGE = 'skorcius/fleet-manager:0.10.0'
 DASHBOARD_IMAGE = 'skorcius/fleet-manager-dashboard:0.10.0'
 
 parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)

@@ -128,7 +128,7 @@ it in Git or PostgreSQL. Set `FLEET_CLIPROXY_API_KEY` in the environment used to
 start Compose:
 
 ```sh
-sed -i 's|^FLEET_IMAGE=.*|FLEET_IMAGE=skorcius/fleet-manager:0.9.0|' .env
+sed -i 's|^FLEET_IMAGE=.*|FLEET_IMAGE=skorcius/fleet-manager:0.10.0|' .env
 export FLEET_CLIPROXY_API_KEY='replace-with-a-dedicated-proxy-key'
 docker compose up -d --wait
 ```
@@ -211,7 +211,7 @@ The Server terminates HTTPS itself to validate Node client certificates. A proxy
 in front must preserve TLS with TCP passthrough; ordinary HTTP termination does
 not preserve this authentication.
 
-The pinned POC image tag is `skorcius/fleet-manager:0.9.0`. To upgrade,
+The pinned POC image tag is `skorcius/fleet-manager:0.10.0`. To upgrade,
 back up PostgreSQL and the private configuration, change `FLEET_IMAGE` in `.env`,
 then run `docker compose pull` and `docker compose up -d --force-recreate --wait`.
 Migrations run before the Server starts. Do not run `docker compose down -v` on
@@ -271,7 +271,7 @@ session cookie, the two addresses are not on the same site.
 When upgrading from `0.2.0`, first replace `compose.yaml` with this release's
 copy so it supplies the Server's public URL. Preserve `.env`, `secrets/`,
 `operator.env`, `ssh/`, and Docker volumes. Set `FLEET_IMAGE` to
-`skorcius/fleet-manager:0.9.0` in `.env`. Do not rerun the plain `setup.py` on an
+`skorcius/fleet-manager:0.10.0` in `.env`. Do not rerun the plain `setup.py` on an
 existing installation; run `setup.py --add-dashboard` as described above. The
 dashboard uses the existing Operator token and CA.
 
