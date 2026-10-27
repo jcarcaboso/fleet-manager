@@ -216,7 +216,8 @@ describe('revoking a link', () => {
     app!.mock.state.signedIn = false;
     await click($('.link-row--active .link-act button'));
     await waitFor(() => app!.router.currentRoute.value.name === 'login');
-    await app!.settle();
+    // The login view is loaded lazily, so wait for its text rather than a fixed number of ticks.
+    await waitFor(() => /session ended/i.test(document.body.textContent ?? ''));
     expect(document.body.textContent).toMatch(/session ended/i);
   });
 });
