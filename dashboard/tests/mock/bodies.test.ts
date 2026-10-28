@@ -10,7 +10,7 @@ import { bindBody, shapeFor } from '@/api/mock/bind';
 import { createMockServer } from '@/api/mock';
 import { createApiClient } from '@/api/client';
 import { createSession } from '@/api/session';
-import { TOKEN } from '../helpers/app';
+import { NAME, PASSWORD } from '../helpers/app';
 import { loginClient, mockApi } from '../helpers/mock';
 import { allowMalformedBodies, checkMalformed, takeMalformed, watchMock } from '../helpers/strict';
 
@@ -47,7 +47,7 @@ interface Route {
   required?: string[];
 }
 const ROUTES: Route[] = [
-  { name: 'login', path: () => 'login', good: () => ({ token: TOKEN }), without: [['token', 401, 'unauthorized']] },
+  { name: 'login', path: () => 'login', good: () => ({ name: NAME, password: PASSWORD }), without: [['password', 401, 'unauthorized'], ['name', 401, 'unauthorized']] },
   { name: 'nodes/rename', path: () => 'nodes/rename', good: () => ({ currentAlias: 'studio-mini', alias: 'studio-renamed' }), without: [['currentAlias', 400, 'invalid_node_alias'], ['alias', 400, 'invalid_node_alias']] },
   { name: 'nodes/{id}/retry', path: id => `nodes/${id('studio-mini')}/retry`, good: () => ({ target: 'ai-client/claude' }), without: [['target', 400, 'invalid_request']] },
   { name: 'nodes/{id}/remove', path: id => `nodes/${id('build-runner-02')}/remove`, good: () => ({ alias: 'build-runner-02' }), without: [['alias', 400, 'invalid_node_alias']] },
@@ -116,7 +116,7 @@ describe.each(ROUTES)('POST $name binds its body like the Server', route => {
 
 describe('types', () => {
   it.each([
-    ['login', { token: 5 }],
+    ['login', { password: 5 }],
     ['nodes/rename', { currentAlias: 'a', alias: 5 }],
     ['nodes/rename', { currentAlias: ['a'], alias: 'b' }],
     ['issues/state', { id: 'x', action: 'snooze', hours: 1.5 }],
@@ -190,7 +190,7 @@ describe('the antiforgery token is bound to the identity', () => {
   it('it changes at login and at logout, and a request that still carries the old one is 400 invalid_csrf', async () => {
     const { mock, call } = server({ signedOut: true });
     const anonymous = mock.state.csrf;
-    expect((await call('login', { token: TOKEN })).status).toBe(200);
+    expect((await call('login', { name: NAME, password: PASSWORD })).status).toBe(200);
     expect(mock.state.csrf).not.toBe(anonymous);
     /* the token from before the login */
     const stale = await mock.fetch('https://mock.fleet.invalid/dashboard/api/source/rescan', { method: 'POST', headers: { 'X-Fleet-CSRF': anonymous }, body: '{}' });
@@ -207,7 +207,7 @@ describe('the antiforgery token is bound to the identity', () => {
   it('a failed login keeps the token', async () => {
     const { mock, call } = server({ signedOut: true });
     const before = mock.state.csrf;
-    expect((await call('login', { token: 'bad' + 'x'.repeat(40) })).status).toBe(401);
+    expect((await call('login', { name: NAME, password: 'bad' + 'x'.repeat(40) })).status).toBe(401);
     expect(mock.state.csrf).toBe(before);
   });
 
@@ -223,7 +223,7 @@ describe('the client forgets its CSRF token at login and at logout', () => {
 
   it('the first mutation after login is not refused for a stale token (it needs no second attempt)', async () => {
     const { mock, api, session } = mockApi({ signedOut: true });
-    await session.login(TOKEN);
+    await session.login(NAME, PASSWORD);
     await api.post('source/rescan', {});
     expect(statuses(mock)).toEqual([200, 200]);
     expect(mock.calls.filter(c => c.path === 'csrf')).toHaveLength(2); // one before the login, one after
@@ -242,7 +242,7 @@ describe('the client forgets its CSRF token at login and at logout', () => {
     await session.restore();
     await api.post('source/rescan', {});
     await session.logout();
-    await session.login(TOKEN);
+    await session.login(NAME, PASSWORD);
     await api.post('source/rescan', {});
     expect(mock.calls.some(c => c.status === 400)).toBe(false);
   });
@@ -251,7 +251,7 @@ describe('the client forgets its CSRF token at login and at logout', () => {
     const mock = watchMock(createMockServer({ signedOut: true }));
     const api = createApiClient({ apiUrl: 'https://mock.fleet.invalid', fetch: mock.fetch });
     const session = createSession(api);
-    await session.login(TOKEN);
+    await session.login(NAME, PASSWORD);
     await api.post('cliproxy/refresh', {});
     expect(mock.calls.some(c => c.status === 400)).toBe(false);
   });

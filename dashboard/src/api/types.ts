@@ -36,12 +36,38 @@ export type QueryParams = Record<string, string | number | boolean | null | unde
 export interface SessionInfo {
   actor: string;
   scope: Scope;
+  /** `true` until the account replaces a password it was given (the default `fleet` account, a new or reset account). */
+  mustChangePassword: boolean;
 }
 export interface CsrfResponse {
   token: string;
 }
 export interface LoginRequest {
-  token: string;
+  name: string;
+  password: string;
+}
+export interface ChangePasswordRequest {
+  currentPassword: string;
+  newPassword: string;
+}
+
+/* ----------------------------------------------------------------- accounts */
+
+/** A dashboard account (`GET accounts`, admin only). Names are lowercase. */
+export interface Account {
+  name: string;
+  scope: Scope;
+  mustChangePassword: boolean;
+  createdAt: string;
+  updatedAt: string;
+}
+export interface AccountList {
+  items: Account[];
+}
+export interface CreateAccountRequest {
+  name: string;
+  password: string;
+  scope: Scope;
 }
 export type LoginResponse = SessionInfo;
 export interface LogoutResponse {
@@ -427,6 +453,10 @@ export interface AuditEvent {
   credentialId: Uuid | null;
   /** `null` if the Node was removed. */
   nodeName: string | null;
+  /** The dashboard account an `account.*` event is about (`null` otherwise, and for a sign-in that named no account). */
+  account?: string | null;
+  /** `account.created` / `account.deleted`: the scope; `account.scope_changed`: `"read -> operate"`. */
+  detail?: string | null;
 }
 
 /* ------------------------------------------------------------------ enrollment */

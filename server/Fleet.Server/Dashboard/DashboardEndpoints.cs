@@ -1,9 +1,8 @@
 using System.Security.Claims;
-using System.Security.Cryptography;
 using System.Security.Cryptography.X509Certificates;
-using System.Text;
 using System.Text.Json;
 using Fleet.Core.Coordination;
+using Fleet.Server.Persistence;
 using Fleet.Server.Security;
 using Fleet.Server.Transport;
 using Microsoft.AspNetCore.Antiforgery;
@@ -17,7 +16,9 @@ namespace Fleet.Server.Dashboard;
 public static class DashboardEndpoints
 {
     public const string Scheme = "Dashboard";
-    private const string DigestClaim = "fleet:operator-digest";
+    private const string AccountIdClaim = "fleet:account-id";
+    private const string StampClaim = "fleet:account-stamp";
+    private const string MustChangeClaim = "fleet:must-change-password";
 
     public static void AddFleetDashboard(this IServiceCollection services)
     {
@@ -49,16 +50,22 @@ public static class DashboardEndpoints
                 context.Response.StatusCode = StatusCodes.Status403Forbidden;
                 return Task.CompletedTask;
             };
-            options.Events.OnValidatePrincipal = context =>
+            // A session lasts only while its account exists with the same security stamp. Password, scope and deletion changes rotate it.
+            options.Events.OnValidatePrincipal = async context =>
             {
-                var settings = context.HttpContext.RequestServices.GetRequiredService<IOptions<FleetOptions>>().Value;
-                var actor = context.Principal?.FindFirstValue(ClaimTypes.NameIdentifier);
-                var digest = context.Principal?.FindFirstValue(DigestClaim);
-                if (!settings.OperatorCredentials().Any(x => x.Key == actor &&
-                    string.Equals(x.Value, digest, StringComparison.OrdinalIgnoreCase)) ||
-                    context.Principal?.FindFirstValue(OperatorScopeNames.ClaimType) != settings.ScopeOf(actor!).Name())
+                var principal = context.Principal;
+                if (!Guid.TryParse(principal?.FindFirstValue(AccountIdClaim), out var id) ||
+                    !Guid.TryParse(principal?.FindFirstValue(StampClaim), out var stamp))
+                {
                     context.RejectPrincipal();
-                return Task.CompletedTask;
+                    return;
+                }
+                var accounts = context.HttpContext.RequestServices.GetRequiredService<OperatorAccountStore>();
+                var account = await accounts.FindAsync(id, context.HttpContext.RequestAborted);
+                if (account is null || account.SecurityStamp != stamp || account.Name != principal!.FindFirstValue(ClaimTypes.NameIdentifier) ||
+                    account.Scope != principal.FindFirstValue(OperatorScopeNames.ClaimType) ||
+                    account.MustChangePassword != (principal.FindFirstValue(MustChangeClaim) == "true"))
+                    context.RejectPrincipal();
             };
         });
         services.AddAuthorizationBuilder().AddPolicy(Scheme,
@@ -185,40 +192,88 @@ public static class DashboardEndpoints
         });
         api.MapGet("/csrf", (HttpContext http, IAntiforgery antiforgery) =>
             Results.Ok(new { token = antiforgery.GetAndStoreTokens(http).RequestToken }));
-        api.MapPost("/login", async (LoginRequest request, HttpContext http, IOptions<FleetOptions> options) =>
+        // Dashboard sign-in uses accounts. Operator tokens authenticate only the bearer API at /operator/v1.
+        api.MapPost("/login", async (LoginRequest request, HttpContext http, OperatorAccountStore accounts, CancellationToken ct) =>
         {
-            if (request.Token is null || request.Token.Length is < 32 or > 1024) return LoginRejected();
-            var digest = SHA256.HashData(Encoding.UTF8.GetBytes(request.Token));
-            string? actor = null;
-            foreach (var candidate in options.Value.OperatorCredentials())
-                if (CryptographicOperations.FixedTimeEquals(digest, Convert.FromHexString(candidate.Value))) actor = candidate.Key;
-            if (actor is null) return LoginRejected();
-            var scope = options.Value.ScopeOf(actor);
-            var principal = new ClaimsPrincipal(new ClaimsIdentity([
-                new Claim(ClaimTypes.NameIdentifier, actor), new Claim(DigestClaim, Convert.ToHexStringLower(digest)),
-                new Claim(OperatorScopeNames.ClaimType, scope.Name())], Scheme));
-            await http.SignInAsync(Scheme, principal, new AuthenticationProperties { IsPersistent = false, AllowRefresh = false });
-            return Results.Ok(new { actor, scope = scope.Name() });
+            var account = await accounts.AuthenticateAsync(request.Name, request.Password, ct);
+            if (account is null) return LoginRejected();
+            await SignInAsync(http, account);
+            return Results.Ok(SessionOf(account));
         }).RequireRateLimiting("enrollment");
         var authenticated = api.MapGroup("").RequireAuthorization(Scheme);
         authenticated.MapGet("/session", (HttpContext http) => Results.Ok(new
         {
             actor = Actor(http),
-            scope = http.User.FindFirstValue(OperatorScopeNames.ClaimType)
+            scope = http.User.FindFirstValue(OperatorScopeNames.ClaimType),
+            mustChangePassword = MustChangePassword(http)
         }));
         authenticated.MapPost("/logout", async (HttpContext http) =>
         {
             await http.SignOutAsync(Scheme);
             return Results.Ok(new { signedOut = true });
         });
+        // The signed-in account changes its own password. The session continues under a new cookie; other sessions of the account end.
+        authenticated.MapPost("/account/password", async (ChangePasswordRequest request, HttpContext http, OperatorAccountStore accounts,
+            CancellationToken ct) =>
+        {
+            var account = await accounts.ChangeOwnPasswordAsync(Guid.Parse(http.User.FindFirstValue(AccountIdClaim)!),
+                request.CurrentPassword, request.NewPassword, ct);
+            await SignInAsync(http, account);
+            return Results.Ok(SessionOf(account));
+        }).RequireRateLimiting("enrollment");
+
+        // Everything else waits until a required password change is done.
+        var ready = authenticated.MapGroup("").AddEndpointFilter(async (context, next) =>
+            MustChangePassword(context.HttpContext)
+                ? Results.Json(new { code = "password_change_required", message = "Change your password before continuing." },
+                    statusCode: StatusCodes.Status403Forbidden)
+                : await next(context));
+        MapAccounts(ready);
         // Every Operator route is shared with /operator/v1, so the two surfaces cannot drift.
-        OperatorApi.Map(authenticated, TimeSpan.FromSeconds(app.Configuration.GetValue("Source:ScanTimeoutSeconds", 180) + 30));
+        OperatorApi.Map(ready, TimeSpan.FromSeconds(app.Configuration.GetValue("Source:ScanTimeoutSeconds", 180) + 30));
     }
+
+    /// <summary>
+    /// Account administration. Only admin sessions may list or change accounts. The store checks the session's account again once it
+    /// holds the account lock, so a request that was already waiting cannot use rights that were removed meanwhile.
+    /// </summary>
+    private static void MapAccounts(RouteGroupBuilder group)
+    {
+        var accounts = group.MapGroup("/accounts").AddEndpointFilter(async (context, next) =>
+            OperatorApi.HasScope(context.HttpContext, OperatorScope.Admin) ? await next(context) : OperatorApi.ScopeDenied(OperatorScope.Admin));
+        accounts.MapGet("", async (OperatorAccountStore store, CancellationToken ct) => Results.Ok(new { items = await store.ListAsync(ct) }));
+        accounts.MapPost("", async (CreateAccountRequest request, HttpContext http, OperatorAccountStore store, CancellationToken ct) =>
+            Results.Json(await store.CreateAsync(AccountActorOf(http), request.Name, request.Password, request.Scope, ct), statusCode: StatusCodes.Status201Created));
+        accounts.MapPost("/{name}/scope", async (string name, AccountScopeRequest request, HttpContext http, OperatorAccountStore store,
+            CancellationToken ct) => Results.Ok(await store.SetScopeAsync(AccountActorOf(http), name, request.Scope, ct)));
+        accounts.MapPost("/{name}/password", async (string name, ResetPasswordRequest request, HttpContext http, OperatorAccountStore store,
+            CancellationToken ct) => Results.Ok(await store.ResetPasswordAsync(AccountActorOf(http), name, request.Password, ct)));
+        accounts.MapPost("/{name}/delete", async (string name, HttpContext http, OperatorAccountStore store, CancellationToken ct) =>
+        {
+            await store.DeleteAsync(AccountActorOf(http), name, ct);
+            return Results.Ok(new { deleted = true });
+        });
+    }
+
+    private static Task SignInAsync(HttpContext http, OperatorAccountRow account) => http.SignInAsync(Scheme,
+        new ClaimsPrincipal(new ClaimsIdentity([
+            new Claim(ClaimTypes.NameIdentifier, account.Name), new Claim(AccountIdClaim, account.Id.ToString("D")),
+            new Claim(StampClaim, account.SecurityStamp.ToString("D")), new Claim(OperatorScopeNames.ClaimType, account.Scope),
+            new Claim(MustChangeClaim, account.MustChangePassword ? "true" : "false")], Scheme)),
+        new AuthenticationProperties { IsPersistent = false, AllowRefresh = false });
+
+    private static object SessionOf(OperatorAccountRow account) =>
+        new { actor = account.Name, scope = account.Scope, mustChangePassword = account.MustChangePassword };
+
+    private static bool MustChangePassword(HttpContext http) => http.User.FindFirstValue(MustChangeClaim) == "true";
 
     private static string Actor(HttpContext http) => http.User.FindFirstValue(ClaimTypes.NameIdentifier)!;
 
+    private static AccountActor AccountActorOf(HttpContext http) =>
+        new(Guid.Parse(http.User.FindFirstValue(AccountIdClaim)!), Guid.Parse(http.User.FindFirstValue(StampClaim)!));
+
     private static IResult LoginRejected() => Results.Json(
-        new { code = "unauthorized", message = "The Operator token was not accepted." }, statusCode: StatusCodes.Status401Unauthorized);
+        new { code = "unauthorized", message = "The name or password was not accepted." }, statusCode: StatusCodes.Status401Unauthorized);
     // Embedded files under Dashboard/Assets. Only the enrollment page and its two assets are ever served.
     private static readonly IReadOnlyDictionary<string, string> ContentTypes = new Dictionary<string, string>(StringComparer.Ordinal)
     {
@@ -235,7 +290,11 @@ public static class DashboardEndpoints
         using var reader = new StreamReader(stream);
         return Results.Text(reader.ReadToEnd(), contentType);
     }
-    public sealed record LoginRequest(string Token);
+    public sealed record LoginRequest(string? Name, string? Password);
+    public sealed record ChangePasswordRequest(string? CurrentPassword, string? NewPassword);
+    public sealed record CreateAccountRequest(string? Name, string? Password, string? Scope);
+    public sealed record AccountScopeRequest(string? Scope);
+    public sealed record ResetPasswordRequest(string? Password);
 }
 
 /// <summary>The separate dashboard's normalized origin. Empty when Fleet:DashboardOrigin is not set.</summary>

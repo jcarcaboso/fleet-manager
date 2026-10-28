@@ -26,6 +26,8 @@ public sealed class OperatorApiFixture : IAsyncLifetime
     public const string AdminToken = "test-only-admin-token-with-at-least-32-characters";
     public const string OperateToken = "test-only-operate-token-with-at-least-32-characters";
     public const string ReadToken = "test-only-read-token-with-at-least-32-characters";
+    // Each Operator token has a dashboard account of the same name and scope, so browser and bearer tests see the same actor.
+    public const string AccountPassword = "test-only-account-password";
     public const string Origin = "https://localhost";
     // The dashboard is another origin. Nothing listens there; browsers only send it as the Origin header.
     public const string DashboardOrigin = "https://localhost:7444";
@@ -69,6 +71,43 @@ public sealed class OperatorApiFixture : IAsyncLifetime
         Anonymous = NewClient();
         using var scope = Factory.Services.CreateScope();
         await scope.ServiceProvider.GetRequiredService<FleetDbContext>().Database.MigrateAsync();
+        foreach (var token in new[] { AdminToken, OperateToken, ReadToken })
+            await SeedAccountAsync(Factory.Services, AccountOf(token).Name, AccountOf(token).Scope);
+    }
+
+    public static (string Name, string Scope) AccountOf(string token) => token switch
+    {
+        AdminToken => ("operator", "admin"),
+        OperateToken => ("operate-bot", "operate"),
+        ReadToken => ("read-bot", "read"),
+        _ => throw new ArgumentException("No account belongs to that token.", nameof(token))
+    };
+
+    /// <summary>The dashboard login body for the account that matches an Operator token.</summary>
+    public static object LoginBody(string token) => new { name = AccountOf(token).Name, password = AccountPassword };
+
+    /// <summary>Adds a dashboard account that does not have to change its password. Creates the Workspace row when needed.</summary>
+    public static async Task SeedAccountAsync(IServiceProvider services, string name, string scope, string password = AccountPassword)
+    {
+        using var serviceScope = services.CreateScope();
+        var db = serviceScope.ServiceProvider.GetRequiredService<FleetDbContext>();
+        var workspace = serviceScope.ServiceProvider.GetRequiredService<Microsoft.Extensions.Options.IOptions<Fleet.Server.Security.FleetOptions>>().Value.WorkspaceId;
+        await db.Database.ExecuteSqlInterpolatedAsync(
+            $"INSERT INTO workspaces (\"Id\", \"SingletonKey\", \"Name\") VALUES ({workspace}, 1, {"default"}) ON CONFLICT (\"SingletonKey\") DO NOTHING");
+        var now = DateTimeOffset.UtcNow;
+        db.OperatorAccounts.Add(new OperatorAccountRow
+        {
+            Id = Guid.NewGuid(),
+            WorkspaceId = workspace,
+            Name = name,
+            PasswordHash = Fleet.Server.Security.PasswordHashing.Hash(password),
+            Scope = scope,
+            MustChangePassword = false,
+            SecurityStamp = Guid.NewGuid(),
+            CreatedAt = now,
+            UpdatedAt = now
+        });
+        await db.SaveChangesAsync();
     }
 
     /// <summary>Server settings with one admin (the default scope), one operate and one read Operator.</summary>
@@ -107,7 +146,7 @@ public sealed class OperatorApiFixture : IAsyncLifetime
     /// A client that sends the request target as written. The in-memory test server does not fill
     /// <c>IHttpRequestFeature.RawTarget</c> as Kestrel does, so the target travels in a header and is restored by <see cref="RawTargetFromHeader"/>.
     /// </summary>
-    private HttpClient NewClient(bool cookies = false) => Factory.CreateDefaultClient(new Uri(Origin),
+    public HttpClient NewClient(bool cookies = false) => Factory.CreateDefaultClient(new Uri(Origin),
         cookies ? [new RawTargetHandler(), new CookieJarHandler()] : [new RawTargetHandler()]);
 
     public async Task<HttpClient> BrowserAsync(string token)
@@ -115,7 +154,7 @@ public sealed class OperatorApiFixture : IAsyncLifetime
         var browser = NewClient(cookies: true);
         browser.DefaultRequestHeaders.Add("Origin", DashboardOrigin);
         await RefreshCsrfAsync(browser);
-        (await browser.PostAsJsonAsync("/dashboard/api/login", new { token })).EnsureSuccessStatusCode();
+        (await browser.PostAsJsonAsync("/dashboard/api/login", LoginBody(token))).EnsureSuccessStatusCode();
         await RefreshCsrfAsync(browser);
         return browser;
     }

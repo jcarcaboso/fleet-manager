@@ -263,13 +263,13 @@ describe('Deployments: empty, loading, error and abort', () => {
     await waitFor(() => w().find('.dep-hero').exists());
   });
 
-  it('a token that cannot read shows "Your token cannot open this"', async () => {
+  it('a token that cannot read shows "Your account cannot open this"', async () => {
     app = await mountApp({ path: '/audit' });
     const real = app.ctx.api.page.bind(app.ctx.api);
     (app.ctx.api as { page: unknown }).page = (path: string, ...rest: unknown[]) =>
       (path === 'desired-revisions' ? Promise.reject(Object.assign(new Error('Your Operator scope does not allow this action.'), { status: 403, code: 'insufficient_scope', silent: false })) : (real as (p: string, ...r: unknown[]) => Promise<unknown>)(path, ...rest));
     await app.go('/deployments');
-    expect(w().find('h1').text()).toBe('Your token cannot open this');
+    expect(w().find('h1').text()).toBe('Your account cannot open this');
     expect(w().find('.empty--error button').exists()).toBe(false);
   });
 

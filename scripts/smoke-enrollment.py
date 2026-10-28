@@ -1,8 +1,11 @@
 #!/usr/bin/env python3
 """Enroll a disposable real Agent through the dashboard API of a test server.
 
-Environment: FLEET_SERVER_URL, FLEET_OPERATOR_TOKEN, FLEET_CA_CERT, and FLEET_DASHBOARD_URL. The Server accepts dashboard
-mutations only with `Origin` equal to its configured `Fleet:DashboardOrigin`, so FLEET_DASHBOARD_URL must be that value.
+Environment: FLEET_SERVER_URL, FLEET_OPERATOR_TOKEN, FLEET_CA_CERT, FLEET_DASHBOARD_URL, FLEET_DASHBOARD_NAME and
+FLEET_DASHBOARD_PASSWORD. The Server accepts dashboard mutations only with `Origin` equal to its configured
+`Fleet:DashboardOrigin`, so FLEET_DASHBOARD_URL must be that value. The dashboard account needs the operate scope and must
+already have its own password: the script does not change a password, so the default fleet/fleet account is refused until it
+has been changed. The Operator token is used only to revoke the test Node at the end.
 """
 import argparse
 import base64
@@ -23,6 +26,8 @@ args = parser.parse_args()
 server = os.environ['FLEET_SERVER_URL'].rstrip('/')
 dashboard_origin = os.environ['FLEET_DASHBOARD_URL'].rstrip('/')
 operator_token = os.environ['FLEET_OPERATOR_TOKEN']
+account = os.environ['FLEET_DASHBOARD_NAME']
+password = os.environ['FLEET_DASHBOARD_PASSWORD']
 ca = Path(os.environ['FLEET_CA_CERT'])
 context = ssl.create_default_context(cafile=ca)
 cookies = http.cookiejar.CookieJar()
@@ -45,7 +50,8 @@ def request(path, body=None, expected=200):
 
 
 csrf = request('/dashboard/api/csrf')['token']
-request('/dashboard/api/login', {'token': operator_token})
+session = request('/dashboard/api/login', {'name': account, 'password': password})
+assert not session['mustChangePassword'], f'{account} must change its password first; sign in to the dashboard and change it'
 csrf = request('/dashboard/api/csrf')['token']
 request('/operator/v1/nodes', expected=401)
 alias = 'enrollment-smoke-' + uuid.uuid4().hex[:12]

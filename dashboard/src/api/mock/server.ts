@@ -41,6 +41,18 @@ export interface MockState {
   scope: Scope;
   actor: string;
   csrf: string;
+  /** The signed-in account must replace its password before anything else (`POST account/password`). */
+  mustChangePassword: boolean;
+}
+
+/** A dashboard account. `password` is `null` for most seeded accounts, which accept any password that does not start with `bad`; `fleet` has the default password `fleet`. */
+export interface MockAccount {
+  name: string;
+  scope: Scope;
+  mustChangePassword: boolean;
+  password: string | null;
+  createdAt: string;
+  updatedAt: string;
 }
 
 interface MNode extends DataNode {
@@ -66,6 +78,9 @@ interface MAudit {
   subject: string;
   nodeId: string | null;
   credentialId: string | null;
+  /** The dashboard account an account.* event is about, and the detail (a scope, or "read -> operate"). */
+  account?: string | null;
+  detail?: string | null;
 }
 interface IssueStateRec {
   kind: 'acknowledged' | 'snoozed';
@@ -88,6 +103,8 @@ export interface MockServer {
   /** Every call, with its JSON body, whether it settled and whether the caller aborted it. */
   calls: MockCall[];
   issueStates: Map<string, IssueStateRec>;
+  /** The dashboard accounts (`GET accounts`). The signed-in one is `state.actor`. */
+  accounts: MockAccount[];
   /** Stops the timers of the simulated Agents (enrollment, disk refresh). Call it when a test ends. */
   dispose(): void;
 }
@@ -131,7 +148,30 @@ export function createMockServer(overrides: Partial<MockOptions> = {}): MockServ
      that carries an older one is 400 invalid_csrf. The mock rotates its token at login and logout, so a client that forgets `clearCsrf()` is caught. */
   let csrfSeq = 0;
   const newCsrf = (): string => 'mock-csrf-' + hex(`${Date.now()}:${++csrfSeq}`, 12);
-  const state: MockState = { signedIn: !cfg.signedOut, scope: cfg.scope, actor: cfg.actor, csrf: newCsrf() };
+  const state: MockState = { signedIn: !cfg.signedOut, scope: cfg.scope, actor: cfg.actor, csrf: newCsrf(), mustChangePassword: cfg.mustChangePassword };
+  /* The signed-in account plus a few others; the default `fleet` account still has its given password. */
+  const seededAt = new Date(Date.now() - 30 * DAY).toISOString();
+  const accounts: MockAccount[] = [
+    { name: cfg.actor, scope: cfg.scope, mustChangePassword: cfg.mustChangePassword, password: null, createdAt: seededAt, updatedAt: seededAt },
+    ...[
+      { name: 'fleet', scope: 'admin' as Scope, mustChangePassword: true, password: 'fleet' },
+      { name: 'ana', scope: 'operate' as Scope, mustChangePassword: false, password: null },
+      { name: 'viewer', scope: 'read' as Scope, mustChangePassword: false, password: null },
+    ].filter(a => a.name !== cfg.actor).map(a => ({ ...a, createdAt: seededAt, updatedAt: seededAt })),
+  ];
+  const accountOut = (a: MockAccount): Json => ({ name: a.name, scope: a.scope, mustChangePassword: a.mustChangePassword, createdAt: a.createdAt, updatedAt: a.updatedAt });
+  const passwordOk = (a: MockAccount | undefined, password: string): boolean => !!a && !!password && (a.password === null ? !password.startsWith('bad') : a.password === password);
+  /* Like the Server's security stamp: an admin's change to the signed-in account (scope, password) ends its session. The response
+     of that request still arrives; the next request is 401. Only the account's own password change keeps the session. */
+  const endSessionOf = (a: MockAccount): void => {
+    if (a.name !== state.actor) return;
+    state.signedIn = false;
+    state.csrf = newCsrf();
+  };
+  const sessionOut = (): Json => ({ actor: state.actor, scope: state.scope, mustChangePassword: state.mustChangePassword });
+  const ACCOUNT_NAME = /^[a-z0-9][a-z0-9._-]{0,63}$/;
+  const SCOPE_NAMES: Scope[] = ['read', 'operate', 'admin'];
+  const goodPassword = (password: unknown): password is string => typeof password === 'string' && password.length >= 10 && password.length <= 256;
   const nodes = (cfg.empty ? [] : JSON.parse(JSON.stringify(F.nodes))) as MNode[];
   if (cfg.weirdAlias && nodes.length) nodes[0]!.alias = 'rack/A 100%';
   const links = (cfg.empty ? [] : JSON.parse(JSON.stringify(F.enrollmentLinks))) as MLink[];
@@ -600,11 +640,15 @@ export function createMockServer(overrides: Partial<MockOptions> = {}): MockServ
   const json = (body: unknown, status = 200): Response => new Response(body === null ? '' : JSON.stringify(body), { status, headers: { 'Content-Type': 'application/json' } });
   /* Every error is { code, message }. */
   const MESSAGES: Record<string, string> = {
-    unauthorized: 'Sign in with a valid Operator token.', invalid_csrf: 'The CSRF token is missing or no longer valid.', invalid_origin: 'The Origin header must be the configured dashboard origin.',
+    unauthorized: 'A valid Operator token or dashboard session is required.', invalid_csrf: 'The CSRF token is missing or no longer valid.', invalid_origin: 'The Origin header must be the configured dashboard origin.',
     invalid_request: 'The request is not valid.', node_not_found: 'No Node matches that ID or alias.',
     insufficient_scope: 'This credential does not have the scope required for this action.', target_not_found: 'The Node has no such Target.', target_not_failed: 'The current Assignment for that Target is not failed.',
     node_revoked: 'The Node is revoked.', enrollment_link_not_found: 'No enrollment link has that ID.', issue_not_found: 'No current issue has that ID.',
     revision_not_found: 'No desired revision has that ID.', rollout_not_found: 'No rollout has that ID.',
+    password_change_required: 'Change your password before continuing.', invalid_current_password: 'The current password is not correct.',
+    invalid_password: 'The password must be 10 to 256 characters and differ from the current one.', invalid_account_name: 'The account name is not valid.',
+    invalid_scope: 'The scope must be read, operate or admin.', account_exists: 'An account with that name already exists.',
+    account_not_found: 'No account has that name.', last_admin: 'At least one admin account must remain.', cannot_delete_self: 'You cannot delete your own account.',
   };
   const err = (status: number, code: string, message?: string): Response => json({ code, message: message || MESSAGES[code] || code }, status);
   const seg = (value: string): string => decodeURIComponent(value); // one path segment, decoded once
@@ -644,8 +688,8 @@ export function createMockServer(overrides: Partial<MockOptions> = {}): MockServ
   const auditOut = (): Json[] => audit.map(e => {
     const node = e.nodeId ? nodes.find(n => n.id === e.nodeId) : (['node_enrolled', 'node_credential_renewed', 'node_alias_changed', 'node_revoked', 'node_removed'].includes(e.action) ? findNode(String(e.subject).split('→').pop()!.trim()) : null);
     const nodeId = e.nodeId || node?.id || null;
-    return { recordedAt: e.recordedAt, action: e.action, actor: e.action === 'node_credential_renewed' && nodeId ? nodeId : e.actor, nodeId, credentialId: e.action.startsWith('node_credential') && nodeId ? guid('cred:' + nodeId) : null, nodeName: node ? node.alias : null };
-  }).concat(cfg.empty ? [] : [{ recordedAt: T(F.audit[F.audit.length - 1]!.recordedAt)!, action: 'node_removed', actor: 'ana', nodeId: guid('removed-node'), credentialId: null, nodeName: null }]);
+    return { recordedAt: e.recordedAt, action: e.action, actor: e.action === 'node_credential_renewed' && nodeId ? nodeId : e.actor, nodeId, credentialId: e.action.startsWith('node_credential') && nodeId ? guid('cred:' + nodeId) : null, nodeName: node ? node.alias : null, account: e.account ?? null, detail: e.detail ?? null };
+  }).concat(cfg.empty ? [] : [{ recordedAt: T(F.audit[F.audit.length - 1]!.recordedAt)!, action: 'node_removed', actor: 'ana', nodeId: guid('removed-node'), credentialId: null, nodeName: null, account: null, detail: null }]);
 
   /* The state follows the Server's ToLink: consumed wins over revoked, revoked over expired, expired over active. */
   const linkOut = (l: MLink): Json => {
@@ -702,15 +746,22 @@ export function createMockServer(overrides: Partial<MockOptions> = {}): MockServ
       if (!body) return malformed();
       if (!originOk()) return err(400, 'invalid_origin');
       if (!cfg.csrfCookie || headers['x-fleet-csrf'] !== state.csrf) return err(400, 'invalid_csrf');
-      /* The Server rejects tokens shorter than 32 characters before it compares them. */
-      if (!body || typeof body.token !== 'string' || body.token.length < 32 || body.token.length > 1024 || body.token.startsWith('bad')) return err(401, 'unauthorized', 'The Operator token was not accepted.');
+      const tried = String(body.name ?? '').trim().toLowerCase();
+      const account = accounts.find(a => a.name === tried);
+      /* Every attempt is audited, with the name tried as the actor (unknown when it is not a valid name). */
+      const ok = passwordOk(account, String(body.password ?? ''));
+      addAudit(ok ? 'account.signed_in' : 'account.sign_in_failed', { actor: ACCOUNT_NAME.test(tried) ? tried : 'unknown', account: account?.name ?? null });
+      if (!ok) return err(401, 'unauthorized', 'The name or password was not accepted.');
       state.signedIn = true;
+      state.actor = account!.name;
+      state.scope = account!.scope;
+      state.mustChangePassword = account!.mustChangePassword;
       state.csrf = newCsrf();
       cookieSent = cfg.cookie;
-      return json({ actor: state.actor, scope: state.scope });
+      return json(sessionOut());
     }
     if (!state.signedIn || !cookieSent) return err(401, 'unauthorized');
-    if (path === 'session') return json({ actor: state.actor, scope: state.scope });
+    if (path === 'session') return json(sessionOut());
     if (method !== 'GET') {
       if (shape) {
         body = bindBody(shape, body);
@@ -719,7 +770,67 @@ export function createMockServer(overrides: Partial<MockOptions> = {}): MockServ
       if (!originOk()) return err(400, 'invalid_origin');
       if (!cfg.csrfCookie || headers['x-fleet-csrf'] !== state.csrf) return err(400, 'invalid_csrf');
       if (path === 'logout') { state.signedIn = false; state.csrf = newCsrf(); return json({ signedOut: true }); }
-      if (cfg.forbid) return err(403, 'insufficient_scope', 'This credential cannot do that.');
+      if (path === 'account/password') {
+        const me = accounts.find(a => a.name === state.actor);
+        if (!me) return err(401, 'unauthorized');
+        if (!passwordOk(me, String(body.currentPassword ?? ''))) return err(400, 'invalid_current_password');
+        if (!goodPassword(body.newPassword) || body.newPassword === body.currentPassword) return err(400, 'invalid_password');
+        me.password = body.newPassword;
+        me.mustChangePassword = state.mustChangePassword = false;
+        me.updatedAt = nowIso();
+        state.csrf = newCsrf(); // the Server signs the session in again
+        addAudit('account.password_changed', { account: me.name });
+        return json(sessionOut());
+      }
+    }
+    /* A given password must be replaced first: every other route is 403 until then. */
+    if (state.mustChangePassword) return err(403, 'password_change_required');
+    if (path === 'accounts' || path.startsWith('accounts/')) {
+      if (!need('admin')) return err(403, 'insufficient_scope', 'This credential does not have the admin scope required for this action.');
+      if (method === 'GET' && path === 'accounts') return json({ items: accounts.slice().sort((a, b) => a.name.localeCompare(b.name)).map(accountOut) });
+    }
+    if (method !== 'GET' && cfg.forbid) return err(403, 'insufficient_scope', 'This credential cannot do that.');
+    if (method === 'POST' && path === 'accounts') {
+      const name = String(body.name ?? '').trim().toLowerCase();
+      if (!ACCOUNT_NAME.test(name)) return err(400, 'invalid_account_name');
+      if (!SCOPE_NAMES.includes(body.scope)) return err(400, 'invalid_scope');
+      if (!goodPassword(body.password)) return err(400, 'invalid_password');
+      if (accounts.some(a => a.name === name)) return err(409, 'account_exists');
+      const now = nowIso();
+      const created: MockAccount = { name, scope: body.scope, mustChangePassword: true, password: body.password, createdAt: now, updatedAt: now };
+      accounts.push(created);
+      addAudit('account.created', { account: name, detail: created.scope });
+      return json(accountOut(created), 201);
+    }
+    let am: RegExpExecArray | null;
+    if (method === 'POST' && (am = /^accounts\/([^/]+)\/(scope|password|delete)$/.exec(path))) {
+      const account = accounts.find(a => a.name === seg(am![1]!));
+      if (!account) return err(404, 'account_not_found');
+      const admins = accounts.filter(a => a.scope === 'admin').length;
+      if (am[2] === 'scope') {
+        if (!SCOPE_NAMES.includes(body.scope)) return err(400, 'invalid_scope');
+        if (account.scope === body.scope) return json(accountOut(account));
+        if (account.scope === 'admin' && admins <= 1) return err(409, 'last_admin');
+        addAudit('account.scope_changed', { account: account.name, detail: `${account.scope} -> ${body.scope}` });
+        account.scope = body.scope;
+        account.updatedAt = nowIso();
+        endSessionOf(account);
+        return json(accountOut(account));
+      }
+      if (am[2] === 'password') {
+        if (!goodPassword(body.password)) return err(400, 'invalid_password');
+        account.password = body.password;
+        account.mustChangePassword = true;
+        account.updatedAt = nowIso();
+        addAudit('account.password_reset', { account: account.name });
+        endSessionOf(account);
+        return json(accountOut(account));
+      }
+      if (account.name === state.actor) return err(409, 'cannot_delete_self');
+      if (account.scope === 'admin' && admins <= 1) return err(409, 'last_admin');
+      accounts.splice(accounts.indexOf(account), 1);
+      addAudit('account.deleted', { account: account.name, detail: account.scope });
+      return json({ deleted: true });
     }
     let m: RegExpExecArray | null;
     if (method === 'GET') {
@@ -1002,7 +1113,7 @@ export function createMockServer(overrides: Partial<MockOptions> = {}): MockServ
   }) as typeof fetch;
 
   return {
-    fetch: mockFetch, options: cfg, state, data: F, nodes, links, audit, calls, issueStates,
+    fetch: mockFetch, options: cfg, state, data: F, nodes, links, audit, calls, issueStates, accounts,
     dispose() {
       for (const id of timers) clearTimeout(id);
       timers.clear();

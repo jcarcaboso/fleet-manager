@@ -145,8 +145,9 @@ test.describe('accessibility smoke', () => {
   test('the sign-in page is a labelled form', async ({ page }) => {
     await open(page, '/login', { signedout: true });
     await expect(page.getByRole('heading', { level: 1 })).toHaveText('Sign in');
-    await expect(page.getByLabel('Operator token')).toHaveAttribute('type', 'password');
-    await expect(page.getByLabel('Operator token')).toHaveAttribute('aria-describedby', 'login-msg');
+    await expect(page.getByLabel('Name', { exact: true })).toHaveAttribute('autocomplete', 'username');
+    await expect(page.getByLabel('Password', { exact: true })).toHaveAttribute('type', 'password');
+    await expect(page.getByLabel('Password', { exact: true })).toHaveAttribute('aria-describedby', 'login-msg');
     await expect(page.locator('#login-msg')).toHaveAttribute('role', 'alert');
   });
 

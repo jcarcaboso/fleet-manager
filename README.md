@@ -64,7 +64,11 @@ dashboard has its own certificate and volume, so run `python3 setup.py
 list the changes to make.
 
 Open the dashboard address, for example `https://YOUR_SERVER:7444`, and sign in
-with an Operator token. The
+as `fleet` with the password `fleet`. The dashboard asks you to choose a new
+password before anything else; until you do, anyone who reaches the dashboard
+can claim the account, so do it right after installing or upgrading. Admins can add more accounts on the
+**Accounts** page. Operator tokens remain the credential of the `fleet` CLI. The
+dashboard is dark by default; pick Light or System under your account. The
 dashboard shows each machine with its Targets, problems, check-ins, disk usage
 and Agent details, lists deployments and their progress, and manages aliases,
 enrollment links, CLIProxy models and the audit log. **Add machine** creates an

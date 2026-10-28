@@ -263,7 +263,7 @@ describe('conventions', () => {
   it('audit items carry the node name, or null for a removed machine', async () => {
     const { get } = setup();
     const items = ((await get('audit?order=newest&limit=100')).body as Page<AuditEvent>).items;
-    expect(items.every(e => keys(e) === 'action,actor,credentialId,nodeId,nodeName,recordedAt')).toBe(true);
+    expect(items.every(e => keys(e) === 'account,action,actor,credentialId,detail,nodeId,nodeName,recordedAt')).toBe(true);
     const removed = items.find(e => e.action === 'node_removed')!;
     expect(removed.nodeName).toBeNull();
     expect(items.find(e => e.action === 'node_revoked')!.nodeName).toBe('old-laptop');
@@ -273,7 +273,7 @@ describe('conventions', () => {
     const { get, post, is, mock, api } = setup({ signedOut: true });
     is(await get('nodes'), 401, 'unauthorized');
     is(await get('csrf'), 200);
-    is(await post('login', { token: 'short' }), 401, 'unauthorized');
+    is(await post('login', { name: 'joan', password: 'bad' }), 401, 'unauthorized');
     await loginClient(api);
     mock.state.scope = 'read';
     is(await post('source/rescan'), 403, 'insufficient_scope');
@@ -285,6 +285,32 @@ describe('conventions', () => {
     mock.options.forbid = true;
     is(await post('source/rescan'), 403, 'insufficient_scope');
     is(await get('nodes'), 200);
+  });
+  it('an admin change to the signed-in account ends its session, like the Server\'s security stamp', async () => {
+    const { get, post, is, mock } = setup();
+    is(await post('accounts/joan/scope', { scope: 'admin' }), 200);
+    is(await get('session'), 200);
+    expect(mock.audit.some(e => e.action === 'account.scope_changed')).toBe(false);
+    is(await post('accounts/ana/scope', { scope: 'read' }), 200);
+    is(await get('session'), 200);
+    is(await post('accounts/joan/scope', { scope: 'operate' }), 200);
+    is(await get('session'), 401, 'unauthorized');
+
+    const reset = setup();
+    reset.is(await reset.post('accounts/joan/password', { password: 'temporary-pass-1' }), 200);
+    reset.is(await reset.get('nodes'), 401, 'unauthorized');
+    const own = setup();
+    own.is(await own.post('account/password', { currentPassword: 'old-password', newPassword: 'a-new-passphrase' }), 200);
+    own.is(await own.get('nodes'), 200);
+  });
+  it('account names start with a letter or digit, and account events name the account', async () => {
+    const { get, post, is } = setup();
+    for (const name of ['.', '..', '.hidden', '-x']) is(await post('accounts', { name, password: 'first-password-1', scope: 'read' }), 400, 'invalid_account_name');
+    is(await post('accounts', { name: 'new.user', password: 'first-password-1', scope: 'read' }), 201);
+    is(await post('accounts/ana/scope', { scope: 'read' }), 200);
+    const items = ((await get('audit?order=newest&limit=100')).body as Page<AuditEvent>).items;
+    expect(items.find(e => e.action === 'account.created')).toMatchObject({ actor: 'joan', account: 'new.user', detail: 'read' });
+    expect(items.find(e => e.action === 'account.scope_changed')).toMatchObject({ actor: 'joan', account: 'ana', detail: 'operate -> read' });
   });
   it('fail=<prefix> fails GET routes under it; unknown routes and bad hours are 404 and 400', async () => {
     const failing = setup({ fail: 'nodes' });

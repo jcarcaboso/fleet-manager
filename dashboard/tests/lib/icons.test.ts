@@ -6,8 +6,8 @@ import { glyphSpec } from '@/lib/status';
 
 describe('icon set', () => {
   it('has the names and paths of the old ui set', () => {
-    expect(iconNames).toHaveLength(39);
-    for (const name of ['search', 'plus', 'sync', 'chevR', 'chevL', 'chevD', 'x', 'check', 'copy', 'terminal', 'file', 'folder', 'key', 'shield', 'lock', 'clock', 'alert', 'info', 'commit', 'branch', 'layers', 'link', 'trash', 'pencil', 'ban', 'activity', 'server', 'spark', 'snooze', 'ack', 'arrowR', 'rocket', 'retry', 'globe', 'list', 'grid', 'logout', 'apple', 'tux']) {
+    expect(iconNames).toHaveLength(42);
+    for (const name of ['search', 'plus', 'sync', 'chevR', 'chevL', 'chevD', 'x', 'check', 'copy', 'terminal', 'file', 'folder', 'key', 'shield', 'lock', 'clock', 'alert', 'info', 'commit', 'branch', 'layers', 'link', 'trash', 'pencil', 'ban', 'activity', 'server', 'spark', 'snooze', 'ack', 'arrowR', 'rocket', 'retry', 'globe', 'list', 'grid', 'logout', 'sun', 'moon', 'monitor', 'apple', 'tux']) {
       expect(iconNames).toContain(name);
     }
   });

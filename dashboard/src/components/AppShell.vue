@@ -27,12 +27,16 @@ const { session, summary, toasts, shell, wizard } = useFleet();
 const route = useRoute();
 const router = useRouter();
 
-const LABELS: Record<NavKey, string> = { machines: 'Machines', problems: 'Problems', deployments: 'Deployments', repository: 'Repository', models: 'Models', enrollment: 'Enrollment', audit: 'Audit' };
+const LABELS: Record<NavKey, string> = { machines: 'Machines', problems: 'Problems', deployments: 'Deployments', repository: 'Repository', models: 'Models', enrollment: 'Enrollment', audit: 'Audit', accounts: 'Accounts' };
+/* Accounts is an admin page; other scopes do not see the entry. */
+const navKeys = computed(() => NAV_KEYS.filter(k => k !== 'accounts' || session.can('admin')));
 const active = computed(() => route.meta.nav);
 const scope = computed(() => session.scopeLabel());
 const scopeTip = computed(() => `Scope: ${scope.value}|${scope.value === 'admin' ? 'Can change anything.' : scope.value === 'operate' ? 'Can retry, sync, refresh and acknowledge or snooze problems. Cannot enroll or revoke.' : 'Can view everything. Cannot change anything.'}`);
 const booting = computed(() => session.state.status === 'unknown');
-const showNav = computed(() => session.signedIn);
+const showMe = computed(() => session.signedIn);
+/* While the account must replace its password only the account page is open, so there is nothing to navigate to. */
+const showNav = computed(() => session.signedIn && !session.state.mustChangePassword);
 const modalHidden = computed(() => modalOpenCount.value === 0);
 const mainEl = ref<HTMLElement | null>(null);
 const loadedNote = computed(() => (shell.loadedAt ? `Loaded ${fmtTime(shell.loadedAt)} UTC` : ''));
@@ -70,11 +74,10 @@ onBeforeUnmount(() => {
   removeKeepFocus?.();
   window.removeEventListener('pagehide', onPageHide);
 });
-/* When the page is hidden (it can come back from the back/forward cache exactly as it was) the token field is cleared and the Add machine
-   wizard is closed, which drops its one-time enrollment link and stops its polling. */
+/* When the page is hidden (it can come back from the back/forward cache exactly as it was) every password field is cleared and the Add
+   machine wizard is closed, which drops its one-time enrollment link and stops its polling. */
 function onPageHide(): void {
-  const input = document.getElementById('operator-token') as HTMLInputElement | null;
-  if (input) input.value = '';
+  document.querySelectorAll<HTMLInputElement>('input[type="password"]').forEach(input => { input.value = ''; });
   wizard.hide();
 }
 
@@ -107,7 +110,7 @@ const retryBoot = async (): Promise<void> => {
     <div class="topbar-in">
       <RouterLink class="brand" :to="{ name: 'machines' }"><BrandMark /><span>Fleet</span></RouterLink>
       <nav v-if="showNav" id="nav" class="nav" aria-label="Primary">
-        <RouterLink v-for="k in NAV_KEYS" :key="k" v-slot="{ href, navigate }" :to="{ name: k }" custom>
+        <RouterLink v-for="k in navKeys" :key="k" v-slot="{ href, navigate }" :to="{ name: k }" custom>
           <a :href="href" :aria-current="k === active ? 'page' : undefined" @click="navigate">
             {{ LABELS[k] }}
             <span v-if="k === 'problems' && summary.state.errors" class="nav-badge" :aria-label="`${summary.state.errors} open errors`">{{ summary.state.errors }}</span>
@@ -115,10 +118,10 @@ const retryBoot = async (): Promise<void> => {
           </a>
         </RouterLink>
       </nav>
-      <div v-if="showNav" id="me" class="me">
+      <div v-if="showMe" id="me" class="me">
         <span class="scope-chip" :data-tip="scopeTip"><Icon :name="scope === 'read' ? 'lock' : 'shield'" />{{ scope }}</span>
-        <Avatar :name="session.state.actor" class="av-me" /><span class="me-name">{{ session.state.actor }}</span>
-        <button type="button" class="btn btn-ghost btn-sm" :disabled="signingOut" @click="signOut"><Icon name="logout" />Sign out</button>
+        <RouterLink class="me-link" :to="{ name: 'account' }" data-tip="Your account|Change your password and the theme."><Avatar :name="session.state.actor" class="av-me" /><span class="me-name">{{ session.state.actor }}</span></RouterLink>
+        <button id="sign-out" type="button" class="btn btn-ghost btn-sm" :disabled="signingOut" @click="signOut"><Icon name="logout" />Sign out</button>
       </div>
     </div>
   </header>

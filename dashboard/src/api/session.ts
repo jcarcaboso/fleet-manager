@@ -14,6 +14,8 @@ export type SessionStatus = 'unknown' | 'signedOut' | 'signedIn';
 export interface SessionState {
   actor: string | null;
   scope: Scope | null;
+  /** The account still has a given password (the default `fleet` account, a new or reset one): only the password page is open. */
+  mustChangePassword: boolean;
   status: SessionStatus;
   /** Shown on the sign-in page once ("Signed out.", "Your session ended. Sign in again."). */
   notice: Notice | null;
@@ -25,8 +27,9 @@ const RANK: Record<Scope, number> = { read: 0, operate: 1, admin: 2 };
 const isScope = (value: unknown): value is Scope => typeof value === 'string' && Object.hasOwn(RANK, value);
 
 /**
- * The reactive session: who is signed in and with which scope. The Operator token is posted once at login and is
- * never kept; only `{ actor, scope }` is held, in memory. The cookie (`__Host-Fleet-Session`, HttpOnly) is invisible to the page.
+ * The reactive session: which account is signed in and with which scope. The name and password are posted once at login and
+ * are never kept; only `{ actor, scope, mustChangePassword }` is held, in memory. The cookie (`__Host-Fleet-Session`, HttpOnly)
+ * is invisible to the page.
  */
 export interface Session {
   readonly state: SessionState;
@@ -44,8 +47,12 @@ export interface Session {
   ensure(): Promise<void>;
   /** Forgets a failed boot and restores again (the "Try again" button). */
   retryBoot(): Promise<void>;
-  /** Posts the token, then confirms with `GET session`. If that returns 401 the cookie was not sent: throws `session_cookie_not_sent`. */
-  login(token: string): Promise<SessionInfo>;
+  /** Posts the name and password, then confirms with `GET session`. If that returns 401 the cookie was not sent: throws `session_cookie_not_sent`. */
+  login(name: string, password: string): Promise<SessionInfo>;
+  /** Replaces the signed-in account's password. The Server re-issues the session cookie, so the CSRF token is fetched again. */
+  changePassword(currentPassword: string, newPassword: string): Promise<SessionInfo>;
+  /** The client's 403 `password_change_required` hook: the Server says the password must be changed first. */
+  handlePasswordChangeRequired(): void;
   /** Signs out on the Server, then clears the local session. A failed sign-out keeps the session and rethrows. */
   logout(): Promise<void>;
   /** The client's 401 hook: ends the session with a notice. Ignored when nobody is signed in. */
@@ -55,21 +62,24 @@ export interface Session {
 }
 
 export function createSession(client: ApiClient): Session {
-  const state = reactive<SessionState>({ actor: null, scope: null, status: 'unknown', notice: null, bootError: null });
+  const state = reactive<SessionState>({ actor: null, scope: null, mustChangePassword: false, status: 'unknown', notice: null, bootError: null });
   let ensured: Promise<void> | null = null;
 
   const signIn = (info: SessionInfo): SessionInfo => {
     /* A Server without scopes behaves as admin, matching a credential with no scope entry. */
     const scope = isScope(info.scope) ? info.scope : 'admin';
+    const mustChangePassword = info.mustChangePassword === true;
     state.actor = info.actor;
     state.scope = scope;
+    state.mustChangePassword = mustChangePassword;
     state.status = 'signedIn';
     state.bootError = null;
-    return { actor: info.actor, scope };
+    return { actor: info.actor, scope, mustChangePassword };
   };
   const signOut = (notice: Notice | null): void => {
     state.actor = null;
     state.scope = null;
+    state.mustChangePassword = false;
     state.status = 'signedOut';
     state.notice = notice;
   };
@@ -85,7 +95,7 @@ export function createSession(client: ApiClient): Session {
       const s = session.scopeLabel();
       return s.charAt(0).toUpperCase() + s.slice(1);
     },
-    denied: level => `Needs the ${level} scope. Your token has ${session.scopeLabel()} access.`,
+    denied: level => `Needs the ${level} scope. Your account has ${session.scopeLabel()} access.`,
     async restore(signal) {
       try {
         signIn(await client.get<SessionInfo>('session', undefined, { signal }));
@@ -112,9 +122,9 @@ export function createSession(client: ApiClient): Session {
       state.bootError = null;
       await session.ensure();
     },
-    async login(token) {
+    async login(name, password) {
       try {
-        await client.post('login', { token }, { login: true });
+        await client.post('login', { name, password }, { login: true });
       } catch (error) {
         /* The client already fetched a fresh token and retried once. A second `invalid_csrf` means the browser did not send the
            antiforgery cookie back, which is what a page on another site gets (SameSite=Strict), so say that instead of
@@ -134,6 +144,14 @@ export function createSession(client: ApiClient): Session {
         }
         throw error;
       }
+    },
+    async changePassword(currentPassword, newPassword) {
+      const info = await client.post<SessionInfo>('account/password', { currentPassword, newPassword });
+      client.clearCsrf();
+      return signIn(info);
+    },
+    handlePasswordChangeRequired() {
+      if (state.status === 'signedIn') state.mustChangePassword = true;
     },
     async logout() {
       await client.post('logout', {});

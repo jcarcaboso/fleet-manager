@@ -19,6 +19,13 @@ const ACTION: Record<string, readonly [IconName, string]> = {
   'issue.acknowledged': ['ack', 'Acknowledged a problem'],
   'issue.snoozed': ['snooze', 'Snoozed a problem'],
   'issue.reopened': ['retry', 'Reopened a problem'],
+  'account.created': ['plus', 'Added a dashboard account'],
+  'account.scope_changed': ['shield', 'Changed an account scope'],
+  'account.password_reset': ['key', 'Set an account password'],
+  'account.password_changed': ['key', 'Changed their password'],
+  'account.deleted': ['trash', 'Deleted a dashboard account'],
+  'account.signed_in': ['lock', 'Signed in to the dashboard'],
+  'account.sign_in_failed': ['ban', 'Failed to sign in'],
 };
 export const auditLabel = (action: string): string => ACTION[action]?.[1] || String(action).replace(/[._]/g, ' ').replace(/^./, c => c.toUpperCase());
 export const auditIcon = (action: string): IconName => ACTION[action]?.[0] ?? 'info';

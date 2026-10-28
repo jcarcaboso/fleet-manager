@@ -1,0 +1,22 @@
+/* Sign-in theme switch, the Your account page and the Accounts page. Colours come from tokens.css only, so both themes apply. */
+.login-theme{display:flex;justify-content:center;margin-top:6px}
+.wrap--narrow{max-width:720px}
+.account-panel{margin-top:18px}
+.account-who{display:flex;align-items:center;gap:12px}
+.account-who h2{margin:0}
+.account-form{max-width:420px}
+.account-form .muted.small{margin:2px 0 0}
+#password-required{margin-top:6px}
+.tbl--accounts td{vertical-align:middle}
+.acct-actions{text-align:right;white-space:nowrap}
+.acct-scopes{margin-top:16px;font-size:13px}
+.sel--inline select{height:32px}
+.sel--block{display:flex;width:100%}
+.sel--block select{width:100%}
+.me-link{display:flex;align-items:center;gap:10px;border-radius:999px;padding:2px 8px 2px 2px;color:inherit;text-decoration:none}
+.me-link:hover{background:var(--surface-2)}
+.me-link:focus-visible{outline:none;box-shadow:var(--focus)}
+.me-link[aria-current="page"] .me-name{color:var(--ink)}
+
+/* Audit: the account an account.* event is about, with its detail (a scope, or "read -> operate") below. */
+.subj-account{display:flex;flex-direction:column}

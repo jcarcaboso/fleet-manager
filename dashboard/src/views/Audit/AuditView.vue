@@ -15,7 +15,7 @@ import { dayLabel, fmtFull, fmtTime, isUuid, num, plural, rel, shortId, valid } 
 import { nodeRoute } from '@/router';
 
 /**
- * Audit log. API: GET audit?order=newest. Items are { recordedAt, action, actor, nodeId, credentialId, nodeName }. Names resolve at
+ * Audit log. API: GET audit?order=newest. Items are { recordedAt, action, actor, nodeId, credentialId, nodeName, account, detail }. Names resolve at
  * read time, so a removed machine shows as removed. The Server returns the newest events first, one page at a time; "Load older
  * events" follows the cursor. Search and filters apply to the events loaded so far.
  */
@@ -64,7 +64,7 @@ const actions = computed(() => [...new Set(events.value.map(e => e.action))].sor
 const rows = computed(() => {
   const needle = q.value.trim().toLowerCase();
   return events.value.filter(e => (actor.value === 'all' || e.actor === actor.value) && (action.value === 'all' || e.action === action.value)
-    && (!needle || `${e.action} ${auditLabel(e.action)} ${actorName(e)} ${e.nodeName || ''}`.toLowerCase().includes(needle)));
+    && (!needle || `${e.action} ${auditLabel(e.action)} ${actorName(e)} ${e.nodeName || ''} ${e.account || ''}`.toLowerCase().includes(needle)));
 });
 </script>
 
@@ -93,7 +93,7 @@ const rows = computed(() => {
           </div>
           <div class="tbl-wrap">
             <table class="tbl tbl--audit">
-              <thead><tr><th>When (UTC)</th><th>Who</th><th>What</th><th>Machine</th></tr></thead>
+              <thead><tr><th>When (UTC)</th><th>Who</th><th>What</th><th>Subject</th></tr></thead>
               <tbody id="audit-body">
                 <tr v-if="!rows.length"><td colspan="4"><div class="empty-mini"><Icon name="search" /><p>No audit events match these filters.</p></div></td></tr>
                 <tr v-for="(e, i) in rows" :key="`${e.recordedAt}|${e.action}|${e.actor}|${e.nodeId}|${e.credentialId}|${i}`">
@@ -101,7 +101,8 @@ const rows = computed(() => {
                   <td><span class="who"><Avatar :name="actorName(e)" /><span><b>{{ actorName(e) }}</b><span class="muted small">{{ actorRole(e) }}</span></span></span></td>
                   <td><span class="what"><span class="what-ic"><Icon :name="auditIcon(e.action)" /></span><span>{{ auditLabel(e.action) }}<code class="small">{{ e.action }}</code></span></span></td>
                   <td>
-                    <RouterLink v-if="e.nodeName" class="subj" :to="nodeRoute(e.nodeId || e.nodeName)">{{ e.nodeName }}</RouterLink>
+                    <span v-if="e.account" class="subj-account"><span class="subj">{{ e.account }}</span><span v-if="e.detail" class="muted small">{{ e.detail }}</span></span>
+                    <RouterLink v-else-if="e.nodeName" class="subj" :to="nodeRoute(e.nodeId || e.nodeName)">{{ e.nodeName }}</RouterLink>
                     <template v-else-if="e.nodeId"><span class="subj">Removed machine</span> <code class="small" :data-tip="e.nodeId">{{ shortId(e.nodeId) }}</code></template>
                     <code v-else-if="e.credentialId" class="small" :data-tip="e.credentialId">credential {{ shortId(e.credentialId) }}</code>
                     <span v-else class="muted">—</span>

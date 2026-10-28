@@ -208,7 +208,7 @@ describe('scope and refusal (issueScope, issueForbidden)', () => {
     const retry = row.findAll('button').find(b => b.text() === 'Retry now')!;
     expect(retry.classes()).toContain('is-locked');
     expect(retry.attributes('aria-disabled')).toBe('true');
-    expect(row.text()).toContain('Needs the operate scope. Your token has read access.');
+    expect(row.text()).toContain('Needs the operate scope. Your account has read access.');
     await app.settle();
     expect(app.mock.calls.filter(c => c.method === 'POST' && c.path !== 'login')).toHaveLength(0);
   });
@@ -453,13 +453,13 @@ describe('loading, empty, error and abort', () => {
     expect(rows().length).toBeGreaterThan(0);
   });
 
-  it('a token that cannot read shows "Your token cannot open this" without a retry button', async () => {
+  it('a token that cannot read shows "Your account cannot open this" without a retry button', async () => {
     app = await mountApp({ path: '/audit' });
     const real = app.ctx.api.get.bind(app.ctx.api);
     (app.ctx.api as { get: unknown }).get = (path: string, ...rest: unknown[]) =>
       (path === 'issues' ? Promise.reject(Object.assign(new Error('Your Operator scope does not allow this action.'), { status: 403, code: 'insufficient_scope', silent: false })) : (real as (p: string, ...r: unknown[]) => Promise<unknown>)(path, ...rest));
     await app.go('/problems');
-    expect(w().find('h1').text()).toBe('Your token cannot open this');
+    expect(w().find('h1').text()).toBe('Your account cannot open this');
     expect(w().find('.empty--error button').exists()).toBe(false);
   });
 

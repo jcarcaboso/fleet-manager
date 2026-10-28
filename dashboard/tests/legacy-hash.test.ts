@@ -4,7 +4,7 @@ import { afterEach, describe, expect, it } from 'vitest';
 import { createFleetApp } from '@/app';
 import { createMockServer, MOCK_API_URL } from '@/api/mock';
 import { applyLegacyHash, legacyHashPath } from '@/legacyHash';
-import { TOKEN, settle, waitFor } from './helpers/app';
+import { NAME, PASSWORD, settle, waitFor } from './helpers/app';
 import { watchMock } from './helpers/strict';
 
 describe('legacyHashPath: the table', () => {
@@ -125,7 +125,7 @@ describe('at start-up in the browser', () => {
     const { router, ctx } = await start('/#/deployments', { signedOut: true });
     expect(router.currentRoute.value.name).toBe('login');
     expect(router.currentRoute.value.query.redirect).toBe('/deployments');
-    await ctx.session.login(TOKEN);
+    await ctx.session.login(NAME, PASSWORD);
     await router.replace(String(router.currentRoute.value.query.redirect));
     await flushPromises();
     expect(router.currentRoute.value.name).toBe('deployments');

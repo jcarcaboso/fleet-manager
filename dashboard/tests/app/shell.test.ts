@@ -14,13 +14,13 @@ describe('shell', () => {
     expect(w.find('a.skip').text()).toBe('Skip to content');
     expect(w.find('a.brand').attributes('href')).toBe('/machines');
     expect(w.find('nav#nav').attributes('aria-label')).toBe('Primary');
-    expect(navLabels(app).map(t => t.replace(/\d+$/, '').trim())).toEqual(['Machines', 'Problems', 'Deployments', 'Repository', 'Models', 'Enrollment', 'Audit']);
-    expect(w.findAll('#nav a').map(a => a.attributes('href'))).toEqual(['/machines', '/problems', '/deployments', '/repository', '/models', '/enrollment', '/audit']);
+    expect(navLabels(app).map(t => t.replace(/\d+$/, '').trim())).toEqual(['Machines', 'Problems', 'Deployments', 'Repository', 'Models', 'Enrollment', 'Audit', 'Accounts']);
+    expect(w.findAll('#nav a').map(a => a.attributes('href'))).toEqual(['/machines', '/problems', '/deployments', '/repository', '/models', '/enrollment', '/audit', '/accounts']);
     expect(w.find('#me .me-name').text()).toBe('joan');
     expect(w.find('#me .av').text()).toBe('J');
     expect(w.find('#me .scope-chip').text()).toBe('admin');
     expect(w.find('#me .scope-chip').attributes('data-tip')).toBe('Scope: admin|Can change anything.');
-    expect(w.find('#me button').text()).toBe('Sign out');
+    expect(w.find('#me #sign-out').text()).toBe('Sign out');
     expect(w.find('main#main').attributes('tabindex')).toBe('-1');
     expect(w.find('footer.foot').text()).toContain('Fleet Manager · All times in UTC');
     expect(w.find('#foot-note').text()).toMatch(/^Loaded \d\d:\d\d UTC$/);
@@ -174,7 +174,7 @@ describe('sign out', () => {
   beforeEach(() => undefined);
   it('signs out on the Server, shows the login page with "Signed out." and drops the navigation', async () => {
     app = await mountApp();
-    await app.wrapper.find('#me button').trigger('click');
+    await app.wrapper.find('#me #sign-out').trigger('click');
     await app.settle();
     expect(app.mock.state.signedIn).toBe(false);
     expect(app.router.currentRoute.value.name).toBe('login');
@@ -187,7 +187,7 @@ describe('sign out', () => {
   it('a failed sign-out stays on the page and explains why', async () => {
     app = await mountApp();
     app.mock.options.offline = true;
-    await app.wrapper.find('#me button').trigger('click');
+    await app.wrapper.find('#me #sign-out').trigger('click');
     await app.settle();
     expect(app.router.currentRoute.value.name).toBe('machines');
     expect(app.ctx.toasts.items[0]).toMatchObject({ title: 'Could not sign out', tone: 'critical' });

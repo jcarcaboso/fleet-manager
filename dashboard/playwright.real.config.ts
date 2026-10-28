@@ -6,9 +6,10 @@ import { defineConfig, devices } from '@playwright/test';
  *
  *   FLEET_E2E_DASHBOARD_URL     the dashboard origin, for example https://localhost:7444
  *   FLEET_E2E_SERVER_URL        the Server origin, for example https://localhost:7443
- *   FLEET_E2E_OPERATOR_TOKEN    an admin Operator token (read from the environment only, never printed or stored)
- *   FLEET_E2E_READ_TOKEN        optional: a token with the read scope
- *   FLEET_E2E_OPERATE_TOKEN     optional: a token with the operate scope
+ *   FLEET_E2E_ADMIN_NAME, FLEET_E2E_ADMIN_PASSWORD      an admin dashboard account whose password is already changed
+ *                                                       (read from the environment only, never printed or stored)
+ *   FLEET_E2E_READ_NAME, FLEET_E2E_READ_PASSWORD        optional: an account with the read scope
+ *   FLEET_E2E_OPERATE_NAME, FLEET_E2E_OPERATE_PASSWORD  optional: an account with the operate scope
  *   FLEET_E2E_IGNORE_HTTPS_ERRORS=1   accept the private CA's certificates (a disposable stack uses its own CA)
  *   FLEET_E2E_AGENT_ALIAS       an enrolled machine that has reported (OS and disk)
  *   FLEET_E2E_IDLE_ALIAS        an enrolled machine that has never checked in

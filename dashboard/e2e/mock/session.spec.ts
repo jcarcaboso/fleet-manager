@@ -1,13 +1,13 @@
 import { test, expect } from '../support/fixtures';
-import { BAD_TOKEN, GOOD_TOKEN, atPath, h1, open, primaryNav, signIn } from '../support/app';
+import { BAD_PASSWORD, GOOD_PASSWORD, atPath, h1, open, primaryNav, signIn } from '../support/app';
 import { mockCalls } from '../support/mock';
 
 test.describe('signing in and out', () => {
-  test('signing in with a valid token lands on Machines and keeps the token out of the browser', async ({ page }) => {
+  test('signing in with a valid account lands on Machines and keeps the password out of the browser', async ({ page }) => {
     await open(page, '/machines', { signedout: true });
     await expect(page).toHaveURL(atPath('/login'));
     await expect(h1(page)).toHaveText('Sign in');
-    await expect(page.getByLabel('Operator token')).toBeFocused();
+    await expect(page.getByLabel('Name', { exact: true })).toBeFocused();
     await expect(primaryNav(page)).toBeHidden();
 
     await signIn(page);
@@ -16,33 +16,70 @@ test.describe('signing in and out', () => {
     await expect(page.locator('#me')).toContainText('joan');
     await expect(page.locator('#me .scope-chip')).toHaveText('admin');
 
-    // The token was posted once, and is nowhere the page can leak it from.
-    expect(page.url()).not.toContain(GOOD_TOKEN);
+    // The password was posted once, and is nowhere the page can leak it from.
+    expect(page.url()).not.toContain(GOOD_PASSWORD);
     const stored = await page.evaluate(() => ({ local: localStorage.length, session: sessionStorage.length, cookie: document.cookie, html: document.documentElement.outerHTML }));
     expect(stored.local + stored.session).toBe(0);
     expect(stored.cookie).toBe('');
-    expect(stored.html).not.toContain(GOOD_TOKEN);
+    expect(stored.html).not.toContain(GOOD_PASSWORD);
     const logins = (await mockCalls(page)).filter(call => call.path === 'login');
     expect(logins).toHaveLength(1);
   });
 
-  test('a wrong token shows the Server\'s message, clears the field and stays on the sign-in page', async ({ page }) => {
+  test('a wrong password shows the Server\'s message, clears the field and stays on the sign-in page', async ({ page }) => {
     await open(page, '/login', { signedout: true });
-    await signIn(page, BAD_TOKEN);
+    await signIn(page, BAD_PASSWORD);
     const message = page.locator('#login-msg');
     await expect(message).toHaveText(/invalid|not accepted|sign-in/i);
     await expect(message).toHaveClass(/is-err/);
     await expect(page).toHaveURL(atPath('/login'));
-    await expect(page.getByLabel('Operator token')).toHaveValue('');
-    await expect(page.getByLabel('Operator token')).toBeFocused();
+    await expect(page.getByLabel('Password', { exact: true })).toHaveValue('');
+    await expect(page.getByLabel('Password', { exact: true })).toBeFocused();
     await expect(primaryNav(page)).toBeHidden();
   });
 
-  test('submitting an empty field asks for the token without calling the Server', async ({ page }) => {
+  test('submitting an empty form asks for the name without calling the Server', async ({ page }) => {
     await open(page, '/login', { signedout: true });
     await page.getByRole('button', { name: 'Sign in' }).click();
-    await expect(page.locator('#login-msg')).toHaveText('Enter your Operator token.');
+    await expect(page.locator('#login-msg')).toHaveText('Enter your account name.');
     expect((await mockCalls(page)).filter(call => call.method === 'POST')).toHaveLength(0);
+  });
+
+  test('the first sign-in as fleet must choose a new password before anything else opens', async ({ page }) => {
+    await open(page, '/login', { signedout: true });
+    await signIn(page, 'fleet', 'fleet');
+    await expect(page).toHaveURL(atPath('/account'));
+    await expect(h1(page)).toHaveText('Your account');
+    await expect(page.locator('#password-required')).toBeVisible();
+    await expect(primaryNav(page)).toBeHidden();
+    await page.getByLabel('Current password').fill('fleet');
+    await page.getByLabel('New password', { exact: true }).fill('a-long-new-passphrase');
+    await page.getByLabel('Repeat the new password').fill('a-long-new-passphrase');
+    await page.getByRole('button', { name: 'Change password' }).click();
+    await expect(page).toHaveURL(atPath('/machines'));
+    await expect(primaryNav(page)).toBeVisible();
+    await expect(page.locator('#me')).toContainText('fleet');
+  });
+
+  test('the theme is dark by default and the choice is kept across reloads', async ({ page, allow }) => {
+    await open(page, '/machines');
+    await expect(page.locator('html')).toHaveAttribute('data-theme', 'dark');
+    await page.locator('#me .me-link').click();
+    await expect(h1(page)).toHaveText('Your account');
+    await page.getByRole('button', { name: 'Light', exact: true }).click();
+    await expect(page.locator('html')).toHaveAttribute('data-theme', 'light');
+    /* The pre-paint script applies it before the application's module runs, so the first paint is already light. */
+    const appScripts = (url: URL): boolean => url.pathname.startsWith('/assets/') && url.pathname.endsWith('.js');
+    allow.request(/GET \S+\/assets\/\S+\.js net::ERR_FAILED$/);
+    allow.console(/Failed to load resource: net::ERR_FAILED/);
+    await page.route(appScripts, route => route.abort());
+    await page.reload();
+    await expect(page.locator('#root .noscript-note')).toBeAttached();
+    await expect(page.locator('html')).toHaveAttribute('data-theme', 'light');
+    await page.unroute(appScripts);
+    await page.reload();
+    await expect(h1(page)).toBeVisible();
+    await expect(page.locator('html')).toHaveAttribute('data-theme', 'light');
   });
 
   test('signing out returns to the sign-in page and ends the session', async ({ page }) => {

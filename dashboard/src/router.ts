@@ -18,13 +18,16 @@ import { isUuid } from '@/lib/format';
  *   /models                    models
  *   /enrollment                enrollment
  *   /audit                     audit
+ *   /accounts                  accounts         dashboard accounts (admin)
+ *   /account                   account          the signed-in account: password and theme. While the account must change its
+ *                                              password, every other signed-in page redirects here.
  *   anything else              notFound
  *
  * `meta.title` is the page title, `meta.nav` the key of the navigation entry to highlight, `meta.public` skips the sign-in guard.
  */
 export const NODE_TABS = ['overview', 'installed', 'problems', 'activity', 'security', 'settings'] as const;
 export type NodeTab = (typeof NODE_TABS)[number];
-export const NAV_KEYS = ['machines', 'problems', 'deployments', 'repository', 'models', 'enrollment', 'audit'] as const;
+export const NAV_KEYS = ['machines', 'problems', 'deployments', 'repository', 'models', 'enrollment', 'audit', 'accounts'] as const;
 export type NavKey = (typeof NAV_KEYS)[number];
 
 declare module 'vue-router' {
@@ -63,6 +66,13 @@ export function safeRedirect(value: unknown): string | null {
   return v;
 }
 
+/** The account page, keeping where the visitor was going in `?redirect=`. */
+function passwordRoute(fullPath: string): RouteLocationRaw {
+  const redirect = safeRedirect(fullPath);
+  const path = redirect?.split(/[?#]/)[0];
+  return { name: 'account', query: redirect && path !== '/account' && path !== '/machines' ? { redirect } : {} };
+}
+
 export interface RouterOptions {
   session: Session;
   /** `createWebHistory()` in the browser; tests pass `createMemoryHistory()`. */
@@ -88,6 +98,8 @@ export function createAppRouter({ session, history = createWebHistory(import.met
       { path: '/models', name: 'models', component: () => import('@/views/Models/ModelsView.vue'), meta: { title: 'Models', nav: 'models' } },
       { path: '/enrollment', name: 'enrollment', component: () => import('@/views/Enrollment/EnrollmentView.vue'), meta: { title: 'Enrollment', nav: 'enrollment' } },
       { path: '/audit', name: 'audit', component: () => import('@/views/Audit/AuditView.vue'), meta: { title: 'Audit', nav: 'audit' } },
+      { path: '/accounts', name: 'accounts', component: () => import('@/views/Accounts/AccountsView.vue'), meta: { title: 'Accounts', nav: 'accounts' } },
+      { path: '/account', name: 'account', component: () => import('@/views/Account/AccountView.vue'), meta: { title: 'Your account' } },
       { path: '/:pathMatch(.*)*', name: 'notFound', component: () => import('@/views/NotFound/NotFoundView.vue'), meta: { title: 'Not found' } },
     ],
     scrollBehavior(to, from, saved) {
@@ -109,8 +121,16 @@ export function createAppRouter({ session, history = createWebHistory(import.met
       const redirect = to.fullPath === '/' || to.fullPath === '/machines' ? undefined : to.fullPath;
       return { name: 'login', query: redirect ? { redirect } : {} };
     }
+    /* A given password (the default account, a new or reset one) must be replaced before anything else opens. */
+    if (session.state.mustChangePassword && to.name !== 'account') return passwordRoute(to.fullPath);
     return true;
   });
+
+  /* The Server can also say so later (403 password_change_required), for example after an admin reset the password. */
+  watch(() => session.state.mustChangePassword, must => {
+    const current = router.currentRoute.value;
+    if (must && current !== START_LOCATION && current.name !== 'account' && !current.meta.public) void router.replace(passwordRoute(current.fullPath));
+  }, { flush: 'sync' });
 
   /* A session that ends while a page is open (401) goes back to the sign-in page and returns here after sign-in. */
   watch(() => session.state.status, status => {

@@ -27,6 +27,7 @@ public sealed class FleetDbContext(DbContextOptions<FleetDbContext> options) : D
     public DbSet<NodeDriftEventRow> NodeDriftEvents => Set<NodeDriftEventRow>();
     public DbSet<NodeRepairFailureRow> NodeRepairFailures => Set<NodeRepairFailureRow>();
     public DbSet<IssueStateRow> IssueStates => Set<IssueStateRow>();
+    public DbSet<OperatorAccountRow> OperatorAccounts => Set<OperatorAccountRow>();
 
     protected override void OnModelCreating(ModelBuilder model)
     {
@@ -129,8 +130,15 @@ public sealed class FleetDbContext(DbContextOptions<FleetDbContext> options) : D
         model.Entity<AuditEventRow>().ToTable("audit_events").HasKey(x => x.Id);
         model.Entity<AuditEventRow>().HasIndex(x => new { x.WorkspaceId, x.Id });
         model.Entity<AuditEventRow>().HasIndex(x => new { x.WorkspaceId, x.RecordedAt, x.Id });
+        model.Entity<AuditEventRow>().Property(x => x.Account).HasMaxLength(64);
+        model.Entity<AuditEventRow>().Property(x => x.Detail).HasMaxLength(64);
         model.Entity<AuditEventRow>().HasOne<WorkspaceRow>().WithMany().HasForeignKey(x => x.WorkspaceId).OnDelete(DeleteBehavior.Cascade);
         model.Entity<CliProxySelectionRow>().ToTable("cliproxy_selections").HasKey(x => x.BaseUrl);
+        model.Entity<OperatorAccountRow>().ToTable("operator_accounts").HasKey(x => x.Id);
+        model.Entity<OperatorAccountRow>().Property(x => x.Name).HasMaxLength(64);
+        model.Entity<OperatorAccountRow>().Property(x => x.Scope).HasMaxLength(16);
+        model.Entity<OperatorAccountRow>().HasIndex(x => new { x.WorkspaceId, x.Name }).IsUnique();
+        model.Entity<OperatorAccountRow>().HasOne<WorkspaceRow>().WithMany().HasForeignKey(x => x.WorkspaceId).OnDelete(DeleteBehavior.Cascade);
     }
 }
 
@@ -304,6 +312,9 @@ public sealed class AuditEventRow
     public required string Actor { get; set; }
     public Guid? NodeId { get; set; }
     public Guid? CredentialId { get; set; }
+    // The dashboard account an account.* event is about, and a short detail such as "operate -> read" for a scope change.
+    public string? Account { get; set; }
+    public string? Detail { get; set; }
 }
 public sealed class CliProxySelectionRow
 {
@@ -343,4 +354,19 @@ public sealed class IssueStateRow
     public DateTimeOffset? SnoozedUntil { get; set; }
     public required string Actor { get; set; }
     public DateTimeOffset At { get; set; }
+}
+// A dashboard sign-in account. Bearer Operator tokens stay in configuration; accounts only sign in to the dashboard.
+public sealed class OperatorAccountRow
+{
+    public Guid Id { get; set; }
+    public Guid WorkspaceId { get; set; }
+    // Lowercase, unique within the Workspace. It is the actor recorded in audit events.
+    public required string Name { get; set; }
+    public required string PasswordHash { get; set; }
+    public required string Scope { get; set; }
+    public bool MustChangePassword { get; set; }
+    // Rotated by every password, scope or deletion change, which ends the account's existing sessions.
+    public Guid SecurityStamp { get; set; }
+    public DateTimeOffset CreatedAt { get; set; }
+    public DateTimeOffset UpdatedAt { get; set; }
 }

@@ -137,7 +137,7 @@ History mode, no `#`. The container serves `index.html` for these paths.
   link) closes the Revoke and Remove dialogs. After a navigation the first heading that mounts takes keyboard focus (`PageHead`, `EmptyState h="h1"`,
   `ErrorState`); when only the tab changes, `TabNav` focuses the active tab.
 - After a navigation the router also hides a tooltip that the old page left (`router.afterEach` in `AppShell`).
-- `pagehide` (the page may return from the back/forward cache as it was) clears the token field and closes the Add machine wizard, which
+- `pagehide` (the page may return from the back/forward cache as it was) clears every password field and closes the Add machine wizard, which
   drops its one-time enrollment link and stops its polling.
 - Guards: every non-public route first restores the session once (`GET session`). Signed out: redirect to `/login`, keeping the
   intended path in `?redirect=` (not for `/` and `/machines`). `safeRedirect()` only accepts paths of this app. A session that ends
@@ -205,7 +205,8 @@ Behaviour (ported from `api.js`):
 - **Silent errors** (`error.silent`): a call cancelled through its signal (`code: 'cancelled'`) and a 401 that the shell already
   handled (`code: 'unauthorized'`). Never show them. `toasts.fail(e)` skips them; use `soft` and `isSilent` from `lib/errors`.
 - 401 (not login): calls the session's hook, which ends the session and sends the visitor to `/login`. 403 `insufficient_scope`: an
-  ordinary visible error; show it inline (`ErrorState` renders status 403 as "Your token cannot open this").
+  ordinary visible error; show it inline (`ErrorState` renders status 403 as "Your account cannot open this"). 403
+  `password_change_required` also raises `session.state.mustChangePassword`, and the router sends the visitor to `/account`.
 - Network failure: `code: 'network_error'`, "Could not reach the Server at <apiUrl>. …".
 - A response that arrives after the caller aborted is dropped (rejects as cancelled).
 - Paged lists: `limit` 1 to 100, `after`, and `order: 'newest'` for `desired-revisions`, `rollouts` and `audit`. A cursor is valid
@@ -213,11 +214,26 @@ Behaviour (ported from `api.js`):
 
 ### Session (`src/api/session.ts`)
 
-`session.state` is reactive: `{ actor, scope, status: 'unknown' | 'signedOut' | 'signedIn', notice, bootError }`.
+`session.state` is reactive: `{ actor, scope, mustChangePassword, status: 'unknown' | 'signedOut' | 'signedIn', notice, bootError }`.
 `session.can('read' | 'operate' | 'admin')` (`admin` includes `operate` includes `read`), `session.scopeLabel()`, `scopeTitle()`,
-`denied(level)` ("Needs the admin scope. Your token has read access."), `restore()`, `ensure()`, `retryBoot()`,
-`login(token)`, `logout()`, `takeNotice()`. Only `{ actor, scope }` is kept; the Operator token is passed to `post('login')` once
-(`src/api/session.ts` is the only code allowed to do that) and the login view clears the field before the request.
+`denied(level)` ("Needs the admin scope. Your account has read access."), `restore()`, `ensure()`, `retryBoot()`,
+`login(name, password)`, `changePassword(current, next)`, `logout()`, `takeNotice()`. Only `{ actor, scope, mustChangePassword }` is
+kept; passwords are posted once (`login`, `account/password`, and the Accounts page's admin routes) and the views clear their fields
+before the request.
+
+Dashboard accounts replace Operator tokens for sign-in (tokens remain the `fleet` CLI's credential). A fresh Server has one account,
+`fleet` / `fleet` (admin), which must change its password first: while `mustChangePassword` is set, the router keeps every signed-in
+route on `/account` and the shell hides the navigation. Admins manage accounts on `/accounts` (add, change scope, set a temporary
+password, delete); a new or reset account also changes its password at the next sign-in.
+
+### Themes (`src/theme.ts`)
+
+Dark is the default: the plain `:root` in `styles/tokens.css` is the dark palette, and `:root[data-theme="light"]` the light one, so a
+first visit never flashes light. `ThemeSwitch` (on the sign-in page and on `/account`) offers Dark, Light and System (follows
+`prefers-color-scheme`). The choice is stored under the `fleet-theme` key; `src/theme.ts` is the only file in `src/` allowed to use
+`localStorage`, and only for that key. `public/theme-boot.js`, a classic script in `<head>`, reads the same key before the first
+paint, so a returning visitor who chose Light (or System on a light system) does not see the dark default flash first; the source
+scan holds it to that one read.
 
 ### Stale-response protection and polling (`useLoad`, `useView`, `Token`, `lib/lanes.ts`)
 
@@ -360,11 +376,12 @@ simulated Agent that enrolls a few seconds after a link is created and answers d
 `400 invalid_request` ("The request is malformed or a parameter is invalid.") before the route runs (after authentication, before the
 Origin, CSRF and scope checks, because ASP.NET binds the arguments first). A member that is not required and missing keeps the record's
 default and the route's own check answers (`alias` missing on `nodes/rename` is `invalid_node_alias`, `expiresInSeconds` missing is 900).
-Member names match without regard to case. The shapes are `login {token}`, `nodes/rename {currentAlias, alias}`,
+Member names match without regard to case. The shapes are `login {name, password}`, `account/password {currentPassword, newPassword}`,
+`accounts {name, password, scope}`, `accounts/{name}/scope {scope}`, `accounts/{name}/password {password}`, `nodes/rename {currentAlias, alias}`,
 `nodes/{id}/retry {target}`, `nodes/{id}/remove {alias}`, `issues/state {id, action, hours?}`, `enrollment-links {alias, expiresInSeconds}`
 and `cliproxy/selection {baseUrl, version, policy {includeNew, disabledFamilies, modelOverrides, enabledFamilies,
 skipClaudeModelsForOtherClients}}`; the routes without a body parameter (`revoke`, `disk-usage/refresh`, `logout`, `source/rescan`,
-`cliproxy/refresh`) ignore what is posted, like the Server. When a route changes in `OperatorApi.cs` / `WireModels.cs`, change `SHAPES`.
+`cliproxy/refresh`, `accounts/{name}/delete`) ignore what is posted, like the Server. When a route changes in `OperatorApi.cs` / `WireModels.cs`, change `SHAPES`.
 A refused call has `call.malformed === true`.
 
 **The CSRF token is bound to the identity**, as the real antiforgery token is: `mock.state.csrf` changes at login and at logout, and a
@@ -376,7 +393,7 @@ shows the 400). A client that forgets `clearCsrf()` after login or logout theref
 const mock = createMockServer({ scope: 'read', pageSize: 2 });       // options as in the table below
 const api = createApiClient({ apiUrl: MOCK_API_URL, fetch: mock.fetch });
 mock.calls   // every call: { method, path, query, body, headers, at, settled, aborted, status, malformed }
-mock.state   // { signedIn, scope, actor, csrf }   mock.nodes / links / audit / issueStates   mock.dispose() stops the simulated Agents
+mock.state   // { signedIn, scope, actor, csrf, mustChangePassword }   mock.nodes / links / audit / issueStates   mock.dispose() stops the simulated Agents
 ```
 
 In `dev:mock` the switches are query parameters of the page you open (read once at start, so a reload without them resets them);
@@ -385,7 +402,8 @@ In `dev:mock` the switches are query parameters of the page you open (read once 
 | URL parameter | Option | Effect |
 |---|---|---|
 | `scope=read\|operate\|admin` | `scope` | Session scope (default `admin`). Controls the scope does not allow are locked. |
-| `signedout=1` | `signedOut` | Start at the sign-in page. Any token of 32 to 1024 characters not starting with `bad` signs in. |
+| `signedout=1` | `signedOut` | Start at the sign-in page. The seeded accounts (`joan`, `ana`, `viewer`) accept any password that does not start with `bad`; `fleet` accepts only `fleet` and must change it. |
+| `mustchange=1` | `mustChangePassword` | The signed-in account must change its password first, like `fleet`: every route but `account/password` is 403 `password_change_required`. An admin's scope change or password reset of the signed-in account ends its session, as the Server's security stamp does. |
 | `empty=1` | `empty` | No machines, links, audit events or revisions. |
 | `fail=<prefix>` | `fail` | `GET` routes starting with the prefix answer 500 (`fail=nodes`). |
 | `forbid=1` | `forbid` | Every non-GET request answers 403 `insufficient_scope`. |
@@ -532,7 +550,7 @@ CI does not run this mode.
 ## Security rules (enforced)
 
 `tests/security/source-scan.test.ts` fails if `src/` contains `v-html`, `innerHTML`, `outerHTML`, `insertAdjacentHTML`, `eval(`,
-`new Function`, `localStorage`, `sessionStorage`, `indexedDB`, `style="…"` or inline event handler strings, if the stylesheet loads
+`new Function`, `localStorage` (except the theme preference in `src/theme.ts`), `sessionStorage`, `indexedDB`, `style="…"` or inline event handler strings, if the stylesheet loads
 anything external, if `index.html` has an inline script or style, or if the runtime dependencies are not exactly `vue` and
 `vue-router`. In short:
 

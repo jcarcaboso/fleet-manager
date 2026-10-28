@@ -56,8 +56,8 @@ describe('states', () => {
     await open({ empty: true, scope: 'read' });
     const btn = $('.empty .btn-primary') as HTMLElement;
     expect(btn.getAttribute('aria-disabled')).toBe('true');
-    expect(btn.dataset.tip).toContain('Needs the admin scope. Your token has read access.');
-    expect(textOf($('.empty .lock-note'))).toBe('Needs the admin scope. Your token has read access.');
+    expect(btn.dataset.tip).toContain('Needs the admin scope. Your account has read access.');
+    expect(textOf($('.empty .lock-note'))).toBe('Needs the admin scope. Your account has read access.');
     btn.click();
     await flushPromises();
     expect(app!.ctx.wizard.open).toBe(false);

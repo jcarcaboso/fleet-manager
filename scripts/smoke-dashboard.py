@@ -1,12 +1,15 @@
 #!/usr/bin/env python3
 """Check a running Server and its separate dashboard together, without a browser.
 
-Environment: FLEET_SERVER_URL, FLEET_OPERATOR_TOKEN, FLEET_CA_CERT, FLEET_DASHBOARD_URL.
+Environment: FLEET_SERVER_URL, FLEET_OPERATOR_TOKEN, FLEET_CA_CERT, FLEET_DASHBOARD_URL, and optionally
+FLEET_DASHBOARD_NAME and FLEET_DASHBOARD_PASSWORD (a dashboard account; default fleet/fleet).
 
 It verifies the dashboard container (files, config.json, headers, route fallback, asset content types), the
 Server's redirect from /dashboard, the CORS contract of /dashboard/api for the dashboard origin and its absence
-for any other origin, and an Operator-token sign-in from the dashboard origin with a cookie jar. A browser is
-still needed to see the application render; this script proves the wiring it depends on.
+for any other origin, and an account sign-in from the dashboard origin with a cookie jar. The Operator token is
+used only for /operator/v1. An account that still has to change its password is checked to be refused by every
+other route; the script never changes a password. A browser is still needed to see the application render; this
+script proves the wiring it depends on.
 """
 
 import http.cookiejar
@@ -23,6 +26,8 @@ import urllib.request
 SERVER = os.environ['FLEET_SERVER_URL'].rstrip('/')
 DASHBOARD = os.environ['FLEET_DASHBOARD_URL'].rstrip('/')
 OPERATOR = os.environ['FLEET_OPERATOR_TOKEN']
+ACCOUNT = os.environ.get('FLEET_DASHBOARD_NAME', 'fleet')
+PASSWORD = os.environ.get('FLEET_DASHBOARD_PASSWORD', 'fleet')
 CA = Path(os.environ['FLEET_CA_CERT'])
 OTHER_ORIGIN = 'https://other-site.invalid'
 CONTEXT = ssl.create_default_context(cafile=CA)
@@ -240,12 +245,17 @@ check(status == 200 and headers['Access-Control-Allow-Origin'] == DASHBOARD_ORIG
 csrf = json.loads(body)['token']
 mutation = {**as_dashboard, 'Content-Type': 'application/json', 'X-Fleet-CSRF': csrf}
 
-status, headers, body = fetch(API + '/login', 'POST', mutation, {'token': 'x' * 40}, browser)
-check(status == 401, f'login with a wrong token returned {status}')
+status, headers, body = fetch(API + '/login', 'POST', mutation, {'name': ACCOUNT, 'password': PASSWORD + '-wrong'}, browser)
+check(status == 401, f'login with a wrong password returned {status}')
+# The old token body is not a login request any more: the Server refuses the unknown member before it authenticates.
 status, headers, body = fetch(API + '/login', 'POST', mutation, {'token': OPERATOR}, browser)
-check(status == 200, f'login with the Operator token returned {status}')
+check(status == 400 and json.loads(body).get('code') == 'invalid_request',
+      f'login with the Operator token returned {status} {body[:80]!r}; the dashboard accepts only accounts')
+status, headers, body = fetch(API + '/login', 'POST', mutation, {'name': ACCOUNT, 'password': PASSWORD}, browser)
+check(status == 200, f'login with the account {ACCOUNT} returned {status}')
 login = json.loads(body)
-check(login.get('actor') and login.get('scope'), 'login did not return actor and scope')
+check(login.get('actor') and login.get('scope') and isinstance(login.get('mustChangePassword'), bool),
+      'login did not return actor, scope and mustChangePassword')
 check(headers['Access-Control-Allow-Origin'] == DASHBOARD_ORIGIN and headers['Access-Control-Allow-Credentials'] == 'true', 'login response lacks CORS headers')
 session_cookies = [value for value in headers.get_all('Set-Cookie') or [] if value.startswith('__Host-')]
 check(session_cookies, 'login did not set a __Host- session cookie')
@@ -253,13 +263,19 @@ for value in session_cookies:
     lowered = value.lower()
     check('secure' in lowered and 'httponly' in lowered and 'samesite=strict' in lowered and 'path=/' in lowered and 'domain=' not in lowered,
           'session cookie attributes are not Secure, HttpOnly, SameSite=Strict, Path=/ without Domain')
-check(OPERATOR not in body.decode() and OPERATOR not in ' '.join(headers.values()), 'the Operator token was echoed back')
+# The default password equals the default name, which the body rightly contains, so only a real password is searched for.
+if len(PASSWORD) >= 10:
+    check(PASSWORD not in body.decode() and PASSWORD not in ' '.join(headers.values()), 'the password was echoed back')
 done('sign-in from the dashboard origin sets a hardened cookie')
 
 status, headers, body = fetch(API + '/session', headers=as_dashboard, browser=browser)
 check(status == 200 and json.loads(body) == login, f'session after login returned {status} {body[:80]!r}')
 status, headers, body = fetch(API + '/nodes?limit=5', headers=as_dashboard, browser=browser)
-check(status == 200 and isinstance(json.loads(body).get('items'), list), 'GET nodes with the cookie failed')
+if login['mustChangePassword']:
+    check(status == 403 and json.loads(body).get('code') == 'password_change_required',
+          f'GET nodes before the required password change returned {status}')
+else:
+    check(status == 200 and isinstance(json.loads(body).get('items'), list), 'GET nodes with the cookie failed')
 check(headers['Access-Control-Allow-Origin'] == DASHBOARD_ORIGIN, 'GET nodes lacks CORS headers')
 status, headers, body = fetch(API + '/nodes?limit=5', headers={'Accept': 'application/json'}, browser=opener(http.cookiejar.CookieJar()))
 check(status == 401, 'the dashboard API answered without a session')

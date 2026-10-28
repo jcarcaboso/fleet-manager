@@ -114,14 +114,14 @@ describe('errors', () => {
   it('401 calls the unauthorized hook and throws a silent error', async () => {
     const { api, hooks } = client(jsonResponse({ code: 'unauthorized' }, 401));
     const error = await api.get('nodes').then(() => { throw new Error('expected a rejection'); }, (e: ApiError) => e);
-    expect(error).toMatchObject({ status: 401, code: 'unauthorized', message: 'Sign in with a valid Operator token.', silent: true });
+    expect(error).toMatchObject({ status: 401, code: 'unauthorized', message: 'Sign in with your account.', silent: true });
     expect(isSilent(error)).toBe(true);
     expect(hooks.unauthorized).toHaveBeenCalledTimes(1);
   });
-  it('a 401 on login is a rejected token, not an ended session', async () => {
+  it('a 401 on login is a rejected name or password, not an ended session', async () => {
     const { api, hooks } = client(jsonResponse({ token: 't' }), jsonResponse({ code: 'unauthorized' }, 401));
-    const error = await api.post('login', { token: 'x' }, { login: true }).then(() => { throw new Error('expected a rejection'); }, (e: ApiError) => e);
-    expect(error).toMatchObject({ status: 401, code: 'invalid_token', message: 'That token was not accepted. Check it and try again.', silent: false });
+    const error = await api.post('login', { name: 'x', password: 'y' }, { login: true }).then(() => { throw new Error('expected a rejection'); }, (e: ApiError) => e);
+    expect(error).toMatchObject({ status: 401, code: 'invalid_credentials', message: 'That name and password were not accepted. Check them and try again.', silent: false });
     expect(hooks.unauthorized).not.toHaveBeenCalled();
   });
   it('a network failure names the configured apiUrl', async () => {
@@ -239,15 +239,15 @@ describe('paths', () => {
 
 describe('storage', () => {
   afterEach(() => vi.restoreAllMocks());
-  it('never touches localStorage, sessionStorage or document.cookie, and the token is not kept anywhere', async () => {
+  it('never touches localStorage, sessionStorage or document.cookie, and the password is not kept anywhere', async () => {
     const reads: string[] = [];
     const spy = (name: string) => (): never => { reads.push(name); throw new Error(`storage was used: ${name}`); };
     vi.spyOn(Storage.prototype, 'setItem').mockImplementation(spy('setItem'));
     vi.spyOn(Storage.prototype, 'getItem').mockImplementation(spy('getItem'));
     const cookie = vi.spyOn(document, 'cookie', 'set').mockImplementation(spy('cookie'));
     const { api, session, mock } = mockApi({ signedOut: true });
-    const TOKEN = 'operator-token-0123456789-abcdefghijkl';
-    await session.login(TOKEN);
+    const TOKEN = 'operator-password-0123456789-abcdefghijkl';
+    await session.login('joan', TOKEN);
     await api.get('nodes');
     await session.logout();
     expect(reads).toEqual([]);
@@ -261,7 +261,7 @@ describe('storage', () => {
 describe('mock origin and csrf checks', () => {
   it('a mutation from an origin the Server does not allow is 400 invalid_origin', async () => {
     const { api } = mockApi({ origin: 'https://evil.example', dashboardOrigin: 'https://dashboard.home.arpa' });
-    await expect(api.post('login', { token: 'x'.repeat(40) }, { login: true })).rejects.toMatchObject({ status: 400, code: 'invalid_origin' });
+    await expect(api.post('login', { name: 'joan', password: 'x'.repeat(40) }, { login: true })).rejects.toMatchObject({ status: 400, code: 'invalid_origin' });
     await expect(api.get('csrf')).resolves.toHaveProperty('token');
   });
   it('a mutation with a wrong CSRF token is 400 invalid_csrf (before the scope check)', async () => {
@@ -274,7 +274,7 @@ describe('mock origin and csrf checks', () => {
     const { api } = mockApi({ signedOut: true });
     await expect(api.get('session')).rejects.toMatchObject({ status: 401 });
     await loginClient(api);
-    await expect(api.get('session')).resolves.toEqual({ actor: 'joan', scope: 'admin' });
+    await expect(api.get('session')).resolves.toEqual({ actor: 'joan', scope: 'admin', mustChangePassword: false });
   });
   it('SESSION_COOKIE_NOT_SENT text is the documented sentence', () => {
     expect(SESSION_COOKIE_NOT_SENT).toBe('Your browser did not send the session cookie. The dashboard and the Server must be on the same site.');

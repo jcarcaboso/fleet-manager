@@ -7,10 +7,12 @@ import type { Scope } from '../types';
 export interface MockOptions {
   /** Session scope returned by `GET session` and `POST login` (`?scope=read|operate|admin`, default `admin`). */
   scope: Scope;
-  /** The Operator name (default `joan`). */
+  /** The signed-in account's name (default `joan`). */
   actor: string;
   /** Start at the sign-in page (`?signedout=1`). */
   signedOut: boolean;
+  /** The signed-in account must change its password first, like the default `fleet` account (`?mustchange=1`). */
+  mustChangePassword: boolean;
   /** No machines, links, audit events or revisions (`?empty=1`). */
   empty: boolean;
   /** `GET` routes starting with this prefix answer 500 (`?fail=nodes`). */
@@ -69,7 +71,7 @@ export const DEFAULT_ORIGIN = 'https://dashboard.mock.invalid';
 
 export function defaultMockOptions(): MockOptions {
   return {
-    scope: 'admin', actor: 'joan', signedOut: false, empty: false, fail: null, forbid: false, slow: 0, pageSize: 100, diag: true, xss: false, agent: true,
+    scope: 'admin', actor: 'joan', signedOut: false, mustChangePassword: false, empty: false, fail: null, forbid: false, slow: 0, pageSize: 100, diag: true, xss: false, agent: true,
     enroll: true, enrollLinkOnly: false, weirdAlias: false, delay: {}, lag: {}, hang: null, diskDelay: 7000, expiry: 0, commit: true, rollout: true, drift: true,
     states: false, platform: 'macos', offline: false, cookie: true, csrfCookie: true, origin: DEFAULT_ORIGIN, dashboardOrigin: '',
   };
@@ -86,7 +88,7 @@ export function parseMockOptions(search: string): MockOptions {
   return {
     ...base,
     scope: scope === 'read' || scope === 'operate' || scope === 'admin' ? scope : 'admin',
-    signedOut: p.has('signedout'), empty: p.has('empty'), fail: p.get('fail'), forbid: p.has('forbid'),
+    signedOut: p.has('signedout'), mustChangePassword: p.has('mustchange'), empty: p.has('empty'), fail: p.get('fail'), forbid: p.has('forbid'),
     slow: +(p.get('slow') || 0), pageSize: +(p.get('pagesize') || 100),
     diag: p.get('diag') !== '0', xss: p.has('xss'), agent: p.get('agent') !== '0',
     enroll: p.get('enroll') !== '0', enrollLinkOnly: p.get('enroll') === 'link', weirdAlias: p.has('weirdalias'),

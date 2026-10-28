@@ -10,11 +10,11 @@ body.app.has-modal{overflow:hidden}
 :where(body.app) p{margin:0}
 :where(body.app) code,.mono{font-family:var(--mono);font-size:.92em}
 :where(body.app) code{overflow-wrap:anywhere}
-:where(body.app) :focus-visible{outline:3px solid rgba(47,106,224,.5);outline-offset:2px}
+:where(body.app) :focus-visible{outline:3px solid rgba(var(--accent-rgb),.5);outline-offset:2px}
 :where(body.app) :is(input,select):focus-visible{outline:none}
 .sr{position:absolute!important;width:1px;height:1px;overflow:hidden;clip:rect(0 0 0 0);clip-path:inset(50%);white-space:nowrap}
 .defs{position:absolute;width:0;height:0;overflow:hidden}
-.skip{position:fixed;left:12px;top:-60px;z-index:100;background:var(--ink);color:#fff;padding:8px 14px;border-radius:10px;font-weight:600}
+.skip{position:fixed;left:12px;top:-60px;z-index:100;background:var(--ink);color:var(--on-ink);padding:8px 14px;border-radius:10px;font-weight:600}
 .skip:focus{top:12px;text-decoration:none}
 .muted{color:var(--muted)}
 .small{font-size:12.5px}

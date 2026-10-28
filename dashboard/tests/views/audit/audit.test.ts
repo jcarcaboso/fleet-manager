@@ -20,7 +20,7 @@ describe('Audit page: rows', () => {
   it('lists every event newest first with when, who, what and machine', async () => {
     app = await mountApp({ path: '/audit' });
     expect(w().find('h1').text()).toBe('Audit');
-    expect(w().findAll('table.tbl--audit th').map(t => t.text())).toEqual(['When (UTC)', 'Who', 'What', 'Machine']);
+    expect(w().findAll('table.tbl--audit th').map(t => t.text())).toEqual(['When (UTC)', 'Who', 'What', 'Subject']);
     expect(rows()).toHaveLength(14);
     expect(count()).toBe('14 events');
     const first = rows()[0]!;
@@ -234,13 +234,13 @@ describe('Audit page: empty, loading, error and abort', () => {
     await waitFor(() => w().find('table').exists());
   });
 
-  it('a token that cannot read shows "Your token cannot open this"', async () => {
+  it('a token that cannot read shows "Your account cannot open this"', async () => {
     app = await mountApp({ path: '/machines' });
     const real = app.ctx.api.page.bind(app.ctx.api);
     (app.ctx.api as { page: unknown }).page = (path: string, ...rest: unknown[]) =>
       (path === 'audit' ? Promise.reject(Object.assign(new Error('Your Operator scope does not allow this action.'), { status: 403, silent: false })) : (real as (p: string, ...r: unknown[]) => Promise<unknown>)(path, ...rest));
     await app.go('/audit');
-    expect(w().find('h1').text()).toBe('Your token cannot open this');
+    expect(w().find('h1').text()).toBe('Your account cannot open this');
     expect(w().find('.empty--error button').exists()).toBe(false);
   });
 

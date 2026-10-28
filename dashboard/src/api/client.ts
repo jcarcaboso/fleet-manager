@@ -1,4 +1,4 @@
-import { MESSAGES, SIGN_IN_REQUIRED, TOKEN_REJECTED, networkMessage, statusMessage } from './messages';
+import { CREDENTIALS_REJECTED, MESSAGES, SIGN_IN_REQUIRED, networkMessage, statusMessage } from './messages';
 import type { CsrfResponse, ErrorBody, Page, QueryParams } from './types';
 
 /**
@@ -7,13 +7,13 @@ import type { CsrfResponse, ErrorBody, Page, QueryParams } from './types';
  * Every request sends the session cookie (`credentials: "include"`), `Accept: application/json` and the caller's
  * `AbortSignal`. Mutations also send `Content-Type: application/json` and `X-Fleet-CSRF`; the token comes from
  * `GET csrf`, is held in memory only, and is fetched again once when the Server answers `invalid_csrf`.
- * The Operator token is only ever passed to `post('login', …)`; nothing is written to storage, the URL or logs.
+ * Passwords are only ever passed to `post('login', …)` and the password routes; nothing is written to storage, the URL or logs.
  */
 
 /** The error every failed call throws. `message` is safe to show to the user. */
 export class ApiError extends Error {
   readonly status: number;
-  /** The Server's snake_case code, `network_error`, `cancelled`, `unauthorized` or `invalid_token`; `null` when the Server sent none. */
+  /** The Server's snake_case code, `network_error`, `cancelled`, `unauthorized` or `invalid_credentials`; `null` when the Server sent none. */
   readonly code: string | null;
   /** The parsed error body when the Server sent one (for example the `models` of `pinned_model_excluded`). */
   readonly details: ErrorBody | null;
@@ -33,7 +33,7 @@ export class ApiError extends Error {
 export interface RequestOptions {
   /** Aborting it cancels the request; the call then rejects with a silent `cancelled` error. */
   signal?: AbortSignal;
-  /** Only for `post('login')`: a 401 means the token was wrong, not that the session ended. */
+  /** Only for `post('login')`: a 401 means the name or password was wrong, not that the session ended. */
   login?: boolean;
 }
 
@@ -44,6 +44,8 @@ export interface ApiClientOptions {
   fetch?: typeof fetch;
   /** Called when a call other than login gets 401. The session uses it to go back to the sign-in page. */
   onUnauthorized?: () => void;
+  /** Called when a call gets 403 `password_change_required`: the account must change its password before anything else. */
+  onPasswordChangeRequired?: () => void;
   /** Called when a call gets 403. The error is also thrown; views show it inline. */
   onForbidden?: (error: ApiError) => void;
 }
@@ -135,7 +137,7 @@ export function createApiClient(options: ApiClientOptions): ApiClient {
     const error = (payload && typeof payload === 'object' ? (payload as ErrorBody) : null) ?? null;
     const code = typeof error?.code === 'string' ? error.code : null;
     if (response.status === 401) {
-      if (opts.login) throw new ApiError(TOKEN_REJECTED, 401, 'invalid_token');
+      if (opts.login) throw new ApiError(CREDENTIALS_REJECTED, 401, 'invalid_credentials');
       const failure = new ApiError(SIGN_IN_REQUIRED, 401, 'unauthorized', error, true);
       options.onUnauthorized?.();
       throw failure;
@@ -146,7 +148,10 @@ export function createApiClient(options: ApiClientOptions): ApiClient {
     }
     const message = (code && MESSAGES[code]) || statusMessage(response.status);
     const failure = new ApiError(message, response.status, code, error);
-    if (response.status === 403) options.onForbidden?.(failure);
+    if (response.status === 403) {
+      if (code === 'password_change_required') options.onPasswordChangeRequired?.();
+      options.onForbidden?.(failure);
+    }
     throw failure;
   }
 

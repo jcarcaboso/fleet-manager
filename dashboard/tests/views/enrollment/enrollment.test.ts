@@ -95,7 +95,7 @@ describe('scope', () => {
     const locked = $$('.is-locked');
     expect(locked.length).toBeGreaterThanOrEqual(3); // Add machine, Create link, Revoke
     expect(locked.every(b => b.getAttribute('aria-disabled') === 'true' && !!b.dataset.tip)).toBe(true);
-    expect(textOf($('.page-head + .lock-note'))).toBe('Needs the admin scope. Your token has read access.');
+    expect(textOf($('.page-head + .lock-note'))).toBe('Needs the admin scope. Your account has read access.');
     await click(locked[0]!);
     expect($('.toast')!.textContent).toMatch(/Needs the admin scope/);
     await click(locked[locked.length - 1]!);

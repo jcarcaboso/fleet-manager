@@ -404,7 +404,7 @@ public sealed partial class PostgresFleetCoordinator
 
     private static AuditEventStatus ToAuditStatus(AuditRowWithName x) => new(x.Event.RecordedAt, x.Event.Action, x.Event.Actor,
         x.Event.NodeId is Guid nodeId ? new NodeId(nodeId) : null,
-        x.Event.CredentialId is Guid credential ? new CredentialId(credential) : null, x.NodeName);
+        x.Event.CredentialId is Guid credential ? new CredentialId(credential) : null, x.NodeName, x.Event.Account, x.Event.Detail);
 
     // One row per Node and UTC hour. The Node row is selected so a concurrently removed Node cannot violate the foreign key.
     // This is telemetry: it runs in its own short transaction with a lock and statement timeout, and a failure is logged and

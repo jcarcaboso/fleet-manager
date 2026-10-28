@@ -9,7 +9,13 @@ are required for setup.
 The dashboard is a separate container, the `dashboard` service, with its own
 HTTPS address: `https://FLEET_HOSTNAME:FLEET_DASHBOARD_PORT` (port 7444 by
 default) next to the Server at `https://FLEET_HOSTNAME:FLEET_PORT`. Open it and
-sign in with the Operator token from `operator.env`. Your browser must trust the
+sign in with the account `fleet` and the password `fleet`. The dashboard makes
+you choose a new password (at least 10 characters) before anything else. Admin
+accounts add more accounts, with the `read`, `operate` or `admin` scope, on the
+**Accounts** page; each new account also chooses its own password at its first
+sign-in. Until you change it, anyone who can reach the dashboard can sign in as
+`fleet` / `fleet`, so do it right after `docker compose up`, before you open the
+ports to anyone else. The Operator token in `operator.env` is for the `fleet` CLI only. Your browser must trust the
 homelab CA; the dashboard has its own certificate, signed by the same CA and
 carrying the same names as the Server's, so one trusted CA covers both addresses
 and you must open both ports to your browser. Choose **Add
@@ -259,7 +265,10 @@ existing installation:
    The `dashboard` service starts after the Server is healthy. If `--wait`
    reports that `configure` did not complete, run `docker compose logs configure`:
    the reason, such as a missing dashboard certificate, is only in that log.
-7. Open `https://FLEET_HOSTNAME:7444` and sign in. Old `https://SERVER/dashboard`
+7. Open `https://FLEET_HOSTNAME:7444` and sign in as `fleet` with the password
+   `fleet`, then choose a new password. The upgrade adds the dashboard accounts,
+   so this default account exists again until you change its password; anyone who
+   reaches the dashboard first can claim it. Old `https://SERVER/dashboard`
    bookmarks are redirected there. Scripts that call `/operator/v1`, enrollment
    links and the Agent are not affected.
 
@@ -273,7 +282,8 @@ copy so it supplies the Server's public URL. Preserve `.env`, `secrets/`,
 `operator.env`, `ssh/`, and Docker volumes. Set `FLEET_IMAGE` to
 `skorcius/fleet-manager:0.10.0` in `.env`. Do not rerun the plain `setup.py` on an
 existing installation; run `setup.py --add-dashboard` as described above. The
-dashboard uses the existing Operator token and CA.
+dashboard uses the existing CA. Sign in as `fleet` / `fleet` and choose a new
+password; the Operator token in `operator.env` stays the `fleet` CLI's credential.
 
 Image publication is manual; the GitHub tag workflow only publishes
 client archives and Homebrew formulas. A release has two images with one

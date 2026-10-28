@@ -162,7 +162,7 @@ def add_dashboard():
     print('  1. Replace compose.yaml with this release\'s copy. It adds the dashboard-tls volume and the dashboard service.')
     print(f'  2. Open TCP port {port} to your browsers, on the same interface and firewall as the Server port.')
     print('  3. Run: docker compose pull && docker compose up -d --force-recreate --wait')
-    print(f'  4. Open {dashboard_url} and sign in with the token in operator.env.')
+    print(f'  4. Open {dashboard_url} and sign in as fleet with the password fleet. You must choose a new password at the first sign-in.')
 
 
 if args.add_dashboard:
@@ -227,4 +227,5 @@ bind = '[' + bind_ip + ']' if ':' in bind_ip else bind_ip
                                    + 'export FLEET_OPERATOR_TOKEN=' + shlex.quote(token) + '\n')
 print('Created private homelab configuration. Keep secrets/ and operator.env out of source control.')
 print(f'Open the dashboard at https://{url_host}:{dashboard_port} (Server: https://{url_host}:{port}). Both ports must be reachable from your browser.')
+print('Sign in to the dashboard as fleet with the password fleet; it asks for a new password at the first sign-in. operator.env is for the fleet CLI.')
 print('Start the stack with: docker compose up -d --wait')

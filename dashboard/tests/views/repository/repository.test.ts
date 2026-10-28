@@ -276,7 +276,7 @@ describe('Repository page: scope, errors and aborts', () => {
     expect(btn.text()).toBe('Sync repository');
     expect(btn.attributes('aria-disabled')).toBe('true');
     expect(btn.attributes('data-tip')).toContain('Needs the operate scope');
-    expect(w().find('.lock-note').text()).toBe('Needs the operate scope. Your token has read access.');
+    expect(w().find('.lock-note').text()).toBe('Needs the operate scope. Your account has read access.');
     await btn.trigger('click');
     expect(toasts()).toContain('Not available');
     expect(app.mock.calls.filter(c => c.method === 'POST' && c.path !== 'login')).toHaveLength(0);
@@ -298,13 +298,13 @@ describe('Repository page: scope, errors and aborts', () => {
     await waitFor(() => w().find('.repo-card').exists());
   });
 
-  it('a token that cannot read shows "Your token cannot open this"', async () => {
+  it('a token that cannot read shows "Your account cannot open this"', async () => {
     app = await mountApp({ path: '/audit' });
     const real = app.ctx.api.page.bind(app.ctx.api);
     (app.ctx.api as { page: unknown }).page = (path: string, ...rest: unknown[]) =>
       (path === 'source/scans' ? Promise.reject(Object.assign(new Error('Your Operator scope does not allow this action.'), { status: 403, silent: false })) : (real as (p: string, ...r: unknown[]) => Promise<unknown>)(path, ...rest));
     await app.go('/repository');
-    expect(w().find('h1').text()).toBe('Your token cannot open this');
+    expect(w().find('h1').text()).toBe('Your account cannot open this');
   });
 
   it('leaving the page aborts the reads in flight', async () => {
