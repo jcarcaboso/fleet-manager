@@ -36,6 +36,9 @@ percent-encoded as one URL path segment, so aliases may contain spaces, `/`, `?`
 | `fleet nodes attempts <node> [--target T] [--after C]` | `GET nodes/{node}/attempts` |
 | `fleet nodes checkins <node> [--hours N]` | `GET nodes/{node}/checkins` (`N` is 1 to 168) |
 | `fleet nodes disk <node> [--refresh]` | `GET nodes/{node}`, printing `{"node", "disk"}` (see below); with `--refresh` only `POST nodes/{node}/disk-usage/refresh` (scope `operate`), printing its 202 body |
+| `fleet nodes update <node>` | `POST nodes/{node}/agent-update` (scope `admin`), printing the update |
+| `fleet nodes update <node> <node>...` / `--all-outdated` | `POST agent-updates` with `{"nodes": [...]}` or `{"allOutdated": true}` (scope `admin`), printing the per-Node results |
+| `fleet nodes update --cancel <node>` | `POST nodes/{node}/agent-update/cancel` (scope `admin`) |
 | `fleet nodes rename <current> <new>` | `POST nodes/rename` |
 | `fleet nodes revoke <node> --yes` | `GET nodes/{node}`, then `POST nodes/{nodeId}/revoke` |
 | `fleet nodes remove <node> --yes` | `GET nodes/{node}`, then `POST nodes/{nodeId}/remove` with `{"alias": <current name>}` |
