@@ -24,6 +24,9 @@ public static class FleetServerHosting
         builder.Logging.AddFilter("Microsoft.EntityFrameworkCore", LogLevel.Warning);
         builder.Services.AddSingleton(TimeProvider.System);
         builder.Services.AddSingleton<FleetMetrics>();
+        // Minimal APIs throw on a malformed body only in Development by default and otherwise answer an empty 400. Throwing everywhere
+        // lets the error handler below answer { code: "invalid_request", message } in production as well.
+        builder.Services.Configure<Microsoft.AspNetCore.Routing.RouteHandlerOptions>(options => options.ThrowOnBadRequest = true);
         builder.Services.AddSingleton<DatabaseMetricsInterceptor>();
         builder.Services.AddRequestTimeouts(options => options.DefaultPolicy = new Microsoft.AspNetCore.Http.Timeouts.RequestTimeoutPolicy
         { Timeout = TimeSpan.FromSeconds(30), TimeoutStatusCode = StatusCodes.Status504GatewayTimeout });
