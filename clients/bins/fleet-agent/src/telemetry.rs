@@ -129,7 +129,7 @@ pub fn collect(state_directory: &Path, homes: &[PathBuf]) -> TelemetryReport {
         user: login_name(),
         install_method: std::env::current_exe().ok().map(|exe| {
             let resolved = fs::canonicalize(&exe).ok();
-            install_method(&exe, resolved.as_deref(), homes)
+            install_method(&exe, resolved.as_deref(), homes, state_directory)
         }),
         service_manager: service_manager(
             std::env::var_os("INVOCATION_ID").as_deref(),
@@ -350,13 +350,21 @@ fn xml_unescape(text: &str) -> String {
 // ---------------------------------------------------------------------------
 // Install method, service manager and state directory.
 
-/// `homebrew` under a Homebrew prefix, `cargo` under `~/.cargo/bin`, else
-/// `binary`. The path as the operating system reports it and, when it could be
-/// resolved, its symlink-free form are both checked: `/usr/local/bin` on an
-/// Intel Mac is a link into `/usr/local/Cellar`.
-fn install_method(exe: &Path, resolved: Option<&Path>, homes: &[PathBuf]) -> &'static str {
+/// `managed` when installed by `fleet-agent service install` in the state
+/// directory, `homebrew` under a Homebrew prefix, `cargo` under
+/// `~/.cargo/bin`, else `binary`. The path as the operating system reports it
+/// and, when it could be resolved, its symlink-free form are both checked:
+/// `/usr/local/bin` on an Intel Mac is a link into `/usr/local/Cellar`.
+fn install_method(
+    exe: &Path,
+    resolved: Option<&Path>,
+    homes: &[PathBuf],
+    state_directory: &Path,
+) -> &'static str {
     let paths = || [Some(exe), resolved].into_iter().flatten();
-    if paths().any(is_homebrew) {
+    if paths().any(|path| crate::managed::is_managed(path, state_directory)) {
+        "managed"
+    } else if paths().any(is_homebrew) {
         "homebrew"
     } else if paths().any(|path| {
         homes
@@ -685,8 +693,9 @@ VERSION_ID=1\ 2"#;
 
     #[test]
     fn install_method_follows_the_executable_path() {
+        let state = Path::new("/home/joan/.local/state/fleet-agent");
         let method = |exe: &str, resolved: Option<&str>| {
-            install_method(Path::new(exe), resolved.map(Path::new), &homes())
+            install_method(Path::new(exe), resolved.map(Path::new), &homes(), state)
         };
         for homebrew in [
             "/opt/homebrew/bin/fleet-agent",
@@ -727,7 +736,24 @@ VERSION_ID=1\ 2"#;
             "homebrew"
         );
         assert_eq!(
-            install_method(Path::new("/home/joan/.cargo/bin/fleet-agent"), None, &[]),
+            install_method(
+                Path::new("/home/joan/.cargo/bin/fleet-agent"),
+                None,
+                &[],
+                state
+            ),
+            "binary"
+        );
+        // The service runs `current`, which resolves into the versions directory.
+        assert_eq!(
+            method(
+                "/home/joan/.local/state/fleet-agent/current/fleet-agent",
+                Some("/home/joan/.local/state/fleet-agent/versions/0.11.0/fleet-agent")
+            ),
+            "managed"
+        );
+        assert_eq!(
+            method("/home/joan/.local/state/fleet-agent/fleet-agent", None),
             "binary"
         );
     }

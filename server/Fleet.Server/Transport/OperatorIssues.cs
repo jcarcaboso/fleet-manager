@@ -227,6 +227,7 @@ public static partial class OperatorIssues
                 $"The Agent runs version {row.AgentVersion}; the latest version is {latest.Text}. Reported at {row.ReportedAt:u}.",
                 row.InstallMethod switch
                 {
+                    "managed" => "Get the new fleet-agent the way it was first installed (for example `brew upgrade fleet-agent`), then run `fleet-agent service install` with it. The service switches to the new version and restarts.",
                     "homebrew" => "Upgrade with `brew upgrade fleet-agent`, then restart the service with `brew services restart fleet-agent`.",
                     "cargo" => $"Reinstall with Cargo from the release tag v{latest.Text}: `cargo install --locked --force --git https://github.com/jcarcaboso/fleet-manager --tag v{latest.Text} fleet fleet-agent`, then restart the service (see cli-installation.md).",
                     _ => "Replace the binary with the one from the release archive, then restart the Agent service (see cli-installation.md)."

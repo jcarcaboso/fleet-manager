@@ -186,6 +186,9 @@ assignment (`unsupported_schema`).
 1. **Inspect.** `fleet nodes show <node>` for `agent.version`,
    `agent.latestVersion`, `agent.installMethod` and `agent.serviceManager`.
 2. **Tell the human the upgrade command** for the install method, and wait:
+   - `managed` (installed by `fleet-agent service install`): get the new
+     binary the way it was first installed, for example `brew upgrade
+     fleet-agent`, then `fleet-agent service install`.
    - `homebrew`: `brew upgrade fleet-agent`, then `brew services restart fleet-agent`.
    - `cargo`: reinstall from the release tag, for example
      `cargo install --locked --force --git https://github.com/jcarcaboso/fleet-manager --tag v<latestVersion> fleet fleet-agent`.

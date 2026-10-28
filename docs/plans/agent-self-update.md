@@ -1,5 +1,8 @@
 # Agent self-update and service command plan
 
+Status: SU-1 (release signing) and SU-2 (managed layout and service command)
+are implemented. SU-3 to SU-6 remain.
+
 ## Goal
 
 An Operator can update the Agent on one Node, several Nodes, or every outdated

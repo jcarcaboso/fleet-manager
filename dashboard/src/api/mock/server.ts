@@ -307,7 +307,8 @@ export function createMockServer(overrides: Partial<MockOptions> = {}): MockServ
     installMethod: n._agent.installMethod as NodeAgent['installMethod'], serviceManager: n._agent.serviceManager as NodeAgent['serviceManager'], stateDirectory: n._agent.stateDirectory, reportedAt: n._agent.reportedAt,
   } : null);
   /* The action names the upgrade command for the install method, like OperatorIssues. */
-  const upgradeAction = (n: MNode): string => n._agent!.installMethod === 'homebrew' ? 'Upgrade with `brew upgrade fleet-agent`, then restart the service with `brew services restart fleet-agent`.'
+  const upgradeAction = (n: MNode): string => n._agent!.installMethod === 'managed' ? 'Get the new fleet-agent the way it was first installed (for example `brew upgrade fleet-agent`), then run `fleet-agent service install` with it. The service switches to the new version and restarts.'
+    : n._agent!.installMethod === 'homebrew' ? 'Upgrade with `brew upgrade fleet-agent`, then restart the service with `brew services restart fleet-agent`.'
     : n._agent!.installMethod === 'cargo' ? `Reinstall with Cargo from the release tag v${LATEST}: \`cargo install --locked --force --git https://github.com/jcarcaboso/fleet-manager --tag v${LATEST} fleet fleet-agent\`, then restart the service (see cli-installation.md).`
       : 'Replace the binary with the one from the release archive, then restart the Agent service (see cli-installation.md).';
 
@@ -518,7 +519,9 @@ export function createMockServer(overrides: Partial<MockOptions> = {}): MockServ
     cat('disk_space_critical', 'issue', 'Disk is nearly full', 'The disk that holds the user’s home directory on this machine is 95% full or more. Writes can start failing at any moment, including the Agent’s own.',
       ['Run `fleet nodes disk <node>` to see how much space is left.', 'Ask the person who uses the machine to free space now: remove Git worktrees (`git worktree list`, `git worktree remove`), caches and build output. Fleet never deletes files for you.', 'Run `fleet nodes disk <node> --refresh` to measure again.']),
     cat('agent_outdated', 'issue', 'A Node runs an older Agent', 'The Agent on the Node reported a version lower than the Server’s. Server and Agent releases share version numbers, so the Agent is older than the release the Server runs.',
-      ['Run `fleet nodes show <node>` to see the running and the latest version and how the Agent was installed.', 'Homebrew: run `brew upgrade fleet-agent` on the Node and restart the service with `brew services restart fleet-agent`.',
+      ['Run `fleet nodes show <node>` to see the running and the latest version and how the Agent was installed.',
+        'Managed (installed by `fleet-agent service install`): get the new fleet-agent the way it was first installed, for example `brew upgrade fleet-agent`, then run `fleet-agent service install` with it.',
+        'Homebrew: run `brew upgrade fleet-agent` on the Node and restart the service with `brew services restart fleet-agent`.',
         'Cargo: reinstall from the release tag with `cargo install --locked --force --git https://github.com/jcarcaboso/fleet-manager --tag <tag> fleet fleet-agent`, then restart the service. See docs/technical-design/cli-installation.md.',
         'Binary: download and verify the release archive, replace the binary at the same path and restart the service. See docs/technical-design/cli-installation.md.',
         'docs/technical-design/client-updates.md describes staged updates and rollback. The issue clears when the Agent reports the new version, which it does shortly after it restarts.']),

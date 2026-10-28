@@ -27,33 +27,38 @@ Homebrew uses the prebuilt release for the current operating system and CPU.
 The formulas support Linux amd64 plus macOS 13 or newer on Apple silicon and
 Intel. They do not build Rust source or install credentials.
 
-Enroll the Agent before starting its Homebrew service. Homebrew generates the
-launchd or systemd definition with the stable `opt` path, so upgrades keep the
-same service command:
+Enroll the Agent, then install its service. `fleet-agent service install`
+copies the executable into the state directory (`versions/<version>/fleet-agent`
+plus a `current` link), writes a launchd or systemd definition that runs
+`<state-dir>/current/fleet-agent`, and starts it:
 
 ```sh
-fleet-agent enroll --help
-brew services start fleet-agent
-brew services info fleet-agent
+fleet-agent enroll --link
+fleet-agent service install
+fleet-agent service status
 ```
 
-Agent state remains under `~/.local/state/fleet-agent` unless `--state-dir`
-selects another absolute path. Do not run the Homebrew service and the service
-installed by `fleet-agent service install` at the same time. To migrate an
-existing Agent after stopping it, run `fleet-agent service uninstall` and then
-`brew services start fleet-agent`.
+After `brew upgrade fleet-agent`, run `fleet-agent service install` again to
+switch the service to the new version. The formula only supplies new
+binaries; it has no `brew services` definition from the release after 0.11.0
+on.
 
-Manage the Homebrew service with `brew services` only. Homebrew names it
+Agent state remains under `~/.local/state/fleet-agent` unless `--state-dir`
+selects another absolute path. Give the same `--state-dir` to every command.
+
+Releases up to 0.11.0 ran the Agent as a Homebrew service named
 `sh.brew.fleet-agent` (`homebrew.mxcl.fleet-agent` or
-`homebrew.fleet-agent.service` in older Homebrew versions), while
-`fleet-agent service` manages its own `dev.fleet.agent` launchd job or
-`fleet-agent.service` systemd unit. When only the Homebrew service is
-installed, every `fleet-agent service` action stops with an error that names
-the `brew services` command to use instead, and `install`, `start` and
-`restart` also refuse while both are installed, since only one Agent can run.
-`fleet-agent status` reports `service.running` (an Agent holds the state lock,
-whoever started it) together with `service.manager` (`homebrew` or
-`fleet-agent`) and `service.label`.
+`homebrew.fleet-agent.service` in older Homebrew versions). A newer
+`fleet-agent service install` finds that service, runs
+`brew services stop fleet-agent` to stop and unregister it, and installs its own
+`dev.fleet.agent` launchd job or `fleet-agent.service` systemd unit. While only
+the Homebrew service is installed, the other `fleet-agent service` actions stop
+with an error that names `fleet-agent service install` and the matching
+`brew services` command. `start` and `restart` also refuse while both are
+installed, since only one Agent can run. `fleet-agent status` reports
+`service.running` (an Agent holds the state lock, whoever started it) together
+with `service.manager` (`homebrew` or `fleet-agent`), `service.label` and
+`service.version`, the installed version the fleet-agent service runs.
 
 ## Service logs
 
@@ -62,6 +67,9 @@ whoever started it) together with `service.manager` (`homebrew` or
 | Homebrew, macOS and Linux | `$(brew --prefix)/var/log/fleet-agent.log` (standard output and error; `brew services info fleet-agent` shows the path) |
 | `fleet-agent service install`, macOS | `<state-dir>/logs/agent.log`, by default `~/.local/state/fleet-agent/logs/agent.log`; `fleet-agent status` shows it as `service.logs` |
 | `fleet-agent service install`, Linux | the user journal: `journalctl --user -u fleet-agent` |
+
+`fleet-agent service logs` prints the last 200 lines of the fleet-agent
+service's log on either system; add `--follow` to keep printing new lines.
 
 The launchd job of `fleet-agent service install` writes both streams to
 `agent.log`. The Agent starts that file again once it exceeds 10 MiB and keeps
@@ -89,8 +97,9 @@ stopping it, or use the Homebrew binary explicitly during the transition:
 "$(brew --prefix fleet-agent)/bin/fleet-agent" enroll --link
 ```
 
-Use the enrollment command only for a new Node. Homebrew services already use
-the Homebrew binary's stable path.
+Use the enrollment command only for a new Node. The fleet-agent service runs
+its own copy in the state directory, so it is not affected by which
+`fleet-agent` comes first on PATH.
 
 ## Put user-installed commands on PATH
 
