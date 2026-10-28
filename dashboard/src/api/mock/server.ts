@@ -301,10 +301,11 @@ export function createMockServer(overrides: Partial<MockOptions> = {}): MockServ
     }
   });
   const outdatedOf = (n: MNode): boolean => !!n._agent && semverLess(n._agent.version, LATEST);
-  const listAgent = (n: MNode): Json => (n._agent ? { version: n._agent.version, outdated: outdatedOf(n), os: { name: n._agent.os.name, version: n._agent.os.version }, arch: n._agent.arch, hostname: n._agent.hostname } : null);
+  const listAgent = (n: MNode): Json => (n._agent ? { version: n._agent.version, outdated: outdatedOf(n), os: { name: n._agent.os.name, version: n._agent.os.version }, arch: n._agent.arch, hostname: n._agent.hostname, selfUpdate: false } : null);
   const detailAgent = (n: MNode): NodeAgent | null => (n._agent ? {
     version: n._agent.version, latestVersion: LATEST, outdated: outdatedOf(n), os: { ...n._agent.os }, arch: n._agent.arch, hostname: n._agent.hostname, user: n._agent.user,
     installMethod: n._agent.installMethod as NodeAgent['installMethod'], serviceManager: n._agent.serviceManager as NodeAgent['serviceManager'], stateDirectory: n._agent.stateDirectory, reportedAt: n._agent.reportedAt,
+    selfUpdate: false,
   } : null);
   /* The action names the upgrade command for the install method, like OperatorIssues. */
   const upgradeAction = (n: MNode): string => n._agent!.installMethod === 'managed' ? 'Get the new fleet-agent the way it was first installed (for example `brew upgrade fleet-agent`), then run `fleet-agent service install` with it. The service switches to the new version and restarts.'
@@ -316,7 +317,7 @@ export function createMockServer(overrides: Partial<MockOptions> = {}): MockServ
   const listItem = (n: MNode): NodeListItem => ({
     nodeId: n.id, name: n.alias, revoked: !!n.revokedAt, lastContactAt: n.lastContactAt, freshness: freshnessOfAbs(n),
     platform: n.platform, enrolledAt: n.enrolledAt, revokedAt: n.revokedAt, credentialNotAfter: credNotAfter(n), targets: counts(n), currentRevision: currentRevision(n),
-    disk: listDisk(n), ...(cfg.agent ? { agent: listAgent(n) } : {}),
+    disk: listDisk(n), ...(cfg.agent ? { agent: listAgent(n), agentUpdate: null } : {}),
   });
 
   /* Phase 2 attempt detail: diagnostic, path (relative to the Target base, never starting with "/"), step. Only a failed Attempt reported by an Agent that
@@ -364,7 +365,7 @@ export function createMockServer(overrides: Partial<MockOptions> = {}): MockServ
     return {
       nodeId: n.id, name: n.alias, platform: n.platform, enrolledAt: n.enrolledAt, lastContactAt: n.lastContactAt, freshness: listItem(n).freshness, revoked: !!n.revokedAt, revokedAt: n.revokedAt,
       credential: { credentialId: guid('cred:' + n.id), notBefore: n.credential.notBefore, notAfter: n.credential.notAfter, revokedAt: n.credential.revokedAt, revokedBy: n.revokedAt ? n.revokedBy : null, renewals: n.credential.renewals },
-      targets, summary: counts(n), disk: detailDisk(n), ...(cfg.agent ? { agent: detailAgent(n) } : {}),
+      targets, summary: counts(n), disk: detailDisk(n), ...(cfg.agent ? { agent: detailAgent(n), agentUpdate: null } : {}),
       ...(cfg.drift ? { drift: (n._drift || []).map(d => ({ target: d.target, files: d.files.slice(), detectedAt: d.detectedAt })) } : {}),
     };
   };
