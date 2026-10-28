@@ -28,6 +28,7 @@ public sealed class FleetDbContext(DbContextOptions<FleetDbContext> options) : D
     public DbSet<NodeRepairFailureRow> NodeRepairFailures => Set<NodeRepairFailureRow>();
     public DbSet<IssueStateRow> IssueStates => Set<IssueStateRow>();
     public DbSet<OperatorAccountRow> OperatorAccounts => Set<OperatorAccountRow>();
+    public DbSet<AgentUpdateRow> AgentUpdates => Set<AgentUpdateRow>();
 
     protected override void OnModelCreating(ModelBuilder model)
     {
@@ -72,6 +73,13 @@ public sealed class FleetDbContext(DbContextOptions<FleetDbContext> options) : D
         model.Entity<NodeTelemetryRow>().Property(x => x.ServiceManager).HasMaxLength(16);
         model.Entity<NodeTelemetryRow>().Property(x => x.StateDirectory).HasMaxLength(512);
         model.Entity<NodeTelemetryRow>().HasOne<NodeRow>().WithMany().HasForeignKey(x => x.NodeId).OnDelete(DeleteBehavior.Cascade);
+        model.Entity<AgentUpdateRow>().ToTable("agent_updates").HasKey(x => x.NodeId);
+        model.Entity<AgentUpdateRow>().Property(x => x.FromVersion).HasMaxLength(AgentTelemetryRules.MaximumLength);
+        model.Entity<AgentUpdateRow>().Property(x => x.TargetVersion).HasMaxLength(AgentUpdateRules.MaximumVersionLength);
+        model.Entity<AgentUpdateRow>().Property(x => x.State).HasMaxLength(AgentUpdateRules.MaximumStateLength);
+        model.Entity<AgentUpdateRow>().Property(x => x.ErrorCode).HasMaxLength(AgentUpdateRules.MaximumErrorCodeLength);
+        model.Entity<AgentUpdateRow>().Property(x => x.RequestedBy).HasMaxLength(200);
+        model.Entity<AgentUpdateRow>().HasOne<NodeRow>().WithMany().HasForeignKey(x => x.NodeId).OnDelete(DeleteBehavior.Cascade);
         model.Entity<CredentialRow>().ToTable("node_credentials").HasKey(x => x.Id);
         model.Entity<CredentialRow>().HasIndex(x => x.CertificateSha256).IsUnique();
         model.Entity<CredentialRow>().HasIndex(x => new { x.NodeId, x.RevokedAt });
@@ -154,6 +162,8 @@ public sealed class NodeRow
     public DateTimeOffset? LastContactAt { get; set; }
     // Set by an Operator's disk refresh request, cleared by the next disk report. Poll reads it from the Node row it already loads.
     public DateTimeOffset? DiskUsageRefreshRequestedAt { get; set; }
+    // Whether the Agent announced the agent-update capability on its latest poll. Written by every poll with the contact time.
+    public bool AgentSelfUpdate { get; set; }
 }
 // The latest report only: one row per Node and volume label, replaced as a whole by each report.
 public sealed class NodeDiskUsageRow
@@ -343,6 +353,19 @@ public sealed class NodeRepairFailureRow
     public string? Step { get; set; }
     public DateTimeOffset FailedSince { get; set; }
     public DateTimeOffset ReportedAt { get; set; }
+}
+// The latest Agent update of a Node. Requesting again replaces a finished row; the audit log keeps the history.
+public sealed class AgentUpdateRow
+{
+    public Guid NodeId { get; set; }
+    public string? FromVersion { get; set; }
+    public required string TargetVersion { get; set; }
+    public required string State { get; set; }
+    public string? ErrorCode { get; set; }
+    public required string RequestedBy { get; set; }
+    public DateTimeOffset RequestedAt { get; set; }
+    public DateTimeOffset UpdatedAt { get; set; }
+    public DateTimeOffset? FinishedAt { get; set; }
 }
 // An Operator's acknowledgement or snooze of one issue. Expired and obsolete rows are deleted lazily by the next change.
 public sealed class IssueStateRow

@@ -84,7 +84,7 @@ fn digest(path: &Path) -> Result<[u8; 32]> {
     Ok(hasher.finalize().into())
 }
 
-fn sync_directory(path: &Path) -> Result<()> {
+pub fn sync_directory(path: &Path) -> Result<()> {
     File::open(path)
         .and_then(|directory| directory.sync_all())
         .with_context(|| format!("sync {}", path.display()))
@@ -101,6 +101,32 @@ fn directory(path: &Path) -> Result<()> {
                 .with_context(|| format!("protect {}", path.display()))
         }
         Err(error) => Err(error).with_context(|| format!("inspect {}", path.display())),
+    }
+}
+
+/// Creates `versions/<version>/` (mode 0700) for an executable that is about
+/// to be staged there, and returns it.
+pub fn prepare_version(state_dir: &Path, version: &str) -> Result<PathBuf> {
+    check_version(version)?;
+    let versions = state_dir.join(VERSIONS);
+    let folder = versions.join(version);
+    directory(&versions)?;
+    directory(&folder)?;
+    Ok(folder)
+}
+
+/// Removes one installed version that is not active.
+pub fn remove_version(state_dir: &Path, version: &str) -> Result<()> {
+    check_version(version)?;
+    if active_version(state_dir)?.as_deref() == Some(version) {
+        bail!("version {version} is active");
+    }
+    let folder = state_dir.join(VERSIONS).join(version);
+    match fs::remove_dir_all(&folder) {
+        Err(error) if error.kind() != ErrorKind::NotFound => {
+            Err(error).with_context(|| format!("remove {}", folder.display()))
+        }
+        _ => Ok(()),
     }
 }
 

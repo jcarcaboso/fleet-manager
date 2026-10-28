@@ -40,24 +40,20 @@ public static class FleetEndpoints
         agents.MapPost("/poll", async (HttpContext context, IFleetCoordinator coordinator, IOptions<FleetOptions> options,
             TimeProvider time, CancellationToken ct) =>
         {
-            var result = await coordinator.PollAsync(Node(context), time.GetUtcNow(), ct);
-            // Agents that predate disk usage reject unknown fields, so the field exists only for Agents that announce the capability.
-            if (result.DiskUsageRequested && HasCapability(context, DiskUsageCapability))
-                return Results.Ok(new
-                {
-                    workspaceId = options.Value.WorkspaceId,
-                    nodeId = Node(context).NodeId.Value,
-                    assignment = result.Assignment,
-                    nextPollSeconds = options.Value.PollIntervalSeconds,
-                    diskUsageRequested = true
-                });
-            return Results.Ok(new
+            var capabilities = Capabilities(context);
+            var result = await coordinator.PollAsync(Node(context), time.GetUtcNow(), capabilities, ct);
+            // Agents reject unknown fields, so each optional field exists only for Agents that announce its capability.
+            var response = new Dictionary<string, object?>
             {
-                workspaceId = options.Value.WorkspaceId,
-                nodeId = Node(context).NodeId.Value,
-                assignment = result.Assignment,
-                nextPollSeconds = options.Value.PollIntervalSeconds
-            });
+                ["workspaceId"] = options.Value.WorkspaceId,
+                ["nodeId"] = Node(context).NodeId.Value,
+                ["assignment"] = result.Assignment,
+                ["nextPollSeconds"] = options.Value.PollIntervalSeconds
+            };
+            if (result.DiskUsageRequested && capabilities.HasFlag(AgentCapabilities.DiskUsage)) response["diskUsageRequested"] = true;
+            if (result.AgentUpdateVersion is { } version && capabilities.HasFlag(AgentCapabilities.AgentUpdate))
+                response["agentUpdate"] = new { version };
+            return Results.Ok(response);
         });
         agents.MapGet("/bundles/{digest}", async (string digest, HttpContext context, IFleetCoordinator coordinator, CancellationToken ct) =>
         {
@@ -142,6 +138,25 @@ public static class FleetEndpoints
             await coordinator.RecordRepairFailuresAsync(Node(context), new(failures), ct);
             return Results.NoContent();
         }).LimitPerNode();
+        // The signed release of the Server's own version, mirrored by the Server. The Agent verifies the signature and every digest itself.
+        agents.MapGet("/agent-releases/{version}/manifest", async (string version, AgentReleaseMirror mirror, LatestAgentVersion latest,
+            CancellationToken ct) => Results.Bytes((await ReleaseAsync(version, mirror, latest, ct)).Manifest, "application/json"));
+        agents.MapGet("/agent-releases/{version}/signature", async (string version, AgentReleaseMirror mirror, LatestAgentVersion latest,
+            CancellationToken ct) => Results.Bytes((await ReleaseAsync(version, mirror, latest, ct)).Signature, "application/octet-stream"));
+        agents.MapGet("/agent-releases/{version}/binaries/{platform}", async (string version, string platform, AgentReleaseMirror mirror,
+            LatestAgentVersion latest, CancellationToken ct) =>
+        {
+            var release = await ReleaseAsync(version, mirror, latest, ct);
+            return release.Binaries.TryGetValue(platform, out var binary)
+                ? Results.File(binary.Path, "application/octet-stream")
+                : Results.Json(new { code = "agent_release_not_found" }, statusCode: StatusCodes.Status404NotFound);
+        }).WithRequestTimeout(TimeSpan.FromMinutes(10));
+        // The Agent reports the progress of a requested update. A report without a matching update changes nothing and gets a 409.
+        agents.MapPost("/agent-update/report", async (AgentUpdateReportRequest request, HttpContext context, IFleetCoordinator coordinator,
+            CancellationToken ct) =>
+            await coordinator.RecordAgentUpdateReportAsync(Node(context), new(request.Version!, request.State!, request.ErrorCode), ct)
+                ? Results.NoContent()
+                : Results.Json(new { code = "agent_update_not_requested" }, statusCode: StatusCodes.Status409Conflict)).LimitPerNode();
         agents.MapPost("/credentials/renew", async (RenewalRequest request, HttpContext context, IFleetCoordinator coordinator,
             NodeCertificateIssuer issuer, TimeProvider time, CancellationToken ct) =>
         {
@@ -160,6 +175,17 @@ public static class FleetEndpoints
     }
 
     public const string DiskUsageCapability = "disk-usage";
+    public const string AgentUpdateCapability = "agent-update";
+
+    private static AgentCapabilities Capabilities(HttpContext context) =>
+        (HasCapability(context, DiskUsageCapability) ? AgentCapabilities.DiskUsage : AgentCapabilities.None) |
+        (HasCapability(context, AgentUpdateCapability) ? AgentCapabilities.AgentUpdate : AgentCapabilities.None);
+
+    // Only the Server's own version is served: it is the only release an update request can name.
+    private static async Task<AgentRelease> ReleaseAsync(string version, AgentReleaseMirror mirror, LatestAgentVersion latest, CancellationToken ct) =>
+        version == latest.Value.Text
+            ? await mirror.EnsureAsync(latest.Value, ct)
+            : throw new OperatorApiException(StatusCodes.Status404NotFound, "agent_release_not_found", "Only the Server's own Agent version is served.");
 
     /// <summary>True when <c>X-Fleet-Agent-Capabilities</c> lists the token: comma-separated, trimmed, case-insensitive.</summary>
     public static bool HasCapability(HttpContext context, string capability) =>
@@ -186,7 +212,8 @@ public static class FleetEndpoints
 
 /// <summary>
 /// Per-Node limit shared by <c>POST /agent/v1/attempts/{attemptId}/detail</c>, <c>PUT /agent/v1/disk-usage</c>,
-/// <c>PUT /agent/v1/telemetry</c>, <c>POST /agent/v1/drift</c> and <c>PUT /agent/v1/repair-failures</c>: a bucket of 30
+/// <c>PUT /agent/v1/telemetry</c>, <c>POST /agent/v1/drift</c>, <c>PUT /agent/v1/repair-failures</c> and
+/// <c>POST /agent/v1/agent-update/report</c>: a bucket of 30
 /// that refills one request every 2 seconds (30 a minute sustained), with no queue. A healthy Agent sends one detail per failed
 /// Attempt plus retries, and one disk report every few hours, far below this. Partitions exist only for authenticated Nodes
 /// and the framework removes idle ones.

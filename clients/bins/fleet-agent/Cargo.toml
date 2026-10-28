@@ -15,6 +15,8 @@ uuid.workspace = true
 rcgen = { version = "0.14.5", default-features = false, features = ["pem", "crypto", "ring"] }
 time = { version = "0.3.44", features = ["parsing"] }
 sha2 = "0.10.9"
+# Ed25519 verification of the release manifest. Already locked through rcgen.
+ring = "0.17.14"
 dirs = "6.0.0"
 fleet-reconcile = { path = "../../crates/fleet-reconcile" }
 toml_edit = "0.25.13"

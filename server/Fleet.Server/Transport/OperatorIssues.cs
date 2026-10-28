@@ -209,30 +209,46 @@ public static partial class OperatorIssues
         return issues;
     }
 
-    private sealed record TelemetryRow(Guid NodeId, string NodeName, string AgentVersion, string? InstallMethod, DateTimeOffset ReportedAt);
+    private sealed record TelemetryRow(Guid NodeId, string NodeName, string AgentVersion, string? InstallMethod, DateTimeOffset ReportedAt,
+        bool SelfUpdate, string? UpdateState, string? UpdateError, DateTimeOffset? UpdateFinishedAt);
 
-    // One issue per Node that is not revoked and runs an older Agent than the Server. One row per Node is read, with only the columns used here.
+    // One issue per Node that is not revoked and runs an older Agent than the Server: agent_update_failed when its last update failed,
+    // otherwise agent_outdated. One row per Node is read, with only the columns used here.
     private static async Task<IEnumerable<OperatorIssue>> OutdatedAgentIssuesAsync(FleetDbContext db, IQueryable<NodeRow> nodes,
         SemanticVersion latest, CancellationToken ct)
     {
         var rows = await (from telemetry in db.NodeTelemetries.AsNoTracking()
                           join node in nodes on telemetry.NodeId equals node.Id
+                          join update in db.AgentUpdates.AsNoTracking() on node.Id equals update.NodeId into updates
+                          from update in updates.DefaultIfEmpty()
                           orderby node.Name, node.Id
-                          select new TelemetryRow(node.Id, node.Name, telemetry.AgentVersion, telemetry.InstallMethod, telemetry.ReportedAt))
+                          select new TelemetryRow(node.Id, node.Name, telemetry.AgentVersion, telemetry.InstallMethod, telemetry.ReportedAt,
+                              node.AgentSelfUpdate, update == null ? null : update.State, update == null ? null : update.ErrorCode,
+                              update == null ? null : update.FinishedAt))
             .ToListAsync(ct);
         return rows.Where(row => AgentTelemetryRules.IsOutdated(row.AgentVersion, latest)).Take(MaximumItems).Select(row =>
         {
             var alias = Quote(row.NodeName);
+            if (row.UpdateState == AgentUpdateRules.Failed)
+                return new OperatorIssue($"agent_update_failed:{row.NodeId:D}", "agent_update_failed", "warning",
+                    $"{row.NodeName}: Agent update failed",
+                    $"The update to {latest.Text} failed with {row.UpdateError}; the Agent still runs version {row.AgentVersion}.",
+                    ErrorCatalog.Find(row.UpdateError ?? "")?.Fix[0] ?? "Fix the cause on the Node, then start the update again.",
+                    "nodes", row.UpdateError, row.NodeId, row.NodeName, null, row.UpdateFinishedAt ?? row.ReportedAt,
+                    [$"fleet nodes show {alias}", $"fleet explain {row.UpdateError}", $"fleet nodes update {alias}"]);
             return new OperatorIssue($"agent_outdated:{row.NodeId:D}", "agent_outdated", "warning", $"{row.NodeName}: Agent is outdated",
                 $"The Agent runs version {row.AgentVersion}; the latest version is {latest.Text}. Reported at {row.ReportedAt:u}.",
-                row.InstallMethod switch
-                {
-                    "managed" => "Get the new fleet-agent the way it was first installed (for example `brew upgrade fleet-agent`), then run `fleet-agent service install` with it. The service switches to the new version and restarts.",
-                    "homebrew" => "Upgrade with `brew upgrade fleet-agent`, then restart the service with `brew services restart fleet-agent`.",
-                    "cargo" => $"Reinstall with Cargo from the release tag v{latest.Text}: `cargo install --locked --force --git https://github.com/jcarcaboso/fleet-manager --tag v{latest.Text} fleet fleet-agent`, then restart the service (see cli-installation.md).",
-                    _ => "Replace the binary with the one from the release archive, then restart the Agent service (see cli-installation.md)."
-                },
-                "nodes", null, row.NodeId, row.NodeName, null, row.ReportedAt, [$"fleet nodes show {alias}"]);
+                row.SelfUpdate
+                    ? "Update it with Update Agent in the dashboard or `fleet nodes update <node>`. The Agent downloads the signed release from the Server, restarts into it and rolls back if it fails."
+                    : row.InstallMethod switch
+                    {
+                        "managed" => "Get the new fleet-agent the way it was first installed (for example `brew upgrade fleet-agent`), then run `fleet-agent service install` with it. The service switches to the new version and restarts.",
+                        "homebrew" => "Upgrade with `brew upgrade fleet-agent`, then restart the service with `brew services restart fleet-agent`.",
+                        "cargo" => $"Reinstall with Cargo from the release tag v{latest.Text}: `cargo install --locked --force --git https://github.com/jcarcaboso/fleet-manager --tag v{latest.Text} fleet fleet-agent`, then restart the service (see cli-installation.md).",
+                        _ => "Replace the binary with the one from the release archive, then restart the Agent service (see cli-installation.md)."
+                    },
+                "nodes", null, row.NodeId, row.NodeName, null, row.ReportedAt,
+                row.SelfUpdate ? [$"fleet nodes show {alias}", $"fleet nodes update {alias}"] : [$"fleet nodes show {alias}"]);
         });
     }
 

@@ -484,8 +484,33 @@ pub mod testing {
         thread: Option<JoinHandle<()>>,
     }
 
+    /// A response the route server sends for `method` and `path`.
+    pub type Route = (&'static str, String, u16, Vec<u8>);
+
     impl MockServer {
         pub fn start(responses: Vec<(u16, &'static str)>) -> Self {
+            let mut served = 0;
+            Self::serve(move |_| {
+                let (status, body) = responses[served.min(responses.len() - 1)];
+                served += 1;
+                (status, body.as_bytes().to_vec())
+            })
+        }
+
+        /// Answers each request from the first route with its method and path,
+        /// and every other request with 404.
+        pub fn routes(routes: Vec<Route>) -> Self {
+            Self::serve(move |request| {
+                routes
+                    .iter()
+                    .find(|(method, path, _, _)| *method == request.method && *path == request.path)
+                    .map_or((404, Vec::new()), |(_, _, status, body)| {
+                        (*status, body.clone())
+                    })
+            })
+        }
+
+        fn serve(mut respond: impl FnMut(&Request) -> (u16, Vec<u8>) + Send + 'static) -> Self {
             let listener = TcpListener::bind("127.0.0.1:0").unwrap();
             let address = listener.local_addr().unwrap();
             let requests = Arc::new(Mutex::new(Vec::new()));
@@ -493,7 +518,6 @@ pub mod testing {
             let thread = {
                 let (requests, stop) = (requests.clone(), stop.clone());
                 std::thread::spawn(move || {
-                    let mut served = 0;
                     for stream in listener.incoming() {
                         if stop.load(Ordering::SeqCst) {
                             break;
@@ -502,15 +526,15 @@ pub mod testing {
                         let Some(request) = read_request(&stream) else {
                             continue;
                         };
+                        let (status, body) = respond(&request);
                         requests.lock().unwrap().push(request);
-                        let (status, body) = responses[served.min(responses.len() - 1)];
-                        served += 1;
                         let mut stream = stream;
                         let _ = write!(
                             stream,
-                            "HTTP/1.1 {status} Test\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                            "HTTP/1.1 {status} Test\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
                             body.len()
                         );
+                        let _ = stream.write_all(&body);
                     }
                 })
             };

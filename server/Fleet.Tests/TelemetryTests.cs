@@ -70,7 +70,7 @@ public sealed class TelemetryTests(OperatorApiFixture fixture) : IClassFixture<O
         Assert.Equal(204, (await PutAsync(node, Valid())).Status);
 
         var agent = (await ListRowAsync(fixture.Reader, "tel-visible"))["agent"]!.AsObject();
-        Assert.Equal(["version", "outdated", "os", "arch", "hostname"], agent.Select(x => x.Key));
+        Assert.Equal(["version", "outdated", "os", "arch", "hostname", "selfUpdate"], agent.Select(x => x.Key));
         Assert.Equal("0.9.0", agent["version"]!.GetValue<string>());
         Assert.Equal(["name", "version"], agent["os"]!.AsObject().Select(x => x.Key));
         Assert.Equal("Fedora Linux", agent["os"]!["name"]!.GetValue<string>());
@@ -82,7 +82,7 @@ public sealed class TelemetryTests(OperatorApiFixture fixture) : IClassFixture<O
         ContractShape.AssertMatches("node-detail.json", detail);
         var full = detail["agent"]!.AsObject();
         Assert.Equal(["version", "latestVersion", "outdated", "os", "arch", "hostname", "user", "installMethod", "serviceManager",
-            "stateDirectory", "reportedAt"], full.Select(x => x.Key));
+            "stateDirectory", "reportedAt", "selfUpdate"], full.Select(x => x.Key));
         Assert.Equal(ServerVersion.Current.Text, full["latestVersion"]!.GetValue<string>());
         Assert.Equal("7.2.11-200.fc44.x86_64", full["os"]!["kernel"]!.GetValue<string>());
         Assert.Equal("joan", full["user"]!.GetValue<string>());

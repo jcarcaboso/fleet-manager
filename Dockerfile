@@ -7,6 +7,8 @@ COPY server/Fleet.Server/Fleet.Server.csproj server/Fleet.Server/packages.lock.j
 RUN dotnet restore server/Fleet.Server/Fleet.Server.csproj --locked-mode
 COPY server/Fleet.Core/ server/Fleet.Core/
 COPY server/Fleet.Server/ server/Fleet.Server/
+# The Agent release public keys, embedded so the Server verifies releases with the same keys as the Agent.
+COPY clients/bins/fleet-agent/release-keys/ clients/bins/fleet-agent/release-keys/
 RUN dotnet publish server/Fleet.Server/Fleet.Server.csproj -c Release --no-restore -o /out /p:UseAppHost=false
 
 FROM mcr.microsoft.com/dotnet/aspnet:10.0.11-noble@sha256:011bb5f30180717b1c8b65822ff2c99bcb96bc65af0164589751b83c7b4949f7 AS runtime

@@ -11,6 +11,7 @@ mod repair;
 mod service;
 mod state;
 mod telemetry;
+mod updater;
 
 use anyhow::{Context, Result, bail};
 use clap::{Parser, Subcommand};
@@ -97,8 +98,8 @@ enum Command {
 
 #[derive(Clone, Copy, Subcommand)]
 enum UpdateCommand {
-    /// Show this executable's version and the installed versions. Read-only
-    /// and safe to run while the service runs.
+    /// Show this executable's version, the installed versions and the last
+    /// update. Read-only and safe to run while the service runs.
     Status,
     /// Switch the service to the other installed version and restart it. Not
     /// read-only, but takes no state lock and works while the service runs.
@@ -173,7 +174,7 @@ async fn main() -> Result<()> {
     if let Command::Update { action } = &cli.command {
         let directory = absolute_path(directory)?;
         return match action {
-            UpdateCommand::Status => inspect::print(&managed::status(&directory)?),
+            UpdateCommand::Status => inspect::print(&updater::status(&directory)?),
             UpdateCommand::Rollback => service::rollback(&directory),
         };
     }
@@ -296,6 +297,16 @@ async fn main() -> Result<()> {
             let mut telemetry_report: Option<TelemetryTask> = None;
             let mut drift_report: Option<drift::Task> = None;
             let mut repairs = repair::Tracker::default();
+            // Before anything else: a new version in trial counts its starts and may roll back.
+            let mut update = if once {
+                updater::Session::inactive(&directory)
+            } else {
+                match updater::Session::start(&directory)? {
+                    updater::Startup::Continue(session) => session,
+                    updater::Startup::Restart => restart(),
+                }
+            };
+            let self_updater = updater::Updater::new(&directory);
             loop {
                 service::trim_log(&directory);
                 let mut drifted = Vec::new();
@@ -311,6 +322,7 @@ async fn main() -> Result<()> {
                     &mut telemetry_schedule,
                     &mut drifted,
                     &mut repairs,
+                    &mut update,
                 )
                 .await;
                 // After the cycle, so the report and reconciliation never wait for it.
@@ -333,6 +345,20 @@ async fn main() -> Result<()> {
                 .await;
                 send_drift(&config, &identity, drifted, &mut drift_report);
                 send_repair_failures(&config, &identity, &mut repairs).await;
+                // Last, after the cycle and its reports: the update may end this process.
+                if !once {
+                    if update.trial_expired()? {
+                        restart();
+                    }
+                    if let Ok(client) = api(&config, &identity) {
+                        update.deliver(&client).await;
+                        if let Some(version) = update.take_request()
+                            && self_updater.apply(&client, &version).await
+                        {
+                            restart();
+                        }
+                    }
+                }
                 let outcome = match result {
                     Ok(outcome) => outcome,
                     Err(error) if once => return Err(error),
@@ -391,6 +417,17 @@ async fn main() -> Result<()> {
         | Command::Update { .. } => unreachable!("handled before the state lock"),
     }
     Ok(())
+}
+
+/// Ends the process so the service manager starts the version `current`
+/// names. The state lock is released with the process.
+fn restart() -> ! {
+    eprintln!(
+        "exiting with code {} so the service manager starts the active Agent version",
+        updater::RESTART_EXIT_CODE
+    );
+    let _ = io::stdout().flush();
+    std::process::exit(updater::RESTART_EXIT_CODE)
 }
 
 fn token_from_text(raw: &str) -> Result<String> {
@@ -819,6 +856,7 @@ async fn cycle(
     telemetry_schedule: &mut telemetry::Schedule,
     drifted: &mut Vec<drift::Report>,
     repairs: &mut repair::Tracker,
+    update: &mut updater::Session,
 ) -> Result<CycleOutcome> {
     migrate_run_state(run);
     for assignment in run
@@ -847,6 +885,7 @@ async fn cycle(
     }
     disk_schedule.poll_succeeded(poll.disk_usage_requested);
     telemetry_schedule.poll_succeeded();
+    update.poll_succeeded(poll.agent_update.as_ref());
     let delay = poll.next_poll_seconds;
     if let Some(assignment) = poll.assignment {
         actions.validate(&assignment)?;

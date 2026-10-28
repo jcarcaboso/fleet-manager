@@ -151,9 +151,10 @@ public sealed record AgentAssignment(
 
 /// <summary>
 /// What a poll found. <paramref name="DiskUsageRequested"/> is true while an Operator's disk refresh request is pending;
-/// the route only tells Agents that sent the <c>disk-usage</c> capability.
+/// the route only tells Agents that sent the <c>disk-usage</c> capability. <paramref name="AgentUpdateVersion"/> is the version of a
+/// requested Agent update; it is looked up only for Agents that sent the <c>agent-update</c> capability.
 /// </summary>
-public sealed record PollResult(AgentAssignment? Assignment, bool DiskUsageRequested = false);
+public sealed record PollResult(AgentAssignment? Assignment, bool DiskUsageRequested = false, string? AgentUpdateVersion = null);
 
 public sealed record AttemptReport(
     AttemptId AttemptId,
@@ -199,7 +200,8 @@ public sealed record NodeStatus(
     TargetStateCounts Targets,
     string? CurrentRevision,
     NodeDiskSummary? Disk = null,
-    NodeAgentSummary? Agent = null);
+    NodeAgentSummary? Agent = null,
+    AgentUpdateStatus? AgentUpdate = null);
 
 public sealed record NodeCredentialStatus(
     CredentialId CredentialId,
@@ -251,7 +253,8 @@ public sealed record NodeDetail(
     TargetStateCounts Summary,
     NodeDisk? Disk = null,
     NodeAgent? Agent = null,
-    IReadOnlyList<NodeDriftEvent>? Drift = null);
+    IReadOnlyList<NodeDriftEvent>? Drift = null,
+    AgentUpdateStatus? AgentUpdate = null);
 
 public sealed record NodeAttemptStatus(
     AttemptId AttemptId,
@@ -290,12 +293,15 @@ public sealed record NodeAgentOs(string? Name, string? Version);
 
 public sealed record NodeAgentOsDetail(string? Name, string? Version, string? Kernel);
 
-/// <summary>The Agent information shown in the Node list.</summary>
-public sealed record NodeAgentSummary(string Version, bool Outdated, NodeAgentOs Os, string? Arch, string? Hostname);
+/// <summary>The Agent information shown in the Node list. <c>SelfUpdate</c> is true when the Agent announced on its latest poll that it can update itself.</summary>
+public sealed record NodeAgentSummary(string Version, bool Outdated, NodeAgentOs Os, string? Arch, string? Hostname, bool SelfUpdate);
 
-/// <summary>The latest telemetry report of a Node. <c>ReportedAt</c> is when the Server received it; <c>LatestVersion</c> is the Server's own version.</summary>
+/// <summary>
+/// The latest telemetry report of a Node. <c>ReportedAt</c> is when the Server received it; <c>LatestVersion</c> is the Server's own version.
+/// <c>SelfUpdate</c> is true when the Agent announced on its latest poll that it can update itself.
+/// </summary>
 public sealed record NodeAgent(string Version, string LatestVersion, bool Outdated, NodeAgentOsDetail Os, string? Arch, string? Hostname,
-    string? User, string? InstallMethod, string? ServiceManager, string? StateDirectory, DateTimeOffset ReportedAt);
+    string? User, string? InstallMethod, string? ServiceManager, string? StateDirectory, DateTimeOffset ReportedAt, bool SelfUpdate);
 
 /// <summary>Files an Agent repaired in one Target because they were changed outside Fleet. <c>DetectedAt</c> is when the Server received the report.</summary>
 public sealed record NodeDriftEvent(string Target, IReadOnlyList<string> Files, DateTimeOffset DetectedAt);

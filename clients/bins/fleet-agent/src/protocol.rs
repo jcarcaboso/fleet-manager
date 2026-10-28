@@ -21,7 +21,14 @@ const SIDE_REPORT_TIMEOUT: Duration = Duration::from_secs(10);
 /// Tells the Server which optional features this Agent understands. Only then
 /// may the poll response carry the matching fields.
 const CAPABILITIES_HEADER: &str = "x-fleet-agent-capabilities";
-const CAPABILITIES: &str = "disk-usage";
+const CAPABILITIES: &str = "disk-usage,agent-update";
+/// Largest signed release manifest the Agent reads.
+pub const MAX_RELEASE_MANIFEST_BYTES: usize = 64 * 1024;
+/// Size of an Ed25519 signature, the whole content of the signature file.
+const RELEASE_SIGNATURE_BYTES: usize = 64;
+/// Time limit of one release binary download.
+const RELEASE_BINARY_TIMEOUT: Duration = Duration::from_secs(600);
+const MAX_AGENT_UPDATE_REQUEST_BYTES: usize = 1024;
 
 #[derive(Debug)]
 pub enum ProtocolError {
@@ -399,6 +406,119 @@ impl Api {
         }
     }
 
+    /// The signed release manifest of `version`, as the Server mirrors it.
+    pub async fn release_manifest(&self, version: &str) -> Result<Vec<u8>, ProtocolError> {
+        let response = self
+            .authenticated()?
+            .get(self.release_url(version, &["manifest"])?)
+            .send()
+            .await
+            .map_err(ProtocolError::Transport)?;
+        read_bounded(success(response)?, MAX_RELEASE_MANIFEST_BYTES).await
+    }
+
+    /// The Ed25519 signature of the release manifest of `version`.
+    pub async fn release_signature(&self, version: &str) -> Result<Vec<u8>, ProtocolError> {
+        let response = self
+            .authenticated()?
+            .get(self.release_url(version, &["signature"])?)
+            .send()
+            .await
+            .map_err(ProtocolError::Transport)?;
+        let bytes = read_bounded(success(response)?, RELEASE_SIGNATURE_BYTES).await?;
+        if bytes.len() != RELEASE_SIGNATURE_BYTES {
+            return Err(ProtocolError::InvalidResponse(
+                "release signature has the wrong size",
+            ));
+        }
+        Ok(bytes)
+    }
+
+    /// Streams the release binary of `version` for `platform` (`{os}-{arch}`)
+    /// to `sink`, failing as soon as more than `limit` bytes arrive. Returns
+    /// the number of bytes received.
+    pub async fn release_binary(
+        &self,
+        version: &str,
+        platform: &str,
+        limit: u64,
+        mut sink: impl FnMut(&[u8]) -> std::io::Result<()>,
+    ) -> Result<u64, ProtocolError> {
+        let mut response = success(
+            self.authenticated()?
+                .get(self.release_url(version, &["binaries", platform])?)
+                .timeout(RELEASE_BINARY_TIMEOUT)
+                .send()
+                .await
+                .map_err(ProtocolError::Transport)?,
+        )?;
+        let too_large = ProtocolError::ResponseTooLarge {
+            limit: usize::try_from(limit).unwrap_or(usize::MAX),
+        };
+        if response
+            .content_length()
+            .is_some_and(|length| length > limit)
+        {
+            return Err(too_large);
+        }
+        let mut total = 0u64;
+        while let Some(chunk) = response.chunk().await.map_err(ProtocolError::Transport)? {
+            total += chunk.len() as u64;
+            if total > limit {
+                return Err(too_large);
+            }
+            sink(&chunk).map_err(|_| {
+                ProtocolError::InvalidResponse("could not store the release binary")
+            })?;
+        }
+        Ok(total)
+    }
+
+    /// Reports the progress of a requested update. Returns false when the
+    /// Server has no matching update (409), for example because it was
+    /// cancelled.
+    pub async fn agent_update_report(
+        &self,
+        version: &str,
+        state: AgentUpdateState,
+        error_code: Option<&str>,
+    ) -> Result<bool, ProtocolError> {
+        let body = serde_json::to_vec(&AgentUpdateReport {
+            version,
+            state,
+            error_code,
+        })
+        .map_err(|_| ProtocolError::Json)?;
+        if body.len() > MAX_AGENT_UPDATE_REQUEST_BYTES {
+            return Err(ProtocolError::RequestTooLarge {
+                limit: MAX_AGENT_UPDATE_REQUEST_BYTES,
+            });
+        }
+        let response = self
+            .authenticated()?
+            .post(self.endpoint("agent/v1/agent-update/report")?)
+            .header(CONTENT_TYPE, "application/json")
+            .timeout(SIDE_REPORT_TIMEOUT)
+            .body(body)
+            .send()
+            .await
+            .map_err(ProtocolError::Transport)?;
+        if response.status() == StatusCode::CONFLICT {
+            return Ok(false);
+        }
+        success(response)?;
+        Ok(true)
+    }
+
+    fn release_url(&self, version: &str, rest: &[&str]) -> Result<Url, ProtocolError> {
+        let mut url = self.endpoint("agent/v1/agent-releases")?;
+        url.path_segments_mut()
+            .map_err(|_| ProtocolError::Configuration("server URL cannot be a base"))?
+            .push(version)
+            .extend(rest);
+        Ok(url)
+    }
+
     pub async fn renew(&self, csr: &str) -> Result<RenewalResponse, ProtocolError> {
         self.json(
             self.authenticated()?,
@@ -512,6 +632,36 @@ pub struct PollResponse {
     /// Set by the Server only for Agents that sent the disk-usage capability.
     #[serde(default)]
     pub disk_usage_requested: bool,
+    /// An Operator's update request. Set by the Server only for Agents that
+    /// sent the agent-update capability.
+    #[serde(default)]
+    pub agent_update: Option<AgentUpdate>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AgentUpdate {
+    pub version: String,
+}
+
+/// States an Agent reports while it updates itself.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AgentUpdateState {
+    Downloading,
+    Restarting,
+    Succeeded,
+    Failed,
+}
+
+/// Body of `POST agent/v1/agent-update/report`. Every property is always
+/// present; `errorCode` is `null` unless the state is `failed`.
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct AgentUpdateReport<'a> {
+    version: &'a str,
+    state: AgentUpdateState,
+    error_code: Option<&'a str>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -773,7 +923,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn every_poll_request_advertises_the_disk_usage_capability() {
+    async fn every_poll_request_advertises_the_disk_usage_and_agent_update_capabilities() {
         let server =
             crate::detail::testing::MockServer::start(vec![(200, POLL), (200, POLL_REQUESTED)]);
         let client = Api::for_loopback_test(&server.url());
@@ -788,9 +938,126 @@ mod tests {
             );
             assert_eq!(
                 request.header("x-fleet-agent-capabilities"),
-                Some("disk-usage")
+                Some("disk-usage,agent-update")
             );
         }
+    }
+
+    #[test]
+    fn poll_response_parses_an_agent_update_request_and_nothing_else_new() {
+        let without: PollResponse = serde_json::from_str(POLL).unwrap();
+        assert_eq!(without.agent_update, None);
+        let with: PollResponse =
+            serde_json::from_str(&POLL.replace('}', r#","agentUpdate":{"version":"0.12.0"}}"#))
+                .unwrap();
+        assert_eq!(
+            with.agent_update,
+            Some(AgentUpdate {
+                version: "0.12.0".to_owned()
+            })
+        );
+        // The request object itself is closed, so a future field needs a new capability.
+        let extended = POLL.replace('}', r#","agentUpdate":{"version":"0.12.0","url":"x"}}"#);
+        assert!(serde_json::from_str::<PollResponse>(&extended).is_err());
+    }
+
+    #[tokio::test]
+    async fn update_reports_have_the_wire_shape_and_a_409_means_not_requested() {
+        let server =
+            crate::detail::testing::MockServer::start(vec![(204, ""), (409, ""), (500, "")]);
+        let client = Api::for_loopback_test(&server.url());
+        assert!(
+            client
+                .agent_update_report("0.12.0", AgentUpdateState::Downloading, None)
+                .await
+                .unwrap()
+        );
+        assert!(
+            !client
+                .agent_update_report(
+                    "0.12.0",
+                    AgentUpdateState::Failed,
+                    Some("agent_update_digest")
+                )
+                .await
+                .unwrap()
+        );
+        assert!(matches!(
+            client
+                .agent_update_report("0.12.0", AgentUpdateState::Succeeded, None)
+                .await,
+            Err(ProtocolError::Http(StatusCode::INTERNAL_SERVER_ERROR))
+        ));
+        let requests = server.requests();
+        assert_eq!(
+            (requests[0].method.as_str(), requests[0].path.as_str()),
+            ("POST", "/agent/v1/agent-update/report")
+        );
+        let bodies = requests
+            .iter()
+            .map(|request| serde_json::from_str::<serde_json::Value>(&request.body).unwrap())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            bodies[0],
+            serde_json::json!({"version":"0.12.0","state":"downloading","errorCode":null})
+        );
+        assert_eq!(
+            bodies[1],
+            serde_json::json!({"version":"0.12.0","state":"failed","errorCode":"agent_update_digest"})
+        );
+    }
+
+    #[tokio::test]
+    async fn release_files_are_fetched_by_version_with_their_limits() {
+        let manifest = "x".repeat(MAX_RELEASE_MANIFEST_BYTES + 1);
+        let server = crate::detail::testing::MockServer::routes(vec![
+            (
+                "GET",
+                "/agent/v1/agent-releases/0.12.0/manifest".to_owned(),
+                200,
+                manifest.into_bytes(),
+            ),
+            (
+                "GET",
+                "/agent/v1/agent-releases/0.12.0/signature".to_owned(),
+                200,
+                vec![1; 63],
+            ),
+            (
+                "GET",
+                "/agent/v1/agent-releases/0.12.0/binaries/linux-amd64".to_owned(),
+                200,
+                vec![7; 100],
+            ),
+        ]);
+        let client = Api::for_loopback_test(&server.url());
+        assert!(matches!(
+            client.release_manifest("0.12.0").await,
+            Err(ProtocolError::ResponseTooLarge { .. })
+        ));
+        assert!(matches!(
+            client.release_signature("0.12.0").await,
+            Err(ProtocolError::InvalidResponse(_))
+        ));
+        let mut received = Vec::new();
+        let size = client
+            .release_binary("0.12.0", "linux-amd64", 100, |chunk| {
+                received.extend_from_slice(chunk);
+                Ok(())
+            })
+            .await
+            .unwrap();
+        assert_eq!((size, received), (100, vec![7; 100]));
+        assert!(matches!(
+            client
+                .release_binary("0.12.0", "linux-amd64", 99, |_| Ok(()))
+                .await,
+            Err(ProtocolError::ResponseTooLarge { .. })
+        ));
+        assert!(matches!(
+            client.release_manifest("0.13.0").await,
+            Err(ProtocolError::Http(StatusCode::NOT_FOUND))
+        ));
     }
 
     fn sample_report() -> DiskUsageReport {

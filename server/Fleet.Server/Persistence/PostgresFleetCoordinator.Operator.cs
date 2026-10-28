@@ -60,12 +60,17 @@ public sealed partial class PostgresFleetCoordinator
             .GroupBy(x => x.NodeId).ToDictionary(x => x.Key, x => FullestVolume(x));
         // One row per Node, read for the page only.
         var agents = (await db.NodeTelemetries.AsNoTracking().Where(x => ids.Contains(x.NodeId)).ToListAsync(cancellationToken))
-            .ToDictionary(x => x.NodeId, x => new NodeAgentSummary(x.AgentVersion,
-                AgentTelemetryRules.IsOutdated(x.AgentVersion, options.LatestAgentVersion), new(x.OsName, x.OsVersion), x.Arch, x.Hostname));
+            .ToDictionary(x => x.NodeId);
+        var updates = (await db.AgentUpdates.AsNoTracking().Where(x => ids.Contains(x.NodeId)).ToListAsync(cancellationToken))
+            .ToDictionary(x => x.NodeId, Status);
         return MakePage(rows, limit, x => x.Node.Id, x => new NodeStatus(new(x.Node.Id), x.Node.Name, x.Node.RevokedAt != null,
             x.Node.LastContactAt, Freshness(x.Node.LastContactAt, now, staleAfter), x.Node.Platform, x.Node.EnrolledAt,
             x.Node.RevokedAt, x.CredentialNotAfter, StateCounts(counts.Where(c => c.NodeId == x.Node.Id).Select(c => (c.State, c.Count))),
-            x.CurrentRevision, disks.GetValueOrDefault(x.Node.Id), agents.GetValueOrDefault(x.Node.Id)));
+            x.CurrentRevision, disks.GetValueOrDefault(x.Node.Id),
+            agents.TryGetValue(x.Node.Id, out var agent) ? new NodeAgentSummary(agent.AgentVersion,
+                AgentTelemetryRules.IsOutdated(agent.AgentVersion, options.LatestAgentVersion), new(agent.OsName, agent.OsVersion), agent.Arch,
+                agent.Hostname, x.Node.AgentSelfUpdate) : null,
+            updates.GetValueOrDefault(x.Node.Id)));
     }
 
     private static NodeDiskSummary FullestVolume(IEnumerable<NodeDiskUsageRow> rows)
@@ -155,12 +160,13 @@ public sealed partial class PostgresFleetCoordinator
         var agent = telemetry is null ? null : new NodeAgent(telemetry.AgentVersion, options.LatestAgentVersion.Text,
             AgentTelemetryRules.IsOutdated(telemetry.AgentVersion, options.LatestAgentVersion),
             new(telemetry.OsName, telemetry.OsVersion, telemetry.OsKernel), telemetry.Arch, telemetry.Hostname, telemetry.User,
-            telemetry.InstallMethod, telemetry.ServiceManager, telemetry.StateDirectory, telemetry.ReportedAt);
+            telemetry.InstallMethod, telemetry.ServiceManager, telemetry.StateDirectory, telemetry.ReportedAt, node.AgentSelfUpdate);
+        var update = await db.AgentUpdates.AsNoTracking().SingleOrDefaultAsync(x => x.NodeId == id, cancellationToken);
         return new(new(node.Id), node.Name, node.Platform, node.EnrolledAt, node.LastContactAt,
             Freshness(node.LastContactAt, now, staleAfter), node.RevokedAt != null, node.RevokedAt,
             newest is null ? null : new(new(newest.Id), newest.NotBefore, newest.NotAfter, newest.RevokedAt, newest.RevokedBy,
                 credentialCount - 1),
-            targets, StateCounts(current.Select(x => (x.Assignment.State, 1))), disk, agent, drift);
+            targets, StateCounts(current.Select(x => (x.Assignment.State, 1))), disk, agent, drift, update is null ? null : Status(update));
     }
 
     private sealed record LatestAttemptRow(Guid Id, int State, string? ErrorCode, string? Diagnostic, string? FailurePath, string? FailureStep,

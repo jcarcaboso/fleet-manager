@@ -156,7 +156,8 @@
     "installMethod": "homebrew",
     "serviceManager": "systemd",
     "stateDirectory": "~/.local/state/fleet-agent",
-    "reportedAt": "2026-10-25T12:00:00Z"
+    "reportedAt": "2026-10-25T12:00:00Z",
+    "selfUpdate": true
   },
   "drift": [
     {
@@ -166,5 +167,15 @@
       ],
       "detectedAt": "2026-10-25T13:00:00Z"
     }
-  ]
+  ],
+  "agentUpdate": {
+    "fromVersion": "0.8.0",
+    "targetVersion": "0.8.1",
+    "state": "failed",
+    "errorCode": "agent_update_crash_loop",
+    "requestedBy": "operator",
+    "requestedAt": "2026-10-25T13:00:00Z",
+    "updatedAt": "2026-10-25T13:06:00Z",
+    "finishedAt": "2026-10-25T13:06:00Z"
+  }
 }

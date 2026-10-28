@@ -34,7 +34,18 @@
           "version": "44"
         },
         "arch": "x86_64",
-        "hostname": "studio-mini.home.arpa"
+        "hostname": "studio-mini.home.arpa",
+        "selfUpdate": true
+      },
+      "agentUpdate": {
+        "fromVersion": "0.8.0",
+        "targetVersion": "0.8.1",
+        "state": "failed",
+        "errorCode": "agent_update_crash_loop",
+        "requestedBy": "operator",
+        "requestedAt": "2026-10-25T13:00:00Z",
+        "updatedAt": "2026-10-25T13:06:00Z",
+        "finishedAt": "2026-10-25T13:06:00Z"
       }
     }
   ],

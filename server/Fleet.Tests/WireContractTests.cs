@@ -15,7 +15,7 @@ public sealed class WireContractTests
             new DateTimeOffset(2026, 9, 1, 10, 0, 0, TimeSpan.Zero), null, new DateTimeOffset(2026, 10, 30, 9, 0, 0, TimeSpan.Zero),
             new(0, 0, 4, 1, 0), "a3f9c21d0c5b4e8f9a1b2c3d4e5f60718293a4b5",
             new("home", 92.3, 871203905536, 72818462720, 994662584320, new DateTimeOffset(2026, 10, 25, 12, 0, 0, TimeSpan.Zero)),
-            new("0.8.0", true, new("Fedora Linux", "44"), "x86_64", "studio-mini.home.arpa"))], null);
+            new("0.8.0", true, new("Fedora Linux", "44"), "x86_64", "studio-mini.home.arpa", true), FailedUpdate)], null);
         var options = new JsonSerializerOptions(JsonSerializerDefaults.Web);
         WireJson.Configure(options);
         var actual = JsonSerializer.SerializeToNode(page, options);
@@ -28,13 +28,19 @@ public sealed class WireContractTests
     {
         var agent = new NodeAgent("0.8.0", "0.8.1", true, new("Fedora Linux", "44", "7.2.11-200.fc44.x86_64"), "x86_64",
             "studio-mini.home.arpa", "joan", "homebrew", "systemd", "~/.local/state/fleet-agent",
-            new DateTimeOffset(2026, 10, 25, 12, 0, 0, TimeSpan.Zero));
+            new DateTimeOffset(2026, 10, 25, 12, 0, 0, TimeSpan.Zero), true);
         var options = new JsonSerializerOptions(JsonSerializerDefaults.Web);
         WireJson.Configure(options);
         var actual = JsonSerializer.SerializeToNode(agent, options);
-        var expected = JsonNode.Parse(File.ReadAllText(Path.Combine(AppContext.BaseDirectory, "contracts/operator/node-detail.json")))!["agent"];
-        Assert.True(JsonNode.DeepEquals(expected, actual));
+        var detail = JsonNode.Parse(File.ReadAllText(Path.Combine(AppContext.BaseDirectory, "contracts/operator/node-detail.json")))!;
+        Assert.True(JsonNode.DeepEquals(detail["agent"], actual));
+        Assert.True(JsonNode.DeepEquals(detail["agentUpdate"], JsonSerializer.SerializeToNode(FailedUpdate, options)));
     }
+
+    // The update the fixtures show: a failed update from 0.8.0 to 0.8.1.
+    private static readonly AgentUpdateStatus FailedUpdate = new("0.8.0", "0.8.1", "failed", "agent_update_crash_loop", "operator",
+        new DateTimeOffset(2026, 10, 25, 13, 0, 0, TimeSpan.Zero), new DateTimeOffset(2026, 10, 25, 13, 6, 0, TimeSpan.Zero),
+        new DateTimeOffset(2026, 10, 25, 13, 6, 0, TimeSpan.Zero));
 
     [Fact]
     public void Enrollment_delivery_fixture_uses_the_shared_response_contract()

@@ -378,6 +378,7 @@ dependencies = [
  "libc",
  "rcgen",
  "reqwest",
+ "ring",
  "serde",
  "serde_json",
  "sha2",

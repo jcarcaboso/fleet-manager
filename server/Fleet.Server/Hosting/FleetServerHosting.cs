@@ -43,6 +43,15 @@ public static class FleetServerHosting
         builder.Services.AddSingleton<NodeCertificateIssuer>();
         builder.Services.AddHttpClient("cliproxy", client => client.Timeout = TimeSpan.FromSeconds(15))
             .ConfigurePrimaryHttpMessageHandler(() => new HttpClientHandler { AllowAutoRedirect = false });
+        builder.Services.AddOptions<AgentReleaseOptions>().BindConfiguration("Fleet:AgentReleases").ValidateDataAnnotations()
+            .Validate(x => x.HasValidBaseUrl(), "Fleet:AgentReleases:BaseUrl must be an absolute HTTPS URL without credentials, query, or fragment.")
+            .Validate(x => Path.IsPathFullyQualified(x.CacheDirectory), "Fleet:AgentReleases:CacheDirectory must be an absolute path.")
+            .Validate(x => x.HasValidPublicKeys(), "Fleet:AgentReleases:PublicKeys must hold at most two PEM Ed25519 public keys.")
+            .ValidateOnStart();
+        // No redirects: the mirror follows only GitHub's release-asset redirect itself. Its own time limit covers a whole mirror run.
+        builder.Services.AddHttpClient(AgentReleaseMirror.HttpClientName, client => client.Timeout = Timeout.InfiniteTimeSpan)
+            .ConfigurePrimaryHttpMessageHandler(() => new HttpClientHandler { AllowAutoRedirect = false });
+        builder.Services.AddSingleton<AgentReleaseMirror>();
         builder.Services.AddSingleton<CliProxyCatalog>();
         builder.Services.AddSingleton<CliProxySyncService>();
         builder.Services.AddHostedService(services => services.GetRequiredService<CliProxySyncService>());
@@ -127,7 +136,8 @@ public static class FleetServerHosting
                     "unauthorized" or "invalid_credential" or "node_unauthorized" or "bundle_not_authorized" or "cliproxy_credential_not_authorized" => 403,
                     "not_found" or "node_not_found" or "credential_not_found" or "attempt_not_found" or "target_not_found" or "enrollment_link_not_found" or "revision_not_found" or
                         "rollout_not_found" => 404,
-                    "node_alias_in_use" or "node_revoked" or "node_alias_changed" or "target_not_failed" or "attempt_not_failed" => 409,
+                    "node_alias_in_use" or "node_revoked" or "node_alias_changed" or "target_not_failed" or "attempt_not_failed" or
+                        "agent_update_unsupported" or "agent_update_current" or "agent_update_in_progress" or "agent_update_not_cancellable" => 409,
                     _ => 400
                 };
                 await WriteError(context, exception.Code, exception.Message);
