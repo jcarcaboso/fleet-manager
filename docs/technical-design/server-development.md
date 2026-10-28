@@ -159,7 +159,11 @@ account sign-in with the session cookie and CSRF flow.
 dashboard API; it needs the same variables and an operate or admin account whose
 password has already been changed. `scripts/smoke-dashboard-image.sh IMAGE` starts
 a dashboard image read-only with a throwaway certificate and checks its nginx
-behaviour (`make dashboard-image` builds the image and runs it). The dashboard
+behaviour (`make dashboard-image` builds the image and runs it).
+`scripts/smoke-agent-service.sh` needs Docker and Podman and no running Server: it
+starts a disposable Server, boots a Fedora container running systemd, and checks
+`fleet-agent service` and `fleet-agent update` there, from moving a Homebrew service
+over through an upgrade, a rollback and uninstalling. The dashboard
 itself is developed in `dashboard/` (`npm run dev:mock` needs no Server).
 
 Liveness is `/health/live`; readiness is `/health/ready`. Authenticated OpenAPI

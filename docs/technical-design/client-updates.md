@@ -26,14 +26,18 @@ commands. The [Agent guide](../../deploy/agent/README.md) covers service command
 ## Manual rollout
 
 1. Build one revision and verify its test results and archive checksums.
-2. Update one Node first. Preserve its private Agent state directory.
-3. Get the new executable (`brew upgrade fleet-agent`, a release archive or
+2. Run `scripts/smoke-agent-service.sh` when the release changes the service
+   command or the install layout. It checks install, upgrade, rollback and
+   uninstall under a real `systemd --user` in a container. The macOS launchd
+   branch still needs a Mac.
+3. Update one Node first. Preserve its private Agent state directory.
+4. Get the new executable (`brew upgrade fleet-agent`, a release archive or
    Cargo) and run `fleet-agent service install` with it. The command copies it
    to `<state-dir>/versions/<version>/`, switches the `current` link the service
    runs, and restarts the service. Verify the version and successful
    contact/sync. Agents up to 0.11.0 have no managed copy: stop the service,
    install the new executable at the same absolute path, and restart it.
-4. Update the remaining Nodes. The previous version stays installed;
+5. Update the remaining Nodes. The previous version stays installed;
    `fleet-agent update rollback` switches back to it. State migrations must
    explicitly document rollback compatibility.
    Attempt failure detail lives in its own file, `pending-detail.json`, and adds
