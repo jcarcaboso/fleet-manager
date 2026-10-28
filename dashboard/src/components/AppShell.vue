@@ -37,6 +37,8 @@ const booting = computed(() => session.state.status === 'unknown');
 const showMe = computed(() => session.signedIn);
 /* While the account must replace its password only the account page is open, so there is nothing to navigate to. */
 const showNav = computed(() => session.signedIn && !session.state.mustChangePassword);
+/* The badges read routes that answer 403 password_change_required until a required password change is made, so they wait for it. */
+const canSummarize = (): boolean => session.signedIn && !session.state.mustChangePassword;
 const modalHidden = computed(() => modalOpenCount.value === 0);
 const mainEl = ref<HTMLElement | null>(null);
 const loadedNote = computed(() => (shell.loadedAt ? `Loaded ${fmtTime(shell.loadedAt)} UTC` : ''));
@@ -51,13 +53,13 @@ const stopAfterEach = router.afterEach((_to, _from, failure) => {
   hideTip();
   shell.focusPending = true;
   shell.markLoaded();
-  if (session.signedIn) void summary.refresh();
+  if (canSummarize()) void summary.refresh();
 });
 watch(() => session.signedIn, signedIn => {
-  if (signedIn) {
-    shell.markLoaded();
-    void summary.refresh(true);
-  }
+  if (signedIn) shell.markLoaded();
+});
+watch(canSummarize, ready => {
+  if (ready) void summary.refresh(true);
 });
 
 let removeTips: (() => void) | null = null;
@@ -65,7 +67,7 @@ let removeKeepFocus: (() => void) | null = null;
 onMounted(() => {
   removeTips = installTooltipListeners();
   removeKeepFocus = installKeepFocus();
-  if (session.signedIn) void summary.refresh();
+  if (canSummarize()) void summary.refresh();
   window.addEventListener('pagehide', onPageHide);
 });
 onBeforeUnmount(() => {

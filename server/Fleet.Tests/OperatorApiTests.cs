@@ -10,6 +10,7 @@ using Fleet.Server.Persistence;
 using Fleet.Server.Security;
 using Fleet.Server.Transport;
 using System.Security.Cryptography.X509Certificates;
+using Microsoft.AspNetCore.Hosting;
 using Microsoft.AspNetCore.Mvc.Testing;
 using Microsoft.Extensions.Configuration;
 using Microsoft.EntityFrameworkCore;
@@ -672,6 +673,19 @@ public sealed partial class OperatorApiTests(OperatorApiFixture fixture) : IClas
         // Every code in the examples above that a Server-side route can emit is explained.
         foreach (var code in new[] { "enrollment_link_not_found", "invalid_expiry", "invalid_alias", "invalid_selection", "catalog_unavailable", "unauthorized", "credential_not_found" })
             Assert.NotNull(ErrorCatalog.Find(code));
+    }
+
+    [Fact]
+    public async Task A_malformed_body_is_explained_outside_Development_too()
+    {
+        // Tests run in Development, where minimal APIs throw on a bad body anyway; production answered an empty 400.
+        using var production = fixture.Factory.WithWebHostBuilder(builder => builder.UseEnvironment("Production"));
+        using var client = production.CreateDefaultClient(new Uri(OperatorApiFixture.Origin));
+        client.DefaultRequestHeaders.Authorization = new("Bearer", OperatorApiFixture.AdminToken);
+        var body = await OperatorApiFixture.ReadAsync(await client.PostAsJsonAsync("/operator/v1/nodes/rename", new { unknown = true }),
+            HttpStatusCode.BadRequest);
+        Assert.Equal("invalid_request", body["code"]!.GetValue<string>());
+        Assert.False(string.IsNullOrWhiteSpace(body["message"]!.GetValue<string>()));
     }
 
     [Fact]
