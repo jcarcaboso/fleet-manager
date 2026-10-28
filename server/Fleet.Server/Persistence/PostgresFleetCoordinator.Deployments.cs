@@ -182,6 +182,50 @@ public sealed partial class PostgresFleetCoordinator
         await transaction.CommitAsync(cancellationToken);
     }
 
+    public async Task RecordRepairFailuresAsync(NodeAuthentication authentication, RepairFailureReport report,
+        CancellationToken cancellationToken = default)
+    {
+        var clean = RepairFailureRules.Sanitize(report);
+        await Authenticate(authentication, clock.GetUtcNow(), false, cancellationToken);
+        var nodeId = authentication.NodeId.Value;
+        await using var transaction = await db.Database.BeginTransactionAsync(IsolationLevel.ReadCommitted, cancellationToken);
+        // The Node row lock serializes the reports of one Node, so the replacement below always starts from the latest stored set,
+        // and a Node removed in the meantime cannot violate the foreign key.
+        var node = await db.Nodes.FromSqlInterpolated($"SELECT * FROM nodes WHERE \"Id\" = {nodeId} FOR UPDATE").AsNoTracking()
+            .SingleOrDefaultAsync(cancellationToken);
+        if (node is null || node.RevokedAt is not null) throw Error("node_unauthorized", "Node credential is not active.");
+        var targets = clean.Failures.Select(x => x.Target).ToArray();
+        var current = targets.Length == 0 ? new Dictionary<string, Guid>() : await db.Assignments.AsNoTracking()
+            .Where(x => x.NodeId == nodeId && x.IsCurrent && targets.Contains(x.TargetName))
+            .ToDictionaryAsync(x => x.TargetName, x => x.Id, StringComparer.Ordinal, cancellationToken);
+        // A failure of an Assignment that is no longer current is a normal race with a new Assignment and is skipped.
+        var accepted = clean.Failures.Where(x => current.GetValueOrDefault(x.Target) == x.AssignmentId.Value)
+            .ToDictionary(x => x.Target, StringComparer.Ordinal);
+        var stored = await db.NodeRepairFailures.Where(x => x.NodeId == nodeId).ToListAsync(cancellationToken);
+        var now = TruncateToMicroseconds(clock.GetUtcNow());
+        foreach (var row in stored.Where(x => !accepted.ContainsKey(x.Target))) db.NodeRepairFailures.Remove(row);
+        foreach (var failure in accepted.Values)
+        {
+            var row = stored.SingleOrDefault(x => x.Target == failure.Target);
+            if (row is null)
+            {
+                row = new NodeRepairFailureRow { NodeId = nodeId, Target = failure.Target, ErrorCode = failure.ErrorCode, Diagnostic = failure.Diagnostic };
+                db.NodeRepairFailures.Add(row);
+            }
+            // The same failure of the same Assignment keeps the time it started; anything else is a new failure.
+            if (row.FailedSince == default || row.AssignmentId != failure.AssignmentId.Value || row.ErrorCode != failure.ErrorCode)
+                row.FailedSince = now;
+            row.AssignmentId = failure.AssignmentId.Value;
+            row.ErrorCode = failure.ErrorCode;
+            row.Diagnostic = failure.Diagnostic;
+            row.Path = failure.Path;
+            row.Step = failure.Step;
+            row.ReportedAt = now;
+        }
+        await db.SaveChangesAsync(cancellationToken);
+        await transaction.CommitAsync(cancellationToken);
+    }
+
     public async Task<IReadOnlyDictionary<string, IssueStateEntry>> GetIssueStatesAsync(IReadOnlyCollection<string> issueIds,
         CancellationToken cancellationToken = default)
     {

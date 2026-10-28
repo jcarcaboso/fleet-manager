@@ -596,6 +596,55 @@ it owns, the Agent reports it:
 `GET nodes/{node}` gains `drift`: the newest events first, as
 `[{ "target", "files", "detectedAt" }]`, or `[]`.
 
+### Repair failures
+
+The Agent re-applies every current Assignment on idle poll cycles to repair
+local drift. When such a repair fails after the Assignment's Attempt has
+already succeeded, the Attempt cannot change and the detail route only accepts
+failed Attempts, so the Agent reports the failing repairs separately:
+
+`PUT /agent/v1/repair-failures` (Node mTLS), body
+
+```json
+{ "failures": [{
+  "target": "ai-client/codex",
+  "assignmentId": "…",
+  "errorCode": "ai_client_reconcile_failed",
+  "diagnostic": "Fleet-owned Codex settings …",
+  "path": ".codex/config.toml",
+  "step": "configure"
+}] }
+```
+
+- `failures` is required and holds 0 to 50 entries with distinct `target`
+  names (ordinal comparison). Each entry needs `target` (1 to 100 characters,
+  no control characters), `assignmentId` (UUID), `errorCode` (1 to 100
+  characters, no control characters) and `diagnostic`. `diagnostic`, `path`
+  and `step` follow the [Attempt detail](#phase-2-attempt-detail) rules:
+  control characters are removed, the diagnostic is 1 to 2048 UTF-16 units,
+  the path is relative without `..` and at most 512 characters, and the step
+  is one of the detail steps. Unknown members are rejected.
+- The list replaces the Node's stored failures, so an empty list clears them.
+  An entry whose `assignmentId` is not the Node's current Assignment of that
+  `target` is skipped without an error: a new Assignment can arrive between
+  the repair and the report.
+- A stored failure with the same Target, Assignment and error code keeps its
+  `failedSince`; any other change starts a new one. Every report sets
+  `reportedAt`.
+- 204, 400 `invalid_request`, 401 for a revoked or unknown Node, or 429
+  `rate_limited` from the shared per-Node limiter. Agents that predate the
+  route never call it.
+
+`GET issues` adds `repair_failed` (error), one per stored failure of a Node
+that is not revoked, while its Assignment is still the current one for the
+Target and is not failed (a failed Assignment raises `assignment_failed`
+instead). The ID is `repair_failed:<nodeId>:<target>`, the title
+`<node>: <target> cannot be kept in sync`, `since` is `failedSince`, and
+`detail` names the error code and `reportedAt`. `action` is the first catalog
+fix step of the error code, `diagnostic`, `path` and `step` come from the
+report, and `commands` are `fleet nodes show`, `fleet explain <code>` and
+`fleet retry <node> <target>`.
+
 ### Issue state
 
 Operators can acknowledge or snooze an issue.

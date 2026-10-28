@@ -235,6 +235,24 @@ reference. Neither adapter reads or changes the client's OAuth store. A
 Fleet-owned receipt permits restart and native restoration while preserving
 unrelated TOML or JSONC settings and comments.
 
+The assignment wins over local changes to the Fleet-owned settings (for Codex:
+`model`, `model_provider`, `model_catalog_json` and
+`[model_providers.fleet-cliproxy]`). If something outside Fleet changes or
+removes them, or deletes the file, the next reconciliation writes them again,
+keeps the original settings recorded in the receipt, and reports the file as
+drift. Codex's own `/model` command writes `model`, so with an explicit model
+the assignment's model returns on the next cycle; without one, the user's
+choice among the advertised models is kept. Native mode restores the recorded
+originals and removes whatever is left of the Fleet settings, even when they
+were changed, partly removed or the file is gone; a file that is gone is only
+recreated when the originals hold something. When Fleet finds its settings
+without a receipt (the state directory was wiped and the Node enrolled again),
+it takes them over but never records its own leftover values (the
+`fleet-cliproxy` provider, a model selected for it, Fleet's catalog or key
+helper) as the originals, so native mode removes them and keeps the user's
+own. Symbolic links and hard links to a client configuration are still
+refused.
+
 ## Target resolution
 
 The Target named `skills` has one default descriptor:

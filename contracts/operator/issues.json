@@ -27,6 +27,32 @@
       "snoozedUntil": null
     },
     {
+      "id": "repair_failed:00000000-0000-0000-0000-000000000002:ai-client/codex",
+      "code": "repair_failed",
+      "severity": "error",
+      "title": "build-runner: ai-client/codex cannot be kept in sync",
+      "detail": "The last apply succeeded, but the Agent could not repair local changes: it reported ai_client_reconcile_failed (AI client setup failed) at 2026-10-25 11:40:00Z.",
+      "action": "Run `fleet models refresh` and check that the selected model is still offered.",
+      "section": "nodes",
+      "errorCode": "ai_client_reconcile_failed",
+      "nodeId": "00000000-0000-0000-0000-000000000002",
+      "nodeName": "build-runner",
+      "target": "ai-client/codex",
+      "since": "2026-10-25T11:20:00Z",
+      "commands": [
+        "fleet nodes show build-runner",
+        "fleet explain ai_client_reconcile_failed",
+        "fleet retry build-runner ai-client/codex"
+      ],
+      "diagnostic": "Fleet-owned Codex settings in config.toml were changed outside Fleet and could not be rewritten",
+      "path": ".codex/config.toml",
+      "step": "configure",
+      "state": "open",
+      "stateBy": null,
+      "stateAt": null,
+      "snoozedUntil": null
+    },
+    {
       "id": "disk_space_low:00000000-0000-0000-0000-000000000001",
       "code": "disk_space_low",
       "severity": "warning",

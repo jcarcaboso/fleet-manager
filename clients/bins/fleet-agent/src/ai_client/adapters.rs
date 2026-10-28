@@ -1,12 +1,21 @@
 use super::{Receipt, Reconciler};
 use anyhow::{Result, bail};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 mod claude;
 mod codex;
 pub(super) mod opencode;
 
 const REGISTERED: [Adapter; 3] = [Adapter::Codex, Adapter::OpenCode, Adapter::Claude];
+
+/// A client config with the Fleet settings applied, its receipt, and whether
+/// Fleet-owned settings had been changed outside Fleet and were overwritten.
+#[derive(Debug)]
+pub(super) struct Rendered {
+    pub(super) bytes: Vec<u8>,
+    pub(super) receipt: Receipt,
+    pub(super) drifted: bool,
+}
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(super) enum Adapter {
@@ -56,7 +65,7 @@ impl Adapter {
         base_url: &str,
         model: Option<&str>,
         models: &[String],
-    ) -> Result<(Vec<u8>, Receipt)> {
+    ) -> Result<Rendered> {
         let cache =
             crate::state::read_json::<super::ModelCache>(&reconciler.state.join("models.json"))?;
         let skip_claude = cache
@@ -109,6 +118,50 @@ impl Adapter {
             Self::Claude => {
                 claude::render_claude(old, previous, base_url, model, models, &key_path)
             }
+        }
+    }
+
+    /// Fails when OpenCode loads one config file while Fleet's provider is in
+    /// the other: ownership never moves between them silently.
+    pub(super) fn check_managed_file(self, reconciler: &Reconciler, path: &Path) -> Result<()> {
+        if self != Self::OpenCode {
+            return Ok(());
+        }
+        let other = if path
+            .extension()
+            .is_some_and(|extension| extension == "jsonc")
+        {
+            path.with_extension("json")
+        } else {
+            path.with_extension("jsonc")
+        };
+        let has_provider = |path: &Path| -> Result<bool> {
+            super::read_optional_config(path)?
+                .map_or(Ok(false), |bytes| opencode::has_fleet_provider(&bytes))
+        };
+        if other.starts_with(&reconciler.home) && !has_provider(path)? && has_provider(&other)? {
+            bail!(
+                "Fleet's OpenCode provider is in {}, but OpenCode loads {}; move the settings into one file",
+                other.file_name().unwrap_or_default().to_string_lossy(),
+                path.file_name().unwrap_or_default().to_string_lossy()
+            );
+        }
+        Ok(())
+    }
+
+    /// A receipt for Fleet settings found in the config without a receipt,
+    /// so that native mode can remove them. `None` when there are none.
+    pub(super) fn orphan_receipt(
+        self,
+        reconciler: &Reconciler,
+        old: Option<&[u8]>,
+    ) -> Result<Option<Receipt>> {
+        match self {
+            Self::Codex => {
+                codex::orphan_receipt(old, &reconciler.state.join("codex-model-catalog.json"))
+            }
+            Self::OpenCode => opencode::orphan_receipt(old),
+            Self::Claude => claude::orphan_receipt(old, &reconciler.state.join("api-key")),
         }
     }
 

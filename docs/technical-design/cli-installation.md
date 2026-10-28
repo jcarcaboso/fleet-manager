@@ -43,6 +43,37 @@ installed by `fleet-agent service install` at the same time. To migrate an
 existing Agent after stopping it, run `fleet-agent service uninstall` and then
 `brew services start fleet-agent`.
 
+Manage the Homebrew service with `brew services` only. Homebrew names it
+`sh.brew.fleet-agent` (`homebrew.mxcl.fleet-agent` or
+`homebrew.fleet-agent.service` in older Homebrew versions), while
+`fleet-agent service` manages its own `dev.fleet.agent` launchd job or
+`fleet-agent.service` systemd unit. When only the Homebrew service is
+installed, every `fleet-agent service` action stops with an error that names
+the `brew services` command to use instead, and `install`, `start` and
+`restart` also refuse while both are installed, since only one Agent can run.
+`fleet-agent status` reports `service.running` (an Agent holds the state lock,
+whoever started it) together with `service.manager` (`homebrew` or
+`fleet-agent`) and `service.label`.
+
+## Service logs
+
+| Service | Log |
+| --- | --- |
+| Homebrew, macOS and Linux | `$(brew --prefix)/var/log/fleet-agent.log` (standard output and error; `brew services info fleet-agent` shows the path) |
+| `fleet-agent service install`, macOS | `<state-dir>/logs/agent.log`, by default `~/.local/state/fleet-agent/logs/agent.log`; `fleet-agent status` shows it as `service.logs` |
+| `fleet-agent service install`, Linux | the user journal: `journalctl --user -u fleet-agent` |
+
+The launchd job of `fleet-agent service install` writes both streams to
+`agent.log`. The Agent starts that file again once it exceeds 10 MiB and keeps
+the previous one as `agent.log.1`. Run `fleet-agent service install` again
+after upgrading from 0.10.0 or earlier to add the log paths to an existing job.
+The Homebrew log path takes effect after `brew upgrade fleet-agent` and
+`brew services restart fleet-agent`. Homebrew does not rotate its log.
+
+The logs name each Target that an idle cycle could not repair
+(`could not repair ai-client/codex: …`). The Agent also reports these to the
+Server, which shows them as `repair_failed` issues.
+
 If an older Agent runs in a terminal, stop that process instead. An already
 enrolled Node does not need enrollment again. Preserve its state directory.
 If you used a custom `--state-dir`, migrate the service settings explicitly;

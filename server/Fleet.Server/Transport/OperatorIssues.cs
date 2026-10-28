@@ -93,12 +93,12 @@ public static partial class OperatorIssues
                 attempt.ErrorCode is null ? "The Agent reported a failure for this current assignment."
                     : known is null ? $"The Agent reported {attempt.ErrorCode} for this current assignment."
                     : $"The Agent reported {attempt.ErrorCode} ({known.Title}) for this current assignment.",
-                known?.Fix[0] ?? (row.TargetName.StartsWith("ai-client/", StringComparison.Ordinal)
-                    ? "Resolve any model-sync issue, then check Agent logs for configuration or ownership conflicts. AI-client setup retries after one minute."
-                    : "Check Agent logs for permissions, ownership conflicts or download failures."),
+                known?.Fix[0] ?? FallbackAction(row.TargetName),
                 "nodes", attempt.ErrorCode, row.NodeId, row.NodeName, row.TargetName, attempt.Since,
                 commands, row.Latest?.Diagnostic, row.Latest?.Path, row.Latest?.Step));
         }
+
+        issues.AddRange(await RepairIssuesAsync(db, nodes, ct));
 
         var ordered = Order(issues);
         var failedShown = ordered.Take(MaximumItems).Count(x => x.Code == "assignment_failed");
@@ -113,6 +113,42 @@ public static partial class OperatorIssues
         }
         var states = await coordinator.GetIssueStatesAsync(ordered.Select(x => x.Id).ToList(), ct);
         return ordered.Select(issue => WithState(issue, states.GetValueOrDefault(issue.Id), now)).ToList();
+    }
+
+    private static string FallbackAction(string target) => target.StartsWith("ai-client/", StringComparison.Ordinal)
+        ? "Resolve any model-sync issue, then check Agent logs for configuration or ownership conflicts. AI-client setup retries after one minute."
+        : "Check Agent logs for permissions, ownership conflicts or download failures.";
+
+    private sealed record RepairRow(Guid NodeId, string NodeName, string Target, string ErrorCode, string Diagnostic, string? Path, string? Step,
+        DateTimeOffset FailedSince, DateTimeOffset ReportedAt);
+
+    // One issue per failing idle repair of a Node that is not revoked, while the failure belongs to the current Assignment of its Target.
+    // A failed Assignment already raises assignment_failed, so it raises nothing here.
+    private static async Task<IEnumerable<OperatorIssue>> RepairIssuesAsync(FleetDbContext db, IQueryable<NodeRow> nodes, CancellationToken ct)
+    {
+        var failedState = (int)ConvergenceState.Failed;
+        var rows = await (from failure in db.NodeRepairFailures.AsNoTracking()
+                          join node in nodes on failure.NodeId equals node.Id
+                          join assignment in db.Assignments.AsNoTracking() on failure.AssignmentId equals assignment.Id
+                          where assignment.IsCurrent && assignment.NodeId == failure.NodeId && assignment.TargetName == failure.Target &&
+                                assignment.State != failedState
+                          orderby node.Name, failure.Target
+                          select new RepairRow(node.Id, node.Name, failure.Target, failure.ErrorCode, failure.Diagnostic, failure.Path, failure.Step,
+                              failure.FailedSince, failure.ReportedAt))
+            .Take(MaximumItems).ToListAsync(ct);
+        return rows.Select(row =>
+        {
+            var known = ErrorCatalog.Find(row.ErrorCode);
+            var alias = Quote(row.NodeName);
+            return new OperatorIssue($"repair_failed:{row.NodeId:D}:{row.Target}", "repair_failed", "error",
+                $"{row.NodeName}: {row.Target} cannot be kept in sync",
+                $"The last apply succeeded, but the Agent could not repair local changes: it reported {row.ErrorCode}"
+                    + (known is null ? "" : $" ({known.Title})") + $" at {row.ReportedAt:u}.",
+                known?.Fix[0] ?? FallbackAction(row.Target),
+                "nodes", row.ErrorCode, row.NodeId, row.NodeName, row.Target, row.FailedSince,
+                [$"fleet nodes show {alias}", $"fleet explain {Quote(row.ErrorCode)}", $"fleet retry {alias} {Quote(row.Target)}"],
+                row.Diagnostic, row.Path, row.Step);
+        });
     }
 
     /// <summary>

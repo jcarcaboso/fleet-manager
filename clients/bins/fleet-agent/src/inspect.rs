@@ -21,7 +21,7 @@ use time::{OffsetDateTime, format_description::well_known::Rfc3339};
 use crate::{
     RunState,
     credentials::{CredentialStore, StoredIdentity},
-    detail, disk, state,
+    detail, disk, service, state,
 };
 
 /// A certificate expiring sooner than this is reported as a warning.
@@ -84,8 +84,42 @@ pub fn status(directory: &Path) -> Result<Value> {
         "pendingReport":run.pending_report.is_some(),
         "pendingDetail":detail::is_pending(directory),"activeAssignment":active_assignment,
         "activeAssignments":active_assignments,
-        "service":{"running":state::lock_is_held(directory)?}}),
+        "service":service_status(directory)?}),
     )
+}
+
+/// `running` says whether an Agent holds the state lock, whichever service
+/// manager started it. `manager` and `label` name the installed service
+/// definition (`fleet-agent` for `fleet-agent service install`, `homebrew`
+/// for `brew services`), and `logs` is the log file of the former on macOS.
+fn service_status(directory: &Path) -> Result<Value> {
+    let installed = dirs::home_dir()
+        .map(|home| service::installed(&home))
+        .unwrap_or_default();
+    let manager = installed.first();
+    let logs = (cfg!(target_os = "macos") && manager == Some(&service::Manager::FleetAgent))
+        .then(|| directory.join("logs").join(service::LOG_FILE));
+    Ok(json!({"running":state::lock_is_held(directory)?,
+        "manager":manager.map(|manager| manager.name()),
+        "label":manager.map(|manager| manager.label()),
+        "logs":logs}))
+}
+
+/// How to start the installed service, for `check`.
+fn service_hint() -> &'static str {
+    match dirs::home_dir()
+        .map(|home| service::installed(&home))
+        .unwrap_or_default()
+        .first()
+    {
+        Some(service::Manager::Homebrew(_)) => {
+            "not running; start it with `brew services start fleet-agent`"
+        }
+        Some(service::Manager::FleetAgent) => {
+            "not running; start it with `fleet-agent service start`"
+        }
+        None => "not running; no service is installed",
+    }
 }
 
 fn assignment_summary(assignment: &crate::Assignment) -> Value {
@@ -283,7 +317,7 @@ pub async fn diagnose(directory: &Path, home_wait: Duration) -> Report {
 
     match state::lock_is_held(directory) {
         Ok(true) => report.add("service", Level::Ok, "running"),
-        Ok(false) => report.add("service", Level::Warn, "not running"),
+        Ok(false) => report.add("service", Level::Warn, service_hint()),
         Err(error) => report.add("service", Level::Fail, error.to_string()),
     }
 

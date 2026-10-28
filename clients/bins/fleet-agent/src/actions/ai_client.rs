@@ -42,11 +42,17 @@ pub async fn apply(
     assignment: &Assignment,
 ) -> std::result::Result<Vec<String>, ActionError> {
     validate(assignment).map_err(ActionError::invalid_assignment)?;
-    // AI-client drift is out of scope: nothing is reported.
+    // Fleet-owned settings changed outside Fleet are repaired and reported as
+    // drift of the client's config file, relative to the home directory.
     reconciler
         .reconcile(api, assignment.ai_client.as_ref().unwrap())
         .await
-        .map(|_| Vec::new())
+        .map(|repaired| {
+            repaired
+                .and_then(|path| fleet_reconcile::report_path(&path))
+                .into_iter()
+                .collect()
+        })
         .map_err(|failure| {
             let error = ActionError::new("ai_client_reconcile_failed", failure.error)
                 .with_step(failure.step);

@@ -509,6 +509,46 @@ namespace Fleet.Server.Persistence.Migrations
                     b.ToTable("node_drift_events", (string)null);
                 });
 
+            modelBuilder.Entity("Fleet.Server.Persistence.NodeRepairFailureRow", b =>
+                {
+                    b.Property<Guid>("NodeId")
+                        .HasColumnType("uuid");
+
+                    b.Property<string>("Target")
+                        .HasMaxLength(100)
+                        .HasColumnType("character varying(100)");
+
+                    b.Property<Guid>("AssignmentId")
+                        .HasColumnType("uuid");
+
+                    b.Property<string>("Diagnostic")
+                        .IsRequired()
+                        .HasColumnType("text");
+
+                    b.Property<string>("ErrorCode")
+                        .IsRequired()
+                        .HasMaxLength(100)
+                        .HasColumnType("character varying(100)");
+
+                    b.Property<DateTimeOffset>("FailedSince")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.Property<string>("Path")
+                        .HasMaxLength(512)
+                        .HasColumnType("character varying(512)");
+
+                    b.Property<DateTimeOffset>("ReportedAt")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.Property<string>("Step")
+                        .HasMaxLength(32)
+                        .HasColumnType("character varying(32)");
+
+                    b.HasKey("NodeId", "Target");
+
+                    b.ToTable("node_repair_failures", (string)null);
+                });
+
             modelBuilder.Entity("Fleet.Server.Persistence.NodeRow", b =>
                 {
                     b.Property<Guid>("Id")
@@ -853,6 +893,15 @@ namespace Fleet.Server.Persistence.Migrations
                 });
 
             modelBuilder.Entity("Fleet.Server.Persistence.NodeDriftEventRow", b =>
+                {
+                    b.HasOne("Fleet.Server.Persistence.NodeRow", null)
+                        .WithMany()
+                        .HasForeignKey("NodeId")
+                        .OnDelete(DeleteBehavior.Cascade)
+                        .IsRequired();
+                });
+
+            modelBuilder.Entity("Fleet.Server.Persistence.NodeRepairFailureRow", b =>
                 {
                     b.HasOne("Fleet.Server.Persistence.NodeRow", null)
                         .WithMany()

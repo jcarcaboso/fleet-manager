@@ -49,7 +49,11 @@ loopback with `--allow-http`.
    to see whether the node is still polling. To explain what a deployment
    changed, see "What a deployment changed" below. For `disk_space_low` and
    `disk_space_critical` issues, see "Disk space" below; for `agent_outdated`,
-   see "Agent version" below. `fleet audit list --newest --node <node>`
+   see "Agent version" below. A `repair_failed` issue means the target's last
+   apply succeeded but the Agent cannot keep it in place: an idle repair
+   fails with the issue's `errorCode`, `diagnostic`, `path` and `step`. It
+   clears by itself once a repair succeeds; `fleet retry` forces a new
+   attempt. `fleet audit list --newest --node <node>`
    shows who changed what, most recent first.
 3. **Fix** with the least destructive command that works (below).
 4. **Verify.** Wait for the node's next poll (a minute or so), then run
