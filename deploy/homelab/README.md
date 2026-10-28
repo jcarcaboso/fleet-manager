@@ -87,7 +87,14 @@ the new hostname, do the same for `dashboard.pem` and `dashboard.key`, update th
 client URL, then recreate the stack. Changing the hostname environment variable
 alone cannot change an already issued certificate. The initial Server and
 dashboard certificates expire after 90 days and the CA after 365 days;
-certificate renewal is currently manual.
+certificate renewal is currently manual. When you issue a replacement, give it
+the same extensions setup uses: a named-curve P-256 key, a SHA-256 signature,
+`subjectKeyIdentifier=hash` and `authorityKeyIdentifier=keyid,issuer`.
+Certificates from earlier versions of setup lack the key identifiers, and on macOS
+(LibreSSL) they also have explicit curve parameters and a SHA-1 signature.
+Browsers and the Fleet clients accept them, but strict verifiers such as Python
+3.13 and later refuse them, so replace them at the next renewal.
+`scripts/check-setup-certificates.py` checks what setup issues.
 
 PostgreSQL data persists in a named volume and its port is not published. The
 Server runs as UID 1654 with a read-only root filesystem. The dashboard container

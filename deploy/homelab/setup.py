@@ -62,11 +62,15 @@ def issue_certificate(tls, name, common_name, sans, days):
     """Create tls/NAME.key and tls/NAME.pem, a server certificate signed by the CA in tls/."""
     outputs = [tls / (name + suffix) for suffix in ('.key', '.pem', '.csr', '.ext')]
     try:
-        openssl('req', '-new', '-newkey', 'ec', '-pkeyopt', 'ec_paramgen_curve:P-256', '-nodes',
+        openssl('req', '-new', '-newkey', 'ec', '-pkeyopt', 'ec_paramgen_curve:P-256', '-pkeyopt', 'ec_param_enc:named_curve', '-nodes',
                 '-keyout', str(tls / (name + '.key')), '-out', str(tls / (name + '.csr')), '-subj', '/CN=' + common_name)
+        # Strict verifiers (Python 3.13+ by default) reject a certificate without an authority key identifier, or with a key in
+        # explicit curve parameters or signed with SHA-1, which LibreSSL does unless told otherwise. openssl x509 -req adds no key
+        # identifiers of its own with -extfile, so they are explicit; keyid,issuer still works with a CA that has no SKI.
         (tls / (name + '.ext')).write_text('basicConstraints=critical,CA:FALSE\nkeyUsage=critical,digitalSignature\nextendedKeyUsage=serverAuth\n'
+                                           + 'subjectKeyIdentifier=hash\nauthorityKeyIdentifier=keyid,issuer\n'
                                            + 'subjectAltName=' + ','.join(dict.fromkeys(sans)) + '\n')
-        openssl('x509', '-req', '-in', str(tls / (name + '.csr')), '-CA', str(tls / 'ca.pem'), '-CAkey', str(tls / 'ca.key'),
+        openssl('x509', '-req', '-sha256', '-in', str(tls / (name + '.csr')), '-CA', str(tls / 'ca.pem'), '-CAkey', str(tls / 'ca.key'),
                 '-CAcreateserial', '-out', str(tls / (name + '.pem')), '-days', str(days), '-extfile', str(tls / (name + '.ext')))
     except BaseException:
         for output in outputs[:2]:
@@ -90,8 +94,10 @@ def read_env(path):
 def certificate_names(certificate):
     """Subject alternative names of a certificate as 'DNS:name' and 'IP:address' entries."""
     names = []
-    text = openssl('x509', '-in', str(certificate), '-noout', '-ext', 'subjectAltName', capture=True)
-    for part in ','.join(text.splitlines()[1:]).split(','):
+    # -text rather than -ext subjectAltName, which LibreSSL (macOS's openssl) does not have. The names follow their header line.
+    lines = openssl('x509', '-in', str(certificate), '-noout', '-text', capture=True).splitlines()
+    header = next((i for i, line in enumerate(lines) if line.strip().startswith('X509v3 Subject Alternative Name')), None)
+    for part in ('' if header is None else lines[header + 1]).split(','):
         part = part.strip()
         if part.startswith('DNS:'):
             names.append(part)
@@ -196,9 +202,10 @@ tls = private / 'tls'
 tls.mkdir(parents=True)
 (root / 'ssh').mkdir(exist_ok=True)
 
-openssl('req', '-x509', '-newkey', 'ec', '-pkeyopt', 'ec_paramgen_curve:P-256', '-nodes',
+openssl('req', '-x509', '-sha256', '-newkey', 'ec', '-pkeyopt', 'ec_paramgen_curve:P-256', '-pkeyopt', 'ec_param_enc:named_curve', '-nodes',
         '-keyout', str(tls / 'ca.key'), '-out', str(tls / 'ca.pem'), '-days', '365', '-subj', '/CN=Fleet homelab CA',
-        '-addext', 'basicConstraints=critical,CA:TRUE', '-addext', 'keyUsage=critical,keyCertSign,cRLSign')
+        '-addext', 'basicConstraints=critical,CA:TRUE', '-addext', 'keyUsage=critical,keyCertSign,cRLSign',
+        '-addext', 'subjectKeyIdentifier=hash')
 # The Server and the dashboard get separate keys with the same names. The dashboard container never sees the Server's key or the CA key.
 names = list(dict.fromkeys([san, 'DNS:localhost', 'IP:127.0.0.1', 'IP:::1']))
 issue_certificate(tls, 'server', host, names, 90)
