@@ -96,7 +96,9 @@ The Agent also tells the Server about itself and the machine, so the dashboard
 can show them and mark an Agent that is behind the Server's version. It sends
 the Agent version, the operating system name and version, the kernel version,
 the CPU architecture, the **host name** and the **login name of the user the
-Agent runs as**, how the Agent was installed (`homebrew`, `cargo` or `binary`),
+Agent runs as**, how the Agent was installed (`managed` when it runs from the
+copy made by `fleet-agent service install`, otherwise `homebrew`, `cargo` or
+`binary`),
 whether a service manager started it (`systemd`, `launchd` or `none`) and the
 state directory with your home directory shown as `~`. It reads only the
 operating system's own version files and system calls: no commands are run, no
@@ -171,17 +173,45 @@ For a foreground process:
 ~/.local/bin/fleet-agent run
 ```
 
-Install and start a background service for the current user:
+Install and start a background service for the current user. Enroll first;
+the service starts right away:
 
 ```sh
 ~/.local/bin/fleet-agent service install
-~/.local/bin/fleet-agent service start
 ```
 
-The install command records the absolute executable and state-directory paths.
-Run it again after moving the binary. The `status`, `stop`, `restart`, and
-`uninstall` service commands handle the rest of the lifecycle. Uninstall removes
-the service definition but keeps credentials and other agent state.
+`service install` copies the executable it was run with into the state
+directory, as `versions/<version>/fleet-agent`, and points the link `current`
+at that version. The service definition runs `<state-dir>/current/fleet-agent`,
+so it no longer depends on where the binary was first installed. Running the
+command again is safe: it rewrites the definition and restarts the service.
+At most two versions are kept: the active one and the one it replaced.
+
+The same commands manage the service on Linux and macOS:
+
+| Command | Effect |
+| --- | --- |
+| `fleet-agent service install` | Copy this executable, install the definition, start or restart the service |
+| `fleet-agent service start`, `stop`, `restart` | Control the installed service |
+| `fleet-agent service status` | The service manager's status |
+| `fleet-agent service logs [--follow]` | The last 200 log lines (`journalctl` on Linux, the log file on macOS) |
+| `fleet-agent service uninstall [--purge-binaries]` | Stop and remove the definition; with `--purge-binaries` also the installed versions |
+| `fleet-agent update status` | This executable's version and the installed versions (read-only) |
+| `fleet-agent update rollback` | Switch the service to the other installed version and restart it |
+
+Uninstall never removes the identity, credentials or other Agent state.
+
+To upgrade, get the new `fleet-agent` the way you first installed it (for
+example `brew upgrade fleet-agent`, or a new release archive), then run
+`fleet-agent service install` with the new executable. If the new version
+misbehaves, `fleet-agent update rollback` returns to the previous one.
+
+If the Agent was started with `brew services` by an earlier release,
+`fleet-agent service install` stops and unregisters that Homebrew service and
+replaces it. The Homebrew formula stays installed and only supplies new
+versions. A service installed by an earlier release runs the executable at the
+path it was installed from; run `service install` once with a new release to
+move it to the copy in the state directory.
 
 Linux uses a `systemd --user` unit. Distributions without a systemd user manager
 are not supported. For startup during boot before login, an administrator must
@@ -212,7 +242,7 @@ JSON. All exit with status 1 and leave the directory missing.
 
 | Command | Output |
 | --- | --- |
-| `fleet-agent status` | Identity, certificate expiry, pending report and detail, active Assignments and `"service": {"running": true\|false}` |
+| `fleet-agent status` | Identity, certificate expiry, pending report and detail, active Assignments and `"service": {"running": true\|false, "version": ...}`, where `version` is the installed version the service runs |
 | `fleet-agent targets` | Each Target: kind, `state` (`active`, `pending` or `idle`), active and pending Assignment IDs and revision, whether a report is pending |
 | `fleet-agent check` | `{"ok": ..., "checks": [...]}` with the state directory, config, identity, certificate expiry, home directory, service and pending report or detail |
 | `fleet-agent disk` | `{"diskUsage": {...}, "timedOut": false}`, measured now |
@@ -280,3 +310,5 @@ cargo build --manifest-path clients/Cargo.toml --package fleet-agent --release -
 macOS service installation and a macOS release binary are not included in the
 Linux package. Native macOS installation and login-startup validation remain
 pending; see the [client update design](../../docs/technical-design/client-updates.md).
+Updates started by an Operator are planned in the
+[self-update plan](../../docs/plans/agent-self-update.md).

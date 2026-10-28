@@ -5,6 +5,7 @@ mod detail;
 mod disk;
 mod drift;
 mod inspect;
+mod managed;
 mod protocol;
 mod repair;
 mod service;
@@ -87,6 +88,21 @@ enum Command {
         #[command(subcommand)]
         action: service::ServiceCommand,
     },
+    /// Show or roll back the Agent version the service runs.
+    Update {
+        #[command(subcommand)]
+        action: UpdateCommand,
+    },
+}
+
+#[derive(Clone, Copy, Subcommand)]
+enum UpdateCommand {
+    /// Show this executable's version and the installed versions. Read-only
+    /// and safe to run while the service runs.
+    Status,
+    /// Switch the service to the other installed version and restart it. Not
+    /// read-only, but takes no state lock and works while the service runs.
+    Rollback,
 }
 
 #[derive(Clone, Serialize, Deserialize)]
@@ -153,6 +169,13 @@ async fn main() -> Result<()> {
         .unwrap_or_else(|| home.join(".local/state/fleet-agent"));
     if let Command::Service { action } = &cli.command {
         return service::run(*action, &absolute_path(directory)?);
+    }
+    if let Command::Update { action } = &cli.command {
+        let directory = absolute_path(directory)?;
+        return match action {
+            UpdateCommand::Status => inspect::print(&managed::status(&directory)?),
+            UpdateCommand::Rollback => service::rollback(&directory),
+        };
     }
     // Read-only commands never create, lock or change anything.
     match &cli.command {
@@ -364,7 +387,8 @@ async fn main() -> Result<()> {
         | Command::Targets
         | Command::Check
         | Command::Disk
-        | Command::Service { .. } => unreachable!("handled before the state lock"),
+        | Command::Service { .. }
+        | Command::Update { .. } => unreachable!("handled before the state lock"),
     }
     Ok(())
 }

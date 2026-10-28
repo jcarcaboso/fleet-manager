@@ -262,7 +262,7 @@ describe('catalog text, steps and commands (diskProblems, agentProblems, detailP
     expect(r.find('.prob-expl strong').exists(), 'the specific detail is emphasised').toBe(true);
     const steps = r.findAll('.fix li').map(l => l.text());
     expect(steps[0]).toMatch(/release archive/);
-    expect(steps).toHaveLength(6);
+    expect(steps).toHaveLength(7);
     expect(r.findAll('.cmd code').map(c => c.text()).join()).toBe('fleet nodes show fedora-ws');
     expect(list.find(x => /mba-travel/.test(x.text()))!.find('.fix li').text()).toMatch(/Upgrade with brew upgrade fleet-agent/);
     expect(list.find(x => /laptop-ana/.test(x.text()))!.find('.fix li').text()).toMatch(/--tag v0\.9\.0/);

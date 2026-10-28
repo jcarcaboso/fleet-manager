@@ -26,11 +26,20 @@ commands. The [Agent guide](../../deploy/agent/README.md) covers service command
 ## Manual rollout
 
 1. Build one revision and verify its test results and archive checksums.
-2. Update one Node first. Preserve its private Agent state directory.
-3. Stop its Agent service, install the new executable at the same absolute path,
-   and restart the service. Verify the version and successful contact/sync.
-4. Update the remaining Nodes. Keep the previous executable available for
-   rollback; state migrations must explicitly document rollback compatibility.
+2. Run `scripts/smoke-agent-service.sh` when the release changes the service
+   command or the install layout. It checks install, upgrade, rollback and
+   uninstall under a real `systemd --user` in a container. The macOS launchd
+   branch still needs a Mac.
+3. Update one Node first. Preserve its private Agent state directory.
+4. Get the new executable (`brew upgrade fleet-agent`, a release archive or
+   Cargo) and run `fleet-agent service install` with it. The command copies it
+   to `<state-dir>/versions/<version>/`, switches the `current` link the service
+   runs, and restarts the service. Verify the version and successful
+   contact/sync. Agents up to 0.11.0 have no managed copy: stop the service,
+   install the new executable at the same absolute path, and restart it.
+5. Update the remaining Nodes. The previous version stays installed;
+   `fleet-agent update rollback` switches back to it. State migrations must
+   explicitly document rollback compatibility.
    Attempt failure detail lives in its own file, `pending-detail.json`, and adds
    nothing to `run.json`, so an older Agent reads the run state unchanged and
    ignores the file.
@@ -144,10 +153,11 @@ Preparing a release does not publish it; publishing does not deploy it.
    Report partial failures rather than calling the release complete.
 7. Deploy through the staged rollout above only when a rollout is requested.
 
-The Homebrew formula uses `opt_bin` for the Agent service command. This symlink
-tracks the active Cellar version across upgrades. Direct and Cargo installs use
-`fleet-agent service`; if their executable path changes, reinstall that service
-definition as described above. Never run both service definitions at once.
+Every install method runs the Agent through `fleet-agent service install`,
+which runs a copy in the state directory, so the original executable can move
+or be removed after an upgrade. Releases up to 0.11.0 put a `brew services`
+definition in the formula; a newer `fleet-agent service install` stops and
+replaces it. Never run both service definitions at once.
 
 Do not reuse or move a published release tag. Make a new patch release for a
 corrected build so Cargo installs and downloaded assets continue to identify one

@@ -9,7 +9,7 @@ public static class AgentTelemetryRules
     public const int MaximumStateDirectoryLength = 512;
     public const int MaximumEnumLength = 16;
 
-    public static readonly IReadOnlySet<string> InstallMethods = new HashSet<string>(StringComparer.Ordinal) { "homebrew", "cargo", "binary" };
+    public static readonly IReadOnlySet<string> InstallMethods = new HashSet<string>(StringComparer.Ordinal) { "managed", "homebrew", "cargo", "binary" };
     public static readonly IReadOnlySet<string> ServiceManagers = new HashSet<string>(StringComparer.Ordinal) { "systemd", "launchd", "none" };
 
     /// <summary>Returns the report with control characters removed, or throws <c>invalid_request</c>. Optional strings that end up empty become null.</summary>

@@ -358,6 +358,7 @@ public sealed class TelemetryTests(OperatorApiFixture fixture) : IClassFixture<O
     }
 
     [Theory]
+    [InlineData("managed", "fleet-agent service install")]
     [InlineData("homebrew", "brew upgrade fleet-agent")]
     [InlineData("cargo", "cargo install --locked --force")]
     [InlineData("binary", "release archive")]

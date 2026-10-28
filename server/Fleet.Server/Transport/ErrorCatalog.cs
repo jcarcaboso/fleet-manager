@@ -265,6 +265,7 @@ public static class ErrorCatalog
         new("agent_outdated", Issue, "A Node runs an older Agent",
             "The Agent on the Node reported a version lower than the Server's. Server and Agent releases share version numbers, so the Agent is older than the release the Server runs.",
             ["Run `fleet nodes show <node>` to see the running and the latest version and how the Agent was installed.",
+             "Managed (installed by `fleet-agent service install`): get the new fleet-agent the way it was first installed, for example `brew upgrade fleet-agent`, then run `fleet-agent service install` with it.",
              "Homebrew: run `brew upgrade fleet-agent` on the Node and restart the service with `brew services restart fleet-agent`.",
              "Cargo: reinstall from the release tag with `cargo install --locked --force --git https://github.com/jcarcaboso/fleet-manager --tag <tag> fleet fleet-agent`, then restart the service. See docs/technical-design/cli-installation.md.",
              "Binary: download and verify the release archive, replace the binary at the same path and restart the service. See docs/technical-design/cli-installation.md.",
