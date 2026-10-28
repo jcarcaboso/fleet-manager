@@ -107,6 +107,20 @@ pub(crate) fn known_code_message(code: &str) -> Option<&'static str> {
         "stale_selection" => "the model selection changed since it was read; run it again",
         "pinned_model_excluded" => "the selection would exclude a model an assignment pins",
         "catalog_unavailable" => "no CLIProxy catalog is available for that base URL",
+        "agent_update_unsupported" => {
+            "the node's Agent cannot update itself; upgrade it once by hand and run `fleet-agent service install`"
+        }
+        "agent_update_current" => "the node's Agent already runs the Server's version",
+        "agent_update_in_progress" => "the node's Agent is already updating",
+        "agent_update_not_cancellable" => {
+            "only an update the Agent has not started can be cancelled"
+        }
+        "agent_release_unavailable" => {
+            "the Server could not get its Agent release; it may not be published yet (see `fleet explain agent_release_unavailable`)"
+        }
+        "agent_release_invalid" => {
+            "the Agent release failed signature or digest verification on the Server"
+        }
         _ => return None,
     })
 }

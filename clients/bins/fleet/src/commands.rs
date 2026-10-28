@@ -29,7 +29,7 @@ Exit codes:
   10 `fleet doctor` found open error-severity issues (its JSON is still printed on stdout)
 
 Token scopes: read (every list/show command), operate (retry, issues ack/snooze/reopen, nodes disk --refresh, source
-rescan, models select and refresh), admin (enrollment, rename, revoke, remove). Destructive commands need --yes.
+rescan, models select and refresh), admin (enrollment, rename, revoke, remove, nodes update). Destructive commands need --yes.
 Help does not require FLEET_SERVER_URL or FLEET_OPERATOR_TOKEN.";
 
 #[derive(Debug, Parser)]
@@ -147,7 +147,7 @@ impl NewestArgs {
 
 #[derive(Debug, Args)]
 #[command(
-    after_help = "Examples:\n  fleet nodes list\n  fleet nodes show studio-mini\n  fleet nodes attempts studio-mini --target skills\n  fleet nodes checkins studio-mini --hours 24\n  fleet nodes disk studio-mini\n  fleet nodes rename old-alias new-alias\n  fleet nodes revoke studio-mini --dry-run\n\n<node> is an exact, case-sensitive alias or a node UUID. Quote aliases that contain spaces."
+    after_help = "Examples:\n  fleet nodes list\n  fleet nodes show studio-mini\n  fleet nodes attempts studio-mini --target skills\n  fleet nodes checkins studio-mini --hours 24\n  fleet nodes disk studio-mini\n  fleet nodes update studio-mini\n  fleet nodes rename old-alias new-alias\n  fleet nodes revoke studio-mini --dry-run\n\n<node> is an exact, case-sensitive alias or a node UUID. Quote aliases that contain spaces."
 )]
 pub(crate) struct NodesArgs {
     #[command(subcommand)]
@@ -158,12 +158,12 @@ pub(crate) struct NodesArgs {
 
 #[derive(Debug, Subcommand)]
 enum NodesSubcommand {
-    /// List nodes: alias, platform, freshness, target-state counts, current revision, disk and Agent summary (version, outdated, OS, hostname).
+    /// List nodes: alias, platform, freshness, target-state counts, current revision, disk, Agent summary (version, outdated, OS, hostname, selfUpdate) and the last Agent update.
     #[command(
         after_help = "Examples:\n  fleet nodes list\n  fleet nodes list --after <nextCursor>"
     )]
     List(AfterArgs),
-    /// Show one node: credential validity, each target's state, latest attempt and error code, disk and `agent` (version, latestVersion, outdated, OS, install method; null before Agent 0.9.0).
+    /// Show one node: credential validity, each target's state, latest attempt and error code, disk, `agent` (version, latestVersion, outdated, OS, install method, selfUpdate; null before Agent 0.9.0) and `agentUpdate` (the last Agent update and its state, or null).
     #[command(
         after_help = "Examples:\n  fleet nodes show studio-mini\n  fleet nodes show 00000000-0000-0000-0000-000000000001"
     )]
@@ -206,6 +206,24 @@ enum NodesSubcommand {
         /// Ask the Agent to measure now instead of reading the last measurement. Needs scope operate.
         #[arg(long)]
         refresh: bool,
+    },
+    /// Update the Agent on nodes to the Server's version, or cancel an update the Agent has not started. Needs scope admin.
+    #[command(
+        after_help = "Needs scope admin. Examples:\n  fleet nodes update studio-mini\n  fleet nodes update studio-mini build-box\n  fleet nodes update --all-outdated\n  fleet nodes update --cancel studio-mini\n\nThe Server first mirrors and verifies its own signed Agent release (this can take minutes the first time), then records the request. Each Agent picks it up on its next poll, downloads the release from the Server, checks the signature and digest, restarts into the new version and rolls back by itself if it fails. Follow it with `fleet nodes show <node>`: `agentUpdate.state` goes requested, downloading, restarting, then succeeded or failed (with `errorCode`; see `fleet explain <code>`).\nOnly Agents that run from `fleet-agent service install` and announced the capability (`agent.selfUpdate`) can update; Agents up to 0.11 need one manual upgrade first.\n\nOutput for one node: the node's agentUpdate. For several nodes or --all-outdated: {\"targetVersion\", \"items\": [{\"node\", \"nodeId\", \"requested\", \"code\", \"message\", \"agentUpdate\"}]}; a node with requested false was not updated and `code` says why. --cancel prints the cancelled agentUpdate."
+    )]
+    Update {
+        /// Node aliases (exact, case-sensitive) or node IDs (UUID).
+        #[arg(
+            required_unless_present = "all_outdated",
+            conflicts_with = "all_outdated"
+        )]
+        nodes: Vec<String>,
+        /// Every node whose Agent reported a version older than the Server's.
+        #[arg(long)]
+        all_outdated: bool,
+        /// Cancel the requested update of one node instead.
+        #[arg(long, conflicts_with = "all_outdated")]
+        cancel: bool,
     },
     /// Change a node's alias. Update the alias in the source `fleet.yml` afterwards.
     #[command(after_help = "Needs scope admin. Example:\n  fleet nodes rename old-alias new-alias")]
@@ -942,6 +960,32 @@ async fn node_command(api: &Api, command: NodesSubcommand) -> Result<Value, CliE
                 "disk": detail.get("disk").cloned().unwrap_or(Value::Null),
             }))
         }
+        NodesSubcommand::Update {
+            nodes,
+            all_outdated,
+            cancel,
+        } => match (nodes.as_slice(), cancel) {
+            ([node], true) => {
+                api.post(&["nodes", node, "agent-update", "cancel"], None)
+                    .await
+            }
+            (_, true) => Err(CliError::usage(
+                "invalid_argument",
+                "--cancel takes exactly one node",
+            )),
+            ([node], false) if !all_outdated => {
+                api.post_agent_update(&["nodes", node, "agent-update"], None)
+                    .await
+            }
+            _ => {
+                let body = if all_outdated {
+                    json!({"allOutdated": true})
+                } else {
+                    json!({"nodes": nodes})
+                };
+                api.post_agent_update(&["agent-updates"], Some(&body)).await
+            }
+        },
         NodesSubcommand::Rename {
             current_alias,
             new_alias,

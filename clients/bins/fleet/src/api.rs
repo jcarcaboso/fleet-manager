@@ -11,6 +11,9 @@ pub(crate) const MAX_RESPONSE_BYTES: usize = 1024 * 1024;
 /// Failure bodies are read only to find an error `code`; larger ones are ignored.
 pub(crate) const MAX_ERROR_BODY_BYTES: usize = 4096;
 pub(crate) const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
+/// Agent update requests wait while the Server mirrors and verifies the
+/// release, which downloads every archive the first time.
+pub(crate) const AGENT_UPDATE_TIMEOUT: Duration = Duration::from_secs(600);
 
 #[derive(Debug, Deserialize, Serialize)]
 pub(crate) struct Collection {
@@ -207,6 +210,24 @@ impl Api {
                 }),
             rename_error_detail,
         )
+        .await
+    }
+
+    /// `POST` with the longer [`AGENT_UPDATE_TIMEOUT`].
+    pub(crate) async fn post_agent_update(
+        &self,
+        segments: &[&str],
+        body: Option<&Value>,
+    ) -> Result<Value, CliError> {
+        let request = self
+            .client
+            .post(self.endpoint(segments)?)
+            .timeout(AGENT_UPDATE_TIMEOUT);
+        self.send(if let Some(body) = body {
+            request.json(body)
+        } else {
+            request
+        })
         .await
     }
 

@@ -457,6 +457,10 @@ mod tests {
             vec!["nodes", "list"],
             vec!["nodes", "list", "--after", "c"],
             vec!["nodes", "show", "studio mini"],
+            vec!["nodes", "update", "studio mini"],
+            vec!["nodes", "update", "a", "b"],
+            vec!["nodes", "update", "--all-outdated"],
+            vec!["nodes", "update", "--cancel", "a"],
             vec!["nodes", "attempts", "n"],
             vec![
                 "nodes",
@@ -573,6 +577,9 @@ mod tests {
             vec!["issues", "reopen"],
             vec!["revisions", "show"],
             vec!["revisions", "show", "a3f9c21"],
+            vec!["nodes", "update"],
+            vec!["nodes", "update", "a", "--all-outdated"],
+            vec!["nodes", "update", "--all-outdated", "--cancel"],
             vec!["rollouts", "show", "not-a-uuid"],
         ] {
             let error = parse(&args).unwrap_err();
@@ -685,6 +692,50 @@ mod tests {
             format!("POST /operator/v1/nodes/{encoded}/retry HTTP/1.1")
         );
         assert_eq!(seen[2].1, r#"{"target":"t"}"#);
+    }
+
+    #[tokio::test]
+    async fn nodes_update_uses_the_single_bulk_and_cancel_routes() {
+        let (url, server) = mock(vec![(202, "{}"), (200, "{}"), (200, "{}"), (200, "{}")]);
+        let api = Api::new(&url, "t".into(), true, None).unwrap();
+        for args in [
+            vec!["nodes", "update", "rack/A"],
+            vec!["nodes", "update", "a", "b"],
+            vec!["nodes", "update", "--all-outdated"],
+            vec!["nodes", "update", "--cancel", "a"],
+        ] {
+            commands::run(&api, parse(&args).unwrap().command)
+                .await
+                .unwrap();
+        }
+        let error = commands::run(
+            &api,
+            parse(&["nodes", "update", "--cancel", "a", "b"])
+                .unwrap()
+                .command,
+        )
+        .await
+        .err()
+        .unwrap();
+        assert_eq!((error.code.as_str(), error.exit), ("invalid_argument", 2));
+        let seen = server.join().unwrap();
+        assert_eq!(
+            seen.iter()
+                .map(|(line, body)| (line.as_str(), body.as_str()))
+                .collect::<Vec<_>>(),
+            [
+                ("POST /operator/v1/nodes/rack%2FA/agent-update HTTP/1.1", ""),
+                (
+                    "POST /operator/v1/agent-updates HTTP/1.1",
+                    r#"{"nodes":["a","b"]}"#
+                ),
+                (
+                    "POST /operator/v1/agent-updates HTTP/1.1",
+                    r#"{"allOutdated":true}"#
+                ),
+                ("POST /operator/v1/nodes/a/agent-update/cancel HTTP/1.1", ""),
+            ]
+        );
     }
 
     #[tokio::test]
