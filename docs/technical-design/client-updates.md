@@ -26,11 +26,20 @@ commands. The [Agent guide](../../deploy/agent/README.md) covers service command
 ## Manual rollout
 
 1. Build one revision and verify its test results and archive checksums.
-2. Update one Node first. Preserve its private Agent state directory.
-3. Stop its Agent service, install the new executable at the same absolute path,
-   and restart the service. Verify the version and successful contact/sync.
-4. Update the remaining Nodes. Keep the previous executable available for
-   rollback; state migrations must explicitly document rollback compatibility.
+2. Run `scripts/smoke-agent-service.sh` when the release changes the service
+   command or the install layout. It checks install, upgrade, rollback and
+   uninstall under a real `systemd --user` in a container. The macOS launchd
+   branch still needs a Mac.
+3. Update one Node first. Preserve its private Agent state directory.
+4. Get the new executable (`brew upgrade fleet-agent`, a release archive or
+   Cargo) and run `fleet-agent service install` with it. The command copies it
+   to `<state-dir>/versions/<version>/`, switches the `current` link the service
+   runs, and restarts the service. Verify the version and successful
+   contact/sync. Agents up to 0.11.0 have no managed copy: stop the service,
+   install the new executable at the same absolute path, and restart it.
+5. Update the remaining Nodes. The previous version stays installed;
+   `fleet-agent update rollback` switches back to it. State migrations must
+   explicitly document rollback compatibility.
    Attempt failure detail lives in its own file, `pending-detail.json`, and adds
    nothing to `run.json`, so an older Agent reads the run state unchanged and
    ignores the file.
@@ -40,10 +49,44 @@ installation, rebuild with the chosen `--tag` plus `--locked --force`, then
 restart the Agent service. If installation moves the executable to a different
 path, reinstall the service definition so it references that path.
 
-Agent self-update is not implemented. A later updater should use signed release
-metadata, validate platform and Server compatibility, stage the executable,
-restart through the service manager, and provide rollback. A checksum next to an
-archive detects corruption but does not replace release signing.
+Agent self-update is not implemented yet; the
+[self-update plan](../plans/agent-self-update.md) describes it. The updater will
+use the signed release manifest below, validate platform and Server
+compatibility, stage the executable, restart through the service manager, and
+provide rollback. A checksum next to an archive detects corruption but does not
+replace release signing.
+
+## Release signing
+
+Every tagged release also publishes `fleet-agent-release.json` and its Ed25519
+signature `fleet-agent-release.json.sig`. The manifest names the release
+version, the source commit, and the SHA-256 and size of the `fleet-agent`
+executable inside each archive:
+
+```json
+{
+  "schema": 1,
+  "name": "fleet-agent",
+  "version": "0.11.0",
+  "gitCommit": "…",
+  "binaries": [
+    { "os": "linux", "arch": "amd64", "sha256": "…", "size": 9123456 }
+  ]
+}
+```
+
+The signature covers the exact manifest bytes. `scripts/sign-agent-release.py`
+writes the manifest from the release archives after checking each archive
+checksum, its `SHA256SUMS` and its `BUILD.json` version and clean commit. It
+signs with OpenSSL and refuses a signature that no committed public key in
+`clients/bins/fleet-agent/release-keys/` verifies.
+
+The tag workflow's `sign` job runs in the `release-signing` environment, the
+only place the private key `AGENT_RELEASE_SIGNING_KEY` is available. The job
+fails, and no release is published, when the secret or a committed public key is
+missing. Manual workflow runs sign with a throwaway key instead, so they test the
+manifest without the real key. Creating and rotating the key is described in the
+[release key guide](../../clients/bins/fleet-agent/release-keys/README.md).
 
 ## Build artifacts
 
@@ -101,18 +144,20 @@ Preparing a release does not publish it; publishing does not deploy it.
    `vMAJOR.MINOR.PATCH` tag on the same tested commit. Never move a published tag
    or overwrite a version image with different content.
 5. Wait for the tag workflow. It publishes the GitHub release only after all
-   Linux and macOS build, lint, and test jobs pass. It then updates the formulas
-   from the published archive checksums.
+   Linux and macOS build, lint, and test jobs pass and the Agent release manifest
+   is signed. It then updates the formulas from the published archive checksums.
 6. Check that the release has all six archives and six adjacent checksum files,
+   `fleet-agent-release.json` and a signature that verifies with a committed key,
    both formulas name the release version, and archive provenance matches the
    tagged commit. Verify downloaded checksums and the published Server and dashboard images.
    Report partial failures rather than calling the release complete.
 7. Deploy through the staged rollout above only when a rollout is requested.
 
-The Homebrew formula uses `opt_bin` for the Agent service command. This symlink
-tracks the active Cellar version across upgrades. Direct and Cargo installs use
-`fleet-agent service`; if their executable path changes, reinstall that service
-definition as described above. Never run both service definitions at once.
+Every install method runs the Agent through `fleet-agent service install`,
+which runs a copy in the state directory, so the original executable can move
+or be removed after an upgrade. Releases up to 0.11.0 put a `brew services`
+definition in the formula; a newer `fleet-agent service install` stops and
+replaces it. Never run both service definitions at once.
 
 Do not reuse or move a published release tag. Make a new patch release for a
 corrected build so Cargo installs and downloaded assets continue to identify one

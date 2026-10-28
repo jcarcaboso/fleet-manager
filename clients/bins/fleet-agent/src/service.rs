@@ -5,9 +5,11 @@ use std::os::unix::fs::OpenOptionsExt;
 use std::{
     env, fs,
     io::{ErrorKind, Write},
-    path::Path,
+    path::{Path, PathBuf},
     process::Command,
 };
+
+use crate::managed;
 
 #[cfg(any(test, target_os = "macos"))]
 const LABEL: &str = "dev.fleet.agent";
@@ -94,52 +96,84 @@ pub fn installed(home: &Path) -> Vec<Manager> {
     found
 }
 
-/// Refuses actions that `fleet-agent service` cannot carry out correctly
-/// because Homebrew manages the service: they would act on a service that is
-/// not the one running (or start a second Agent next to it), and point to
-/// `brew services` instead.
-fn check_managers(action: ServiceCommand, installed: &[Manager]) -> Result<()> {
-    let own = installed.contains(&Manager::FleetAgent);
-    let homebrew = installed.iter().find_map(|manager| match manager {
+fn homebrew_label(installed: &[Manager]) -> Option<&'static str> {
+    installed.iter().find_map(|manager| match manager {
         Manager::Homebrew(label) => Some(*label),
         Manager::FleetAgent => None,
-    });
+    })
+}
+
+/// Refuses actions that `fleet-agent service` cannot carry out correctly
+/// because Homebrew manages the service: they would act on a service that is
+/// not the one running (or start a second Agent next to it). `install` is
+/// always allowed, because it moves a Homebrew service over first.
+fn check_managers(action: ServiceCommand, installed: &[Manager]) -> Result<()> {
+    use ServiceCommand::*;
+    let own = installed.contains(&Manager::FleetAgent);
     let brew = match action {
-        ServiceCommand::Install | ServiceCommand::Start => "start",
-        ServiceCommand::Stop | ServiceCommand::Uninstall => "stop",
-        ServiceCommand::Restart => "restart",
-        ServiceCommand::Status => "info",
+        Install | Start => "start",
+        Stop | Uninstall { .. } => "stop",
+        Restart => "restart",
+        Status | Logs { .. } => "info",
     };
-    match (homebrew, own, action) {
-        (Some(label), false, ServiceCommand::Install) => bail!(
-            "the Agent is installed as the Homebrew service {label}; manage it with `brew services` \
-             (for example `brew services restart fleet-agent`), or run `brew services stop fleet-agent` \
-             before `fleet-agent service install` so that only one service runs the Agent"
-        ),
+    match (homebrew_label(installed), own, action) {
+        (_, _, Install) => Ok(()),
         (Some(label), false, _) => bail!(
             "the Agent runs as the Homebrew service {label}, not as a fleet-agent service; \
-             use `brew services {brew} fleet-agent`"
+             run `fleet-agent service install` to move it to the fleet-agent service, \
+             or use `brew services {brew} fleet-agent`"
         ),
-        (
-            Some(label),
-            true,
-            ServiceCommand::Install | ServiceCommand::Start | ServiceCommand::Restart,
-        ) => bail!(
+        (Some(label), true, Start | Restart) => bail!(
             "both the Homebrew service {label} and the fleet-agent service are installed, and only one \
-             Agent can run; remove one with `brew services stop fleet-agent` or `fleet-agent service uninstall`"
+             Agent can run; run `fleet-agent service install` to remove the Homebrew service"
         ),
-        (
-            None,
-            false,
-            ServiceCommand::Start
-            | ServiceCommand::Stop
-            | ServiceCommand::Restart
-            | ServiceCommand::Status,
-        ) => {
+        (None, false, Start | Stop | Restart | Status | Logs { .. }) => {
             bail!("the fleet-agent service is not installed; run `fleet-agent service install`")
         }
         _ => Ok(()),
     }
+}
+
+/// Where `brew` is: on `PATH`, else at a standard Homebrew prefix.
+fn find_brew(home: &Path) -> Option<PathBuf> {
+    let on_path: Vec<PathBuf> = env::var_os("PATH")
+        .map(|path| {
+            env::split_paths(&path)
+                .map(|dir| dir.join("brew"))
+                .collect()
+        })
+        .unwrap_or_default();
+    on_path
+        .into_iter()
+        .chain([
+            PathBuf::from("/opt/homebrew/bin/brew"),
+            PathBuf::from("/usr/local/bin/brew"),
+            PathBuf::from("/home/linuxbrew/.linuxbrew/bin/brew"),
+            home.join(".linuxbrew/bin/brew"),
+        ])
+        .find(|candidate| candidate.is_file())
+}
+
+/// Stops and unregisters the `brew services` Agent so that the fleet-agent
+/// service can replace it. Homebrew keeps the formula, which only supplies
+/// new binaries from now on.
+fn move_from_homebrew(label: &str, home: &Path) -> Result<()> {
+    let brew = find_brew(home).with_context(|| {
+        format!(
+            "the Agent runs as the Homebrew service {label}, but `brew` was not found; \
+             run `brew services stop fleet-agent`, then install again"
+        )
+    })?;
+    let brew = brew.to_str().context("the brew path is not valid UTF-8")?;
+    println!("Stopping the Homebrew service {label}; the fleet-agent service replaces it.");
+    run_tool(brew, &["services", "stop", "fleet-agent"], false)?;
+    if let Some(left) = homebrew_label(&installed(home)) {
+        bail!(
+            "`brew services stop fleet-agent` left the Homebrew service {left} installed; \
+             remove its definition, then install again"
+        );
+    }
+    Ok(())
 }
 
 /// Starts the service log again once it exceeds 10 MiB, keeping the previous
@@ -158,7 +192,9 @@ pub fn trim_log(state_dir: &Path) {
 
 #[derive(Clone, Copy, Debug, Subcommand)]
 pub enum ServiceCommand {
-    /// Install the service definition and enable startup. Not read-only.
+    /// Copy this executable into the state directory, install the service
+    /// definition that runs it, and start or restart it. Moves an Agent run by
+    /// `brew services` to this service. Safe to repeat. Not read-only.
     Install,
     /// Start the installed service. Not read-only.
     Start,
@@ -168,8 +204,19 @@ pub enum ServiceCommand {
     Restart,
     /// Show service-manager status. Read-only and safe to run while the service runs.
     Status,
+    /// Show the service log. Read-only and safe to run while the service runs.
+    Logs {
+        /// Keep printing new lines until interrupted.
+        #[arg(long, short)]
+        follow: bool,
+    },
     /// Stop, disable, and remove the service definition. Not read-only.
-    Uninstall,
+    Uninstall {
+        /// Also remove the installed Agent versions. Identity, credentials and
+        /// state are always kept.
+        #[arg(long)]
+        purge_binaries: bool,
+    },
 }
 
 pub fn run(action: ServiceCommand, state_dir: &Path) -> Result<()> {
@@ -177,19 +224,78 @@ pub fn run(action: ServiceCommand, state_dir: &Path) -> Result<()> {
         bail!("the service state directory must be an absolute path");
     }
     validate_path(state_dir, "state directory")?;
-    let executable = env::current_exe()
+    let home = dirs::home_dir().context("cannot resolve the user's home directory")?;
+    let installed = installed(&home);
+    check_managers(action, &installed)?;
+    // The definition runs `current`, so a new version only has to switch it.
+    let executable = managed::current_executable(state_dir);
+    validate_path(&executable, "executable")?;
+    if let ServiceCommand::Install = action {
+        prepare_install(state_dir, &installed, &home)?;
+    }
+    #[cfg(target_os = "linux")]
+    linux(action, state_dir, &executable, &home)?;
+    #[cfg(target_os = "macos")]
+    macos(action, state_dir, &executable, &home)?;
+    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+    bail!("service management is supported only on Linux and macOS");
+    if let ServiceCommand::Uninstall {
+        purge_binaries: true,
+    } = action
+    {
+        managed::remove(state_dir)?;
+    }
+    Ok(())
+}
+
+/// Copies the running executable into the managed layout and makes it
+/// active, then moves a Homebrew service over. Requires an enrolled Agent,
+/// because the service starts right away.
+fn prepare_install(state_dir: &Path, installed: &[Manager], home: &Path) -> Result<()> {
+    if !crate::inspect::enrolled(state_dir)? {
+        bail!("enroll this Agent before installing its service: `fleet-agent enroll --link`");
+    }
+    let source = env::current_exe()
         .context("resolve the fleet-agent executable")?
         .canonicalize()
         .context("resolve the fleet-agent executable path")?;
+    let previous = managed::install_and_activate(state_dir, &source, managed::VERSION)?;
+    let installed_at = state_dir.join(managed::VERSIONS).join(managed::VERSION);
+    match previous {
+        Some(previous) if previous != managed::VERSION => println!(
+            "Installed fleet-agent {} in {} (replacing {previous}).",
+            managed::VERSION,
+            installed_at.display()
+        ),
+        _ => println!(
+            "Installed fleet-agent {} in {}.",
+            managed::VERSION,
+            installed_at.display()
+        ),
+    }
+    if let Some(label) = homebrew_label(installed) {
+        move_from_homebrew(label, home)?;
+    }
+    Ok(())
+}
+
+/// `update rollback`: switches `current` to the other installed version and
+/// restarts the service if this user has one.
+pub fn rollback(state_dir: &Path) -> Result<()> {
+    let target = managed::previous_version(state_dir)?
+        .context("no other Agent version is installed to roll back to")?;
+    let replaced = managed::activate(state_dir, &target)?;
+    println!(
+        "{}",
+        serde_json::json!({"activeVersion": target, "previousVersion": replaced})
+    );
     let home = dirs::home_dir().context("cannot resolve the user's home directory")?;
-    validate_path(&executable, "executable")?;
-    check_managers(action, &installed(&home))?;
-    #[cfg(target_os = "linux")]
-    return linux(action, state_dir, &executable, &home);
-    #[cfg(target_os = "macos")]
-    return macos(action, state_dir, &executable, &home);
-    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
-    bail!("service management is supported only on Linux and macOS");
+    if installed(&home).contains(&Manager::FleetAgent) {
+        run(ServiceCommand::Restart, state_dir)
+    } else {
+        eprintln!("No fleet-agent service is installed; start the Agent to use {target}.");
+        Ok(())
+    }
 }
 
 fn run_tool(program: &str, args: &[&str], tolerate_failure: bool) -> Result<()> {
@@ -274,12 +380,29 @@ fn linux(action: ServiceCommand, state_dir: &Path, executable: &Path, home: &Pat
                 "systemd user manager is unavailable; fleet-agent requires systemd --user on Linux",
             )?;
             ctl(&["--user", "enable", "fleet-agent.service"], false)?;
+            // Restart, not start: a running Agent must pick up the new version.
+            ctl(&["--user", "restart", "fleet-agent.service"], false)?;
         }
         ServiceCommand::Start => ctl(&["--user", "start", "fleet-agent.service"], false)?,
         ServiceCommand::Stop => ctl(&["--user", "stop", "fleet-agent.service"], false)?,
         ServiceCommand::Restart => ctl(&["--user", "restart", "fleet-agent.service"], false)?,
         ServiceCommand::Status => ctl(&["--user", "status", "fleet-agent.service"], false)?,
-        ServiceCommand::Uninstall => {
+        ServiceCommand::Logs { follow } => {
+            let mut args = vec![
+                "--user",
+                "-u",
+                "fleet-agent.service",
+                "-n",
+                "200",
+                "--no-pager",
+            ];
+            if follow {
+                args.push("--follow");
+            }
+            // Interrupting --follow is the normal way to end it.
+            run_tool("journalctl", &args, follow)?;
+        }
+        ServiceCommand::Uninstall { .. } => {
             if path.exists() {
                 ctl(
                     &["--user", "disable", "--now", "fleet-agent.service"],
@@ -320,7 +443,7 @@ fn systemd_quote(path: &Path) -> String {
 #[cfg(any(test, target_os = "linux"))]
 fn systemd_unit(executable: &Path, state_dir: &Path) -> String {
     format!(
-        "[Unit]\nDescription=Fleet Manager Node Agent\nAfter=network-online.target\nWants=network-online.target\n\n[Service]\nType=simple\nExecStart={} --state-dir {} run\nRestart=on-failure\nRestartSec=15s\nUMask=0077\nNoNewPrivileges=true\nPrivateTmp=true\n\n[Install]\nWantedBy=default.target\n",
+        "[Unit]\nDescription=Fleet Manager Node Agent\nAfter=network-online.target\nWants=network-online.target\n\n[Service]\nType=simple\nExecStart={} --state-dir {} run\nRestart=always\nRestartSec=15s\nUMask=0077\nNoNewPrivileges=true\nPrivateTmp=true\n\n[Install]\nWantedBy=default.target\n",
         systemd_quote(executable),
         systemd_quote(state_dir)
     )
@@ -373,7 +496,21 @@ fn macos(action: ServiceCommand, state_dir: &Path, executable: &Path, home: &Pat
             run_tool("launchctl", &["bootstrap", &domain, path_text], false)?;
         }
         ServiceCommand::Status => run_tool("launchctl", &["print", &target], false)?,
-        ServiceCommand::Uninstall => {
+        ServiceCommand::Logs { follow } => {
+            let log = state_dir.join("logs").join(LOG_FILE);
+            if !log.is_file() {
+                bail!("the service has not written {} yet", log.display());
+            }
+            let log = log.to_str().context("the log path is not valid UTF-8")?;
+            let mut args = vec!["-n", "200"];
+            if follow {
+                args.push("-F");
+            }
+            args.push(log);
+            // Interrupting -F is the normal way to end it.
+            run_tool("tail", &args, follow)?;
+        }
+        ServiceCommand::Uninstall { .. } => {
             if path.exists() && tool_succeeds("launchctl", &["print", &target])? {
                 run_tool("launchctl", &["bootout", &target], false)?;
             }
@@ -421,6 +558,8 @@ mod tests {
             "ExecStart=\"/opt/Fleet Agent/%%agent/$$bin\" --state-dir \"/tmp/a b/%%state/$$dir\" run"
         ));
         assert!(unit.contains("UMask=0077\nNoNewPrivileges=true\nPrivateTmp=true"));
+        // An Agent that exits after switching versions must be started again.
+        assert!(unit.contains("Restart=always\n"));
     }
     #[test]
     fn launchd_definition_uses_argument_array_and_xml_escaping() {
@@ -439,12 +578,22 @@ mod tests {
     }
 
     #[test]
-    fn homebrew_service_is_detected_and_never_driven_by_fleet_agent_service() {
+    fn homebrew_service_is_moved_by_install_and_never_driven_otherwise() {
         use ServiceCommand::*;
         let brew = Manager::Homebrew(HOMEBREW_LAUNCHD[0]);
-        for action in [Install, Start, Stop, Restart, Status, Uninstall] {
+        let logs = Logs { follow: false };
+        let uninstall = Uninstall {
+            purge_binaries: false,
+        };
+        let all = [Install, Start, Stop, Restart, Status, logs, uninstall];
+        // Install moves a Homebrew service over, whatever else is installed.
+        for installed in [&[brew][..], &[Manager::FleetAgent, brew], &[]] {
+            assert!(check_managers(Install, installed).is_ok());
+        }
+        for action in [Start, Stop, Restart, Status, logs, uninstall] {
             let error = check_managers(action, &[brew]).unwrap_err().to_string();
             assert!(error.contains(HOMEBREW_LAUNCHD[0]), "{error}");
+            assert!(error.contains("fleet-agent service install"), "{error}");
             assert!(error.contains("brew services"), "{error}");
         }
         assert!(
@@ -454,22 +603,35 @@ mod tests {
                 .contains("brew services stop fleet-agent")
         );
         // Both installed: never start a second Agent, but the own service can go.
-        for action in [Install, Start, Restart] {
-            assert!(check_managers(action, &[Manager::FleetAgent, brew]).is_err());
+        for action in [Start, Restart] {
+            let error = check_managers(action, &[Manager::FleetAgent, brew])
+                .unwrap_err()
+                .to_string();
+            assert!(error.contains("fleet-agent service install"), "{error}");
         }
-        for action in [Stop, Status, Uninstall] {
+        for action in [Stop, Status, logs, uninstall] {
             assert!(check_managers(action, &[Manager::FleetAgent, brew]).is_ok());
         }
         // Nothing installed: only install and uninstall make sense.
-        assert!(check_managers(Install, &[]).is_ok());
-        assert!(check_managers(Uninstall, &[]).is_ok());
-        for action in [Start, Stop, Restart, Status] {
+        assert!(check_managers(uninstall, &[]).is_ok());
+        for action in [Start, Stop, Restart, Status, logs] {
             let error = check_managers(action, &[]).unwrap_err().to_string();
             assert!(error.contains("not installed"), "{error}");
         }
-        for action in [Install, Start, Stop, Restart, Status, Uninstall] {
+        for action in all {
             assert!(check_managers(action, &[Manager::FleetAgent]).is_ok());
         }
+    }
+
+    #[test]
+    fn brew_is_found_at_a_standard_prefix_without_path() {
+        let home = std::env::temp_dir().join(format!("fleet-brew-{}", std::process::id()));
+        let brew = home.join(".linuxbrew/bin/brew");
+        fs::create_dir_all(brew.parent().unwrap()).unwrap();
+        fs::write(&brew, "").unwrap();
+        let found = find_brew(&home).unwrap();
+        assert!(found.ends_with("brew"), "{}", found.display());
+        fs::remove_dir_all(home).unwrap();
     }
 
     #[test]

@@ -172,8 +172,8 @@ export function fromDetail(raw: NodeDetail): NodeDetailView {
 
 /** A version is a tag in a command only when it is a plain semantic version. The Server sends its own version, but the command is copied into a shell. */
 export const SEMVER = /^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?$/;
-export const INSTALL: Record<InstallMethod, string> = { homebrew: 'Homebrew', cargo: 'Cargo (release tag)', binary: 'Release archive' };
-export const INSTALLED: Record<InstallMethod, string> = { homebrew: 'with Homebrew', cargo: 'with Cargo from a release tag', binary: 'from a release archive' };
+export const INSTALL: Record<InstallMethod, string> = { managed: 'Fleet service install', homebrew: 'Homebrew', cargo: 'Cargo (release tag)', binary: 'Release archive' };
+export const INSTALLED: Record<InstallMethod, string> = { managed: 'by fleet-agent service install', homebrew: 'with Homebrew', cargo: 'with Cargo from a release tag', binary: 'from a release archive' };
 export const SERVICE: Record<ServiceManager, string> = { systemd: 'systemd user service', launchd: 'launchd LaunchAgent', none: 'None (not run as a service)' };
 /** The real names come from the Agent's service command (clients/bins/fleet-agent/src/service.rs): the user unit fleet-agent.service and the label dev.fleet.agent. */
 export const RESTART: Partial<Record<ServiceManager, string>> = {
@@ -203,6 +203,14 @@ export function upgradePlan(n: Pick<NodeView, 'agent'>): UpgradePlan | null {
   const restart: UpgradeStep = a.installMethod === 'homebrew' ? { text: 'Restart the service so the new version starts polling.', cmd: 'brew services restart fleet-agent' }
     : restartCmd ? { text: 'Restart the service so the new version starts polling.', cmd: restartCmd }
       : { text: 'Restart the Agent the way you started it. It is not running as a service.' };
+  if (a.installMethod === 'managed') {
+    // The service runs its own copy, so the new binary is installed into it rather than restarted.
+    return {
+      method: 'managed', releaseUrl: tag ? `${REPO}/releases/tag/${tag}` : null,
+      steps: [{ text: `Get the ${tag || 'latest'} fleet-agent the way it was first installed, for example with Homebrew.`, cmd: 'brew upgrade fleet-agent' },
+        { text: 'Install it as the running Agent. The service switches to the new version and restarts.', cmd: 'fleet-agent service install' }],
+    };
+  }
   if (a.installMethod === 'homebrew') return { method: 'homebrew', steps: [{ text: 'Upgrade the Agent with Homebrew.', cmd: 'brew upgrade fleet-agent' }, restart] };
   if (a.installMethod === 'cargo') {
     return {

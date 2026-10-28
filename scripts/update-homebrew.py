@@ -45,28 +45,23 @@ def formula(binary: str, version: str, repository: str, sums: dict[str, str]) ->
         if binary == "fleet-agent"
         else "Operator CLI for Fleet Manager"
     )
-    service = ""
     caveats = ""
     if binary == "fleet-agent":
-        service = '''
-  service do
-    run [opt_bin/"fleet-agent", "run"]
-    keep_alive true
-    restart_delay 15
-    log_path var/"log/fleet-agent.log"
-    error_log_path var/"log/fleet-agent.log"
-  end
-'''
+        # No `service do` block: `fleet-agent service install` copies the
+        # binary into the Agent's state directory and runs that copy, so the
+        # formula only supplies new versions.
         caveats = '''
   def caveats
     <<~EOS
-      Enroll the Agent before starting its Homebrew service. Then run:
+      Enroll the Agent, then install and start its background service:
 
-        brew services start fleet-agent
+        fleet-agent enroll --link
+        fleet-agent service install
 
-      Manage this service with `brew services`, not `fleet-agent service`, and
-      do not run both at the same time. Its log is
-      #{var}/log/fleet-agent.log.
+      The service runs its own copy of fleet-agent. After `brew upgrade
+      fleet-agent`, run `fleet-agent service install` again to switch it to
+      the new version. If an older release runs as a Homebrew service,
+      `fleet-agent service install` stops it and replaces it.
     EOS
   end
 '''
@@ -99,7 +94,7 @@ def formula(binary: str, version: str, repository: str, sums: dict[str, str]) ->
   def install
     bin.install "{binary}"
   end
-{service}{caveats}
+{caveats}
   test do
     assert_match "{binary} {version}", shell_output("#{{bin}}/{binary} --version")
     system "#{{bin}}/{binary}", "--help"

@@ -82,7 +82,7 @@ export type Platform = 'macos' | 'linux' | (string & {});
 export type AssignmentState = 'pending' | 'applying' | 'succeeded' | 'failed' | 'superseded';
 /** Assignments or Targets per state. */
 export type StateCounts = Record<AssignmentState, number>;
-export type InstallMethod = 'homebrew' | 'cargo' | 'binary';
+export type InstallMethod = 'managed' | 'homebrew' | 'cargo' | 'binary';
 export type ServiceManager = 'systemd' | 'launchd' | 'none';
 /** Step names an Agent reports for a failed Attempt. A newer Agent may send another one. */
 export type AttemptStep = 'lock' | 'download' | 'verify' | 'stage' | 'activate' | 'recover' | 'receipt' | 'configure' | 'validate' | (string & {});

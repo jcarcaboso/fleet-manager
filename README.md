@@ -112,18 +112,25 @@ To enroll a Node, create a link for its alias in the dashboard, then run:
 ```sh
 agent_bin="$(brew --prefix jcarcaboso/fleet/fleet-agent)/bin/fleet-agent"
 "$agent_bin" enroll --link
-brew services start jcarcaboso/fleet/fleet-agent
+"$agent_bin" service install
 ```
 
 Paste the link at the prompt. The Agent generates its private key locally and
-stores state under `~/.local/state/fleet-agent` by default. Homebrew services use
-the stable `opt` path across upgrades. Do not run this service alongside one
-created by `fleet-agent service install`. To migrate an existing service, stop
-it, run `fleet-agent service uninstall`, then start the Homebrew service.
+stores state under `~/.local/state/fleet-agent` by default. `service install`
+copies the Agent into that directory, installs a `systemd --user` unit or a
+launchd agent that runs the copy, and starts it. `fleet-agent service` then
+starts, stops, restarts, shows the status and the logs of the Agent the same way
+on Linux and macOS. The [Agent guide](deploy/agent/README.md#run-continuously)
+lists the commands.
+
+If the Agent already runs as a Homebrew service (`brew services`, used by 0.11.0
+and earlier), `service install` with a newer Agent stops that service and
+replaces it. With 0.11.0 and earlier, start the Agent with
+`brew services start jcarcaboso/fleet/fleet-agent` instead.
 
 An already enrolled Node does not need another enrollment. If the old Agent
-runs in a terminal, stop that process instead. A custom `--state-dir` requires
-corresponding service configuration; Homebrew defaults to the usual state path.
+runs in a terminal, stop that process instead. A custom `--state-dir` must be
+given to every command, including `service install`.
 
 An older direct installation may still take precedence because earlier guides
 put `~/.local/bin` first on `PATH`. Check before enrolling or upgrading:
@@ -245,15 +252,20 @@ confirm the new version and successful contact and sync in the dashboard, then
 continue in stages:
 
 ```sh
-brew services stop jcarcaboso/fleet/fleet-agent
 brew update
 brew upgrade jcarcaboso/fleet/fleet-agent
-brew services start jcarcaboso/fleet/fleet-agent
+"$(brew --prefix jcarcaboso/fleet/fleet-agent)/bin/fleet-agent" service install
 ```
 
-Agent self-update is not implemented. Keep the previous executable available
-for rollback and read the [client update runbook](docs/technical-design/client-updates.md)
-before a larger rollout. The macOS binaries are not signed or notarized, and
+`service install` switches the service to the new version and keeps the
+previous one; `fleet-agent update rollback` returns to it. For 0.11.0 and
+earlier, which run as a Homebrew service, use `brew services restart
+jcarcaboso/fleet/fleet-agent` after the upgrade instead.
+
+Updates started from the dashboard are planned in the
+[self-update plan](docs/plans/agent-self-update.md). Read the
+[client update runbook](docs/technical-design/client-updates.md) before a larger
+rollout. The macOS binaries are not signed or notarized, and
 login-startup behavior still needs validation on the target Macs.
 
 ## Develop and inspect the design

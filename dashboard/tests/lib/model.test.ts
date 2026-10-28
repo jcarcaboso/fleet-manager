@@ -106,6 +106,12 @@ describe('agent', () => {
     const none = upgradePlan(mk({ installMethod: 'binary', serviceManager: 'none' }))!;
     expect(none.steps[0]!.cmd).toBeUndefined();
     expect(upgradePlan(mk({ installMethod: null }))!.method).toBeNull();
+    // A managed Agent is installed into its service rather than restarted.
+    const managed = upgradePlan(mk({ installMethod: 'managed', serviceManager: 'systemd' }))!;
+    expect(managed.method).toBe('managed');
+    expect(managed.steps.map(s => s.cmd)).toEqual(['brew upgrade fleet-agent', 'fleet-agent service install']);
+    expect(managed.steps[0]!.text).toContain('v0.9.0');
+    expect(managed.releaseUrl).toBe('https://github.com/jcarcaboso/fleet-manager/releases/tag/v0.9.0');
   });
   it('never puts an unvalidated version into a command', () => {
     expect(SEMVER.test('0.9.0')).toBe(true);

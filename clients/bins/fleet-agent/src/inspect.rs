@@ -21,7 +21,7 @@ use time::{OffsetDateTime, format_description::well_known::Rfc3339};
 use crate::{
     RunState,
     credentials::{CredentialStore, StoredIdentity},
-    detail, disk, service, state,
+    detail, disk, managed, service, state,
 };
 
 /// A certificate expiring sooner than this is reported as a warning.
@@ -54,6 +54,13 @@ fn load_identity(directory: &Path) -> std::io::Result<Option<StoredIdentity>> {
         Some(store) => store.load_identity(),
         None => Ok(None),
     }
+}
+
+/// Whether the state directory holds a configured and enrolled Agent.
+pub fn enrolled(directory: &Path) -> Result<bool> {
+    Ok(state::existing_private_directory(directory)?
+        && state::read_json::<state::Config>(&directory.join("config.json"))?.is_some()
+        && load_identity(directory)?.is_some())
 }
 
 fn load_run(directory: &Path) -> Result<RunState> {
@@ -92,6 +99,7 @@ pub fn status(directory: &Path) -> Result<Value> {
 /// manager started it. `manager` and `label` name the installed service
 /// definition (`fleet-agent` for `fleet-agent service install`, `homebrew`
 /// for `brew services`), and `logs` is the log file of the former on macOS.
+/// `version` is the installed version the fleet-agent service runs.
 fn service_status(directory: &Path) -> Result<Value> {
     let installed = dirs::home_dir()
         .map(|home| service::installed(&home))
@@ -102,7 +110,8 @@ fn service_status(directory: &Path) -> Result<Value> {
     Ok(json!({"running":state::lock_is_held(directory)?,
         "manager":manager.map(|manager| manager.name()),
         "label":manager.map(|manager| manager.label()),
-        "logs":logs}))
+        "logs":logs,
+        "version":managed::active_version(directory).ok().flatten()}))
 }
 
 /// How to start the installed service, for `check`.
@@ -113,7 +122,7 @@ fn service_hint() -> &'static str {
         .first()
     {
         Some(service::Manager::Homebrew(_)) => {
-            "not running; start it with `brew services start fleet-agent`"
+            "not running; move it to the fleet-agent service with `fleet-agent service install`"
         }
         Some(service::Manager::FleetAgent) => {
             "not running; start it with `fleet-agent service start`"
