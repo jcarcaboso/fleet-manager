@@ -36,9 +36,20 @@ dashboard files (only `/enroll` pages) and redirects `/dashboard` to the
 dashboard address. The two images are released together, with the same version
 and source commit, and both are Linux amd64.
 
-A release therefore has four parts that share one version and one source commit:
+A release therefore has five parts that share one version and one source commit:
 the Server image (manual), the dashboard image (manual), the Agent and `fleet`
-archives (workflow), and the Homebrew formulas (workflow).
+archives (workflow), the signed Agent release manifest (workflow), and the
+Homebrew formulas (workflow).
+
+The tag workflow signs `fleet-agent-release.json` in the `release-signing`
+environment with the `AGENT_RELEASE_SIGNING_KEY` secret, and checks the signature
+against the public keys in `clients/bins/fleet-agent/release-keys/`. Before
+tagging, confirm that at least one `*.pem` key is committed there and ask the
+user to confirm the environment secret exists; you cannot read it. Without both,
+the `sign` job fails and nothing is published. Never create, print, or handle the
+private key yourself; the
+[release key guide](../../../clients/bins/fleet-agent/release-keys/README.md)
+tells the user how.
 
 ## Prepare the source
 
@@ -223,12 +234,16 @@ git push origin "refs/tags/v$VERSION"
 If the tag already exists, check its peeled commit and resume the existing
 workflow instead of moving or recreating it. Never force-push release tags.
 
-Watch the tag-triggered `client-artifacts.yml` run. It creates the GitHub release
-and uploads six archives plus six adjacent checksums, tests generated Homebrew
+Watch the tag-triggered `client-artifacts.yml` run. It signs the Agent release
+manifest, creates the GitHub release and uploads six archives plus six adjacent
+checksums, `fleet-agent-release.json` and its `.sig`, tests generated Homebrew
 formulas on both macOS architectures, then updates the formulas on `master`.
 Do not create a competing GitHub release or draft before that workflow.
 
-Verify the release assets, their checksums and `BUILD.json` provenance, both
+Verify the release assets, their checksums and `BUILD.json` provenance, the
+manifest signature (`openssl pkeyutl -verify -rawin -pubin -inkey KEY.pem -in
+fleet-agent-release.json -sigfile fleet-agent-release.json.sig`) and that its
+digests match the binaries in the archives, both
 formula versions, and the published Docker digests of both images. Pull updated `master` only
 when the local worktree is clean. Report the tag, source SHA, both image references
 and digests, GitHub release, and any unfinished verification separately.
