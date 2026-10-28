@@ -6,9 +6,9 @@
  * the record's default (`null`, `false`, `0` or the declared default). Names match case-insensitively (web defaults).
  *
  * The shapes below are the records of `server/Fleet.Server/Transport/OperatorApi.cs` and `Dashboard/DashboardEndpoints.cs`
- * (`RetryRequest`, `RemoveNodeRequest`, `LinkRequest`, `SelectionRequest`, `CliProxySelectionPolicy`, `LoginRequest`) and
+ * (`RetryRequest`, `RemoveNodeRequest`, `LinkRequest`, `SelectionRequest`, `CliProxySelectionPolicy`, `LoginRequest` and the account requests) and
  * `WireModels.cs` (`OperatorRenameAliasRequest`, `IssueStateRequest`). Routes without a body parameter (`revoke`, `disk-usage/refresh`,
- * `logout`, `source/rescan`, `cliproxy/refresh`) ignore whatever is posted, like the Server.
+ * `logout`, `source/rescan`, `cliproxy/refresh`, `accounts/{name}/delete`) ignore whatever is posted, like the Server.
  */
 
 /* eslint-disable @typescript-eslint/no-explicit-any */
@@ -29,7 +29,11 @@ const POLICY: Shape = {
 };
 
 export const SHAPES = {
-  login: { fields: { token: 'string' } },
+  login: { fields: { name: 'string', password: 'string' } },
+  changePassword: { fields: { currentPassword: 'string', newPassword: 'string' } },
+  createAccount: { fields: { name: 'string', password: 'string', scope: 'string' } },
+  accountScope: { fields: { scope: 'string' } },
+  accountPassword: { fields: { password: 'string' } },
   rename: { fields: { currentAlias: 'string', alias: 'string' } },
   retry: { fields: { target: 'string' } },
   remove: { fields: { alias: 'string' } },
@@ -43,6 +47,10 @@ const GUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 /** The shape of the body that `POST <path>` binds, or `null` when the route takes no body (or is no route). */
 export function shapeFor(path: string): Shape | null {
   if (path === 'login') return SHAPES.login;
+  if (path === 'account/password') return SHAPES.changePassword;
+  if (path === 'accounts') return SHAPES.createAccount;
+  const a = /^accounts\/[^/]+\/(scope|password)$/.exec(path);
+  if (a) return a[1] === 'scope' ? SHAPES.accountScope : SHAPES.accountPassword;
   if (path === 'nodes/rename') return SHAPES.rename;
   if (path === 'issues/state') return SHAPES.issueState;
   if (path === 'enrollment-links') return SHAPES.link;

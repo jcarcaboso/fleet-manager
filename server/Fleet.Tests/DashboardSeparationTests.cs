@@ -87,7 +87,7 @@ public sealed class DashboardSeparationTests(OperatorApiFixture fixture) : IClas
         }
         foreach (var path in new[] { "/dashboard/api/csrf", "/dashboard/api/nodes", "/dashboard/api/session", "/dashboard/api" })
             Assert.Equal(HttpStatusCode.NotFound, (await client.GetAsync(path)).StatusCode);
-        Assert.Equal(HttpStatusCode.NotFound, (await client.PostAsJsonAsync("/dashboard/api/login", new { token = OperatorApiFixture.AdminToken })).StatusCode);
+        Assert.Equal(HttpStatusCode.NotFound, (await client.PostAsJsonAsync("/dashboard/api/login", OperatorApiFixture.LoginBody(OperatorApiFixture.AdminToken))).StatusCode);
         using var preflight = new HttpRequestMessage(HttpMethod.Options, "/dashboard/api/nodes");
         preflight.Headers.Add("Origin", Dashboard);
         var answered = await client.SendAsync(preflight);
@@ -299,7 +299,7 @@ public sealed class DashboardSeparationTests(OperatorApiFixture fixture) : IClas
         AssertAllowed(csrfResponse);
         var csrf = (await OperatorApiFixture.ReadAsync(csrfResponse))["token"]!.GetValue<string>();
         var cookies = string.Join("; ", csrfResponse.Headers.GetValues("Set-Cookie").Select(x => x.Split(';')[0]));
-        var login = await Send(client, HttpMethod.Post, "/dashboard/api/login", Dashboard, csrf, new { token = OperatorApiFixture.AdminToken }, cookies);
+        var login = await Send(client, HttpMethod.Post, "/dashboard/api/login", Dashboard, csrf, OperatorApiFixture.LoginBody(OperatorApiFixture.AdminToken), cookies);
         Assert.Equal(HttpStatusCode.OK, login.StatusCode);
         AssertAllowed(login);
         var session = login.Headers.GetValues("Set-Cookie").Single(x => x.StartsWith("__Host-Fleet-Session=", StringComparison.Ordinal));

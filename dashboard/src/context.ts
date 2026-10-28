@@ -68,7 +68,11 @@ export interface ContextOptions {
 /** Builds everything the app shares, wired together: the client, the session and its 401 hook, the catalog, the badges and the stores. */
 export function createFleetContext({ config, fetch }: ContextOptions): FleetContext {
   let session!: Session;
-  const api = createApiClient({ apiUrl: config.apiUrl, fetch, onUnauthorized: () => session.handleUnauthorized() });
+  const api = createApiClient({
+    apiUrl: config.apiUrl, fetch,
+    onUnauthorized: () => session.handleUnauthorized(),
+    onPasswordChangeRequired: () => session.handlePasswordChangeRequired(),
+  });
   session = createSession(api);
   const catalog = createErrorCatalog(api);
   const summary = createNavSummary(api);

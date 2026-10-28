@@ -462,7 +462,9 @@ public sealed record AuditEventStatus(
     string Actor,
     NodeId? NodeId,
     CredentialId? CredentialId,
-    string? NodeName = null);
+    string? NodeName = null,
+    string? Account = null,
+    string? Detail = null);
 
 public sealed record PersistenceMaintenancePolicy(
     TimeSpan? AuditEventRetention,

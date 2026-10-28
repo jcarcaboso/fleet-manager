@@ -43,10 +43,10 @@ describe('pagehide (the page may come back from the back/forward cache exactly a
     expect(app.ctx.wizard.open).toBe(false);
   });
 
-  it('clears the Operator token field on the sign-in page', async () => {
+  it('clears the password field on the sign-in page', async () => {
     app = await mountApp({ path: '/machines', mock: { signedOut: true } });
-    await waitFor(() => document.getElementById('operator-token'));
-    const input = document.getElementById('operator-token') as HTMLInputElement;
+    await waitFor(() => document.getElementById('login-password'));
+    const input = document.getElementById('login-password') as HTMLInputElement;
     input.value = 'secret-token-0123456789-abcdefghijklmnop';
     pagehide();
     expect(input.value).toBe('');

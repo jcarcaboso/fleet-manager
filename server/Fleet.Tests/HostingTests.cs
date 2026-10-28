@@ -22,6 +22,7 @@ namespace Fleet.Tests;
 public sealed class HostingTests : IAsyncLifetime
 {
     private const string Token = "test-only-operator-token-with-at-least-32-characters";
+    private static readonly object Login = new { name = "operator", password = OperatorApiFixture.AccountPassword };
     private const string DashboardOrigin = OperatorApiFixture.DashboardOrigin;
     private readonly PostgreSqlContainer _postgres = new PostgreSqlBuilder("postgres:17.5-alpine").Build();
     private readonly string _directory = Path.Combine(Path.GetTempPath(), "fleet-host-" + Guid.NewGuid().ToString("N"));
@@ -69,6 +70,7 @@ public sealed class HostingTests : IAsyncLifetime
         _operator.DefaultRequestHeaders.Authorization = new("Bearer", Token);
         using var scope = _factory.Services.CreateScope();
         await scope.ServiceProvider.GetRequiredService<FleetDbContext>().Database.MigrateAsync();
+        await OperatorApiFixture.SeedAccountAsync(_factory.Services, "operator", "admin");
     }
 
     [Theory]
@@ -109,7 +111,7 @@ public sealed class HostingTests : IAsyncLifetime
         Assert.Equal(HttpStatusCode.Unauthorized, (await browser.GetAsync("/dashboard/api/issues")).StatusCode);
         browser.DefaultRequestHeaders.Add("Origin", DashboardOrigin);
         await DashboardCsrf(browser);
-        (await browser.PostAsJsonAsync("/dashboard/api/login", new { token = Token })).EnsureSuccessStatusCode();
+        (await browser.PostAsJsonAsync("/dashboard/api/login", Login)).EnsureSuccessStatusCode();
         using var scope = _factory.Services.CreateScope();
         var options = scope.ServiceProvider.GetRequiredService<Microsoft.Extensions.Options.IOptions<FleetOptions>>().Value;
         options.CliProxyApiKey = "";
@@ -145,7 +147,7 @@ public sealed class HostingTests : IAsyncLifetime
         browser.DefaultRequestHeaders.Add("Origin", DashboardOrigin);
         await DashboardCsrf(browser);
         Assert.Equal(HttpStatusCode.Unauthorized, (await browser.PostAsJsonAsync("/dashboard/api/source/rescan", new { })).StatusCode);
-        (await browser.PostAsJsonAsync("/dashboard/api/login", new { token = Token })).EnsureSuccessStatusCode();
+        (await browser.PostAsJsonAsync("/dashboard/api/login", Login)).EnsureSuccessStatusCode();
         browser.DefaultRequestHeaders.Remove("X-Fleet-CSRF");
         Assert.Equal(HttpStatusCode.BadRequest, (await browser.PostAsJsonAsync("/dashboard/api/source/rescan", new { })).StatusCode);
         await DashboardCsrf(browser);
@@ -171,7 +173,7 @@ public sealed class HostingTests : IAsyncLifetime
         await DashboardCsrf(browser);
         Assert.Equal(HttpStatusCode.Unauthorized, (await browser.PostAsync("/dashboard/api/cliproxy/refresh", null)).StatusCode);
         Assert.Equal(HttpStatusCode.Unauthorized, (await browser.GetAsync("/dashboard/api/cliproxy/status")).StatusCode);
-        (await browser.PostAsJsonAsync("/dashboard/api/login", new { token = Token })).EnsureSuccessStatusCode();
+        (await browser.PostAsJsonAsync("/dashboard/api/login", Login)).EnsureSuccessStatusCode();
         browser.DefaultRequestHeaders.Remove("X-Fleet-CSRF");
         Assert.Equal(HttpStatusCode.BadRequest, (await browser.PostAsync("/dashboard/api/cliproxy/refresh", null)).StatusCode);
         await DashboardCsrf(browser);
@@ -191,15 +193,15 @@ public sealed class HostingTests : IAsyncLifetime
         Assert.Contains("frame-ancestors 'none'", page.Headers.GetValues("Content-Security-Policy").Single());
         Assert.Equal("no-referrer", page.Headers.GetValues("Referrer-Policy").Single());
         Assert.Equal(HttpStatusCode.Unauthorized, (await browser.GetAsync("/dashboard/api/nodes")).StatusCode);
-        Assert.Equal(HttpStatusCode.BadRequest, (await browser.PostAsJsonAsync("/dashboard/api/login", new { token = Token })).StatusCode);
+        Assert.Equal(HttpStatusCode.BadRequest, (await browser.PostAsJsonAsync("/dashboard/api/login", Login)).StatusCode);
         await DashboardCsrf(browser);
-        var login = await browser.PostAsJsonAsync("/dashboard/api/login", new { token = Token });
+        var login = await browser.PostAsJsonAsync("/dashboard/api/login", Login);
         login.EnsureSuccessStatusCode();
         var sessionCookie = login.Headers.GetValues("Set-Cookie").Single(x => x.StartsWith("__Host-Fleet-Session=", StringComparison.Ordinal));
         Assert.Contains("secure", sessionCookie);
         Assert.Contains("httponly", sessionCookie);
         Assert.Contains("samesite=strict", sessionCookie);
-        Assert.DoesNotContain(Token, sessionCookie);
+        Assert.DoesNotContain(OperatorApiFixture.AccountPassword, sessionCookie);
         Assert.Equal(HttpStatusCode.OK, (await browser.GetAsync("/dashboard/api/nodes")).StatusCode);
         Assert.Equal(HttpStatusCode.Unauthorized, (await browser.GetAsync("/operator/v1/nodes")).StatusCode);
         Assert.Equal(HttpStatusCode.Unauthorized, (await browser.PostAsync("/agent/v1/poll", null)).StatusCode);
@@ -219,7 +221,7 @@ public sealed class HostingTests : IAsyncLifetime
         using var browser = _factory.CreateClient(new() { BaseAddress = new Uri("https://localhost") });
         browser.DefaultRequestHeaders.Add("Origin", DashboardOrigin);
         await DashboardCsrf(browser);
-        (await browser.PostAsJsonAsync("/dashboard/api/login", new { token = Token })).EnsureSuccessStatusCode();
+        (await browser.PostAsJsonAsync("/dashboard/api/login", Login)).EnsureSuccessStatusCode();
         await DashboardCsrf(browser);
         var response = await browser.PostAsJsonAsync("/dashboard/api/enrollment-links", new { alias = "link-node", expiresInSeconds = 900 });
         response.EnsureSuccessStatusCode();
@@ -266,7 +268,7 @@ public sealed class HostingTests : IAsyncLifetime
         using var browser = _factory.CreateClient(new() { BaseAddress = new Uri("https://localhost") });
         browser.DefaultRequestHeaders.Add("Origin", DashboardOrigin);
         await DashboardCsrf(browser);
-        (await browser.PostAsJsonAsync("/dashboard/api/login", new { token = Token })).EnsureSuccessStatusCode();
+        (await browser.PostAsJsonAsync("/dashboard/api/login", Login)).EnsureSuccessStatusCode();
         await DashboardCsrf(browser);
         var authorization = await _operator.PostAsJsonAsync("/operator/v1/enrollment-tokens", new { expiresInSeconds = 900 });
         var token = (await authorization.Content.ReadFromJsonAsync<JsonElement>()).GetProperty("token").GetString();
@@ -368,6 +370,8 @@ public sealed class HostingTests : IAsyncLifetime
         Assert.Equal(HttpStatusCode.OK, (await _operator.GetAsync("/health/ready")).StatusCode);
         using var scope = _factory.Services.CreateScope();
         var database = scope.ServiceProvider.GetRequiredService<FleetDbContext>();
+        // Seeding the dashboard account bound the database to this Workspace; rebind it to another one (accounts cascade away).
+        await database.Database.ExecuteSqlRawAsync("DELETE FROM workspaces");
         database.Workspaces.Add(new WorkspaceRow { Id = Guid.NewGuid(), Name = "other" });
         await database.SaveChangesAsync();
         Assert.Equal(HttpStatusCode.ServiceUnavailable, (await _operator.GetAsync("/health/ready")).StatusCode);
@@ -450,7 +454,7 @@ public sealed class HostingTests : IAsyncLifetime
             Assert.Equal(HttpStatusCode.Unauthorized,
                 (await browser.GetAsync("/dashboard/api/cliproxy/selection")).StatusCode);
             await DashboardCsrf(browser);
-            (await browser.PostAsJsonAsync("/dashboard/api/login", new { token = Token })).EnsureSuccessStatusCode();
+            (await browser.PostAsJsonAsync("/dashboard/api/login", Login)).EnsureSuccessStatusCode();
             var selection = await browser.GetFromJsonAsync<JsonElement>("/dashboard/api/cliproxy/selection");
             var entry = Assert.Single(selection.GetProperty("catalogs").EnumerateArray());
             Assert.Equal(2, entry.GetProperty("models").GetArrayLength());

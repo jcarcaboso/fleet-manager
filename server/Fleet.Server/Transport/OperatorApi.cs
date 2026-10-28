@@ -58,6 +58,15 @@ public static partial class OperatorApi
 {
     public const string ScopeDeniedCode = "insufficient_scope";
 
+    public static bool HasScope(HttpContext http, OperatorScope required) =>
+        OperatorScopeNames.TryParse(http.User.FindFirstValue(OperatorScopeNames.ClaimType), out var granted) && granted >= required;
+
+    public static IResult ScopeDenied(OperatorScope required) => Results.Json(new
+    {
+        code = ScopeDeniedCode,
+        message = $"This credential does not have the {required.Name()} scope required for this action."
+    }, statusCode: StatusCodes.Status403Forbidden);
+
     /// <summary>
     /// Maps every Operator route once. The bearer group (<c>/operator/v1</c>) and the dashboard session group
     /// (<c>/dashboard/api</c>) both call this, so they cannot drift. The caller supplies authentication. Returns the scoped group.
@@ -72,13 +81,7 @@ public static partial class OperatorApi
         {
             var http = context.HttpContext;
             var required = http.GetEndpoint()?.Metadata.GetMetadata<RequiredScope>()?.Scope ?? OperatorScope.Admin;
-            if (!OperatorScopeNames.TryParse(http.User.FindFirstValue(OperatorScopeNames.ClaimType), out var granted) || granted < required)
-                return Results.Json(new
-                {
-                    code = ScopeDeniedCode,
-                    message = $"This credential does not have the {required.Name()} scope required for this action."
-                }, statusCode: StatusCodes.Status403Forbidden);
-            return await next(context);
+            return HasScope(http, required) ? await next(context) : ScopeDenied(required);
         });
 
         // Nodes

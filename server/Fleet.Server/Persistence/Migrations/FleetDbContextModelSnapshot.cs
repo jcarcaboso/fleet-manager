@@ -216,6 +216,10 @@ namespace Fleet.Server.Persistence.Migrations
                         .ValueGeneratedOnAdd()
                         .HasColumnType("uuid");
 
+                    b.Property<string>("Account")
+                        .HasMaxLength(64)
+                        .HasColumnType("character varying(64)");
+
                     b.Property<string>("Action")
                         .IsRequired()
                         .HasColumnType("text");
@@ -226,6 +230,10 @@ namespace Fleet.Server.Persistence.Migrations
 
                     b.Property<Guid?>("CredentialId")
                         .HasColumnType("uuid");
+
+                    b.Property<string>("Detail")
+                        .HasMaxLength(64)
+                        .HasColumnType("character varying(64)");
 
                     b.Property<Guid?>("NodeId")
                         .HasColumnType("uuid");
@@ -642,6 +650,49 @@ namespace Fleet.Server.Persistence.Migrations
                     b.ToTable("node_telemetry", (string)null);
                 });
 
+            modelBuilder.Entity("Fleet.Server.Persistence.OperatorAccountRow", b =>
+                {
+                    b.Property<Guid>("Id")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("uuid");
+
+                    b.Property<DateTimeOffset>("CreatedAt")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.Property<bool>("MustChangePassword")
+                        .HasColumnType("boolean");
+
+                    b.Property<string>("Name")
+                        .IsRequired()
+                        .HasMaxLength(64)
+                        .HasColumnType("character varying(64)");
+
+                    b.Property<string>("PasswordHash")
+                        .IsRequired()
+                        .HasColumnType("text");
+
+                    b.Property<string>("Scope")
+                        .IsRequired()
+                        .HasMaxLength(16)
+                        .HasColumnType("character varying(16)");
+
+                    b.Property<Guid>("SecurityStamp")
+                        .HasColumnType("uuid");
+
+                    b.Property<DateTimeOffset>("UpdatedAt")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.Property<Guid>("WorkspaceId")
+                        .HasColumnType("uuid");
+
+                    b.HasKey("Id");
+
+                    b.HasIndex("WorkspaceId", "Name")
+                        .IsUnique();
+
+                    b.ToTable("operator_accounts", (string)null);
+                });
+
             modelBuilder.Entity("Fleet.Server.Persistence.RolloutRow", b =>
                 {
                     b.Property<Guid>("Id")
@@ -925,6 +976,15 @@ namespace Fleet.Server.Persistence.Migrations
                         .WithMany()
                         .HasForeignKey("WorkspaceId")
                         .OnDelete(DeleteBehavior.Restrict)
+                        .IsRequired();
+                });
+
+            modelBuilder.Entity("Fleet.Server.Persistence.OperatorAccountRow", b =>
+                {
+                    b.HasOne("Fleet.Server.Persistence.WorkspaceRow", null)
+                        .WithMany()
+                        .HasForeignKey("WorkspaceId")
+                        .OnDelete(DeleteBehavior.Cascade)
                         .IsRequired();
                 });
 

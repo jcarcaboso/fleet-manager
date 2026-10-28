@@ -7,7 +7,7 @@ route below exists under both prefixes:
 | Prefix | Auth | Client |
 |---|---|---|
 | `/operator/v1` | `Authorization: Bearer <token>` | `fleet` |
-| `/dashboard/api` | `__Host-Fleet-Session` cookie; non-GET requests also need `Origin: <Fleet:DashboardOrigin>` and the CSRF token. Called cross-origin, with [CORS](operations-hardening.md#dashboard-origin-cors-and-csrf), by the separate dashboard | dashboard |
+| `/dashboard/api` | `__Host-Fleet-Session` cookie from an account sign-in (see [Dashboard accounts](#dashboard-accounts)); non-GET requests also need `Origin: <Fleet:DashboardOrigin>` and the CSRF token. Called cross-origin, with [CORS](operations-hardening.md#dashboard-origin-cors-and-csrf), by the separate dashboard | dashboard |
 
 Each handler is written once and mapped into both groups. Existing routes keep
 their current paths, shapes and behaviour unless this document says otherwise.
@@ -57,8 +57,55 @@ Configuration: `Fleet:OperatorScopes:<operator-name>` = `read` | `operate` |
 `admin`. A credential without an entry is `admin`, so existing deployments keep
 their current behaviour. An unknown scope value fails Server startup
 validation. The scope is checked for bearer tokens and dashboard sessions; the
-session stores it at login. A denied request returns 403 `insufficient_scope`.
-`GET session` returns `{ "actor": "...", "scope": "admin" }`.
+session stores the account's scope at login. A denied request returns 403 `insufficient_scope`.
+`GET session` returns `{ "actor": "...", "scope": "admin", "mustChangePassword": false }`.
+
+## Dashboard accounts
+
+The dashboard signs in with an account name and password, not with an Operator
+token. Operator tokens authenticate `/operator/v1` only. Accounts are stored in
+the database (`operator_accounts`), with PBKDF2-SHA256 password hashes (600,000
+iterations, random salt). Names are 1 to 64 characters of `a-z`, `0-9`, `.`,
+`_` and `-`, starting with a letter or digit (so never `.` or `..`, which a URL
+path would resolve), compared in lowercase; the name is the actor in audit events.
+Passwords have 10 to 256 characters.
+
+While the Workspace has no account, the first sign-in attempt creates `fleet`
+with the password `fleet` and the `admin` scope. This includes an upgrade from a
+release that used Operator tokens for the dashboard. Anyone who reaches the
+dashboard first can claim that account, so sign in and change the password
+before the Server is reachable by others. Like every new account and
+every admin password reset, it must change its password first: until then every
+route except `GET session`, `POST logout` and `POST account/password` returns
+403 `password_change_required`.
+
+Each account has a security stamp. Changing an account's password, scope or
+deleting it rotates the stamp, which ends that account's other sessions; a
+user's own password change keeps the session that made it. The admin routes
+check the signed-in account again after they take the account lock, so a request
+that was already waiting cannot act with a scope or session that was removed
+meanwhile: it fails with 401 `unauthorized` or 403 `insufficient_scope`.
+
+| Route | Scope | Body | Result |
+|---|---|---|---|
+| `POST login` | none | `{ "name", "password" }` | `{ "actor", "scope", "mustChangePassword" }`; 401 `unauthorized` |
+| `POST account/password` | signed in | `{ "currentPassword", "newPassword" }` | session shape; 400 `invalid_current_password`, `invalid_password` |
+| `GET accounts` | admin | | `{ "items": [{ "name", "scope", "mustChangePassword", "createdAt", "updatedAt" }] }`, sorted by name |
+| `POST accounts` | admin | `{ "name", "password", "scope" }` | 201 with the account; 400 `invalid_account_name`, `invalid_password`, `invalid_scope`; 409 `account_exists` |
+| `POST accounts/{name}/scope` | admin | `{ "scope" }` | the account; 409 `last_admin` |
+| `POST accounts/{name}/password` | admin | `{ "password" }` | the account, which must change the password again |
+| `POST accounts/{name}/delete` | admin | `{}` | `{ "deleted": true }`; 409 `cannot_delete_self`, `last_admin` |
+
+Unknown names return 404 `account_not_found`. These routes exist only under
+`/dashboard/api`. Login and own password changes share the per-address sign-in
+rate limit (20 per minute). Changes are audited as `account.created`,
+`account.scope_changed`, `account.password_reset`, `account.deleted` and
+`account.password_changed`, and sign-ins as `account.signed_in` and
+`account.sign_in_failed`. These events carry `"account"`, the account they are
+about (`null` when a sign-in names no account), and `"detail"`: the scope for
+`account.created` and `account.deleted`, `"read -> operate"` for a scope change,
+otherwise `null`. A failed sign-in records the name that was tried as the actor,
+or `unknown` when it is not a valid name. Passwords are never recorded.
 
 ## Nodes
 
@@ -268,7 +315,7 @@ The error catalog for every Agent error code and every issue code.
 | `GET rollouts` | Existing response, now under both prefixes |
 | `GET rollouts/{id}/attempts` | Existing response, now under both prefixes |
 | `GET warnings` | Existing response, now under both prefixes |
-| `GET audit` | Existing response, plus optional `node={node}` filter. Items gain `"nodeName"` (`null` if the Node was removed) |
+| `GET audit` | Existing response, plus optional `node={node}` filter. Items gain `"nodeName"` (`null` if the Node was removed), and `"account"` and `"detail"` for dashboard account events (otherwise `null`) |
 
 ## Enrollment
 

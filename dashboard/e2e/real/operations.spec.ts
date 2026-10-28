@@ -76,11 +76,11 @@ test.describe('operating a real Server', () => {
 });
 
 test.describe('scopes on a real Server', () => {
-  test('a read token can look but every control that changes something is locked', async ({ page, stack, allow }) => {
-    test.skip(!stack.readToken, 'needs FLEET_E2E_READ_TOKEN');
+  test('a read account can look but every control that changes something is locked', async ({ page, stack, allow }) => {
+    test.skip(!stack.read, 'needs FLEET_E2E_READ_NAME and FLEET_E2E_READ_PASSWORD');
     const writes: string[] = [];
     page.on('request', request => { if (request.method() !== 'GET' && !request.url().endsWith('/dashboard/api/login')) writes.push(`${request.method()} ${request.url()}`); });
-    await signIn(page, stack, allow, stack.readToken);
+    await signIn(page, stack, allow, stack.read);
     await expect(page.locator('#me .scope-chip')).toHaveText('read');
     await page.goto('/machines');
     const add = page.getByRole('button', { name: 'Add machine' }).first();
@@ -90,9 +90,9 @@ test.describe('scopes on a real Server', () => {
     expect(writes).toEqual([]);
   });
 
-  test('an operate token can act on problems but not enroll', async ({ page, stack, allow }) => {
-    test.skip(!stack.operateToken, 'needs FLEET_E2E_OPERATE_TOKEN');
-    await signIn(page, stack, allow, stack.operateToken);
+  test('an operate account can act on problems but not enroll', async ({ page, stack, allow }) => {
+    test.skip(!stack.operate, 'needs FLEET_E2E_OPERATE_NAME and FLEET_E2E_OPERATE_PASSWORD');
+    await signIn(page, stack, allow, stack.operate);
     await expect(page.locator('#me .scope-chip')).toHaveText('operate');
     await page.goto('/machines');
     await expect(page.getByRole('button', { name: 'Sync repository' })).not.toHaveAttribute('aria-disabled', 'true');

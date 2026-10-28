@@ -18,6 +18,9 @@ function files(dir: string, out: string[] = []): string[] {
 const sources = files(join(ROOT, 'src'));
 const strip = (text: string): string => text; // comments are scanned too: a rule that is only "documented away" is still a smell
 
+/* The colour theme preference is the one value kept in browser storage: not a secret, and needed before the first paint. */
+const THEME_MODULE = join('src', 'theme.ts');
+
 const FORBIDDEN: Array<[string, RegExp]> = [
   ['v-html', /v-html/],
   ['innerHTML', /innerHTML/],
@@ -51,10 +54,29 @@ describe('source scan', () => {
     it(`src/ never uses ${name}`, () => {
       const hits = sources
         .filter(f => !f.endsWith('.css'))
+        .filter(f => !(name === 'localStorage' && relative(ROOT, f) === THEME_MODULE))
         .flatMap(f => strip(readFileSync(f, 'utf8')).split('\n').map((line, i) => ({ f: relative(ROOT, f), line: i + 1, text: line })).filter(l => pattern.test(l.text)));
       expect(hits, hits.map(h => `${h.f}:${h.line}: ${h.text.trim()}`).join('\n')).toEqual([]);
     });
   }
+
+  it('the theme module stores only the theme preference', () => {
+    const text = readFileSync(join(ROOT, THEME_MODULE), 'utf8');
+    expect(text).not.toMatch(/sessionStorage|document\.cookie/);
+    expect([...text.matchAll(/(?:getItem|setItem|removeItem)\(\s*([^,)]+)/g)].map(m => m[1]!.trim())).toEqual(['THEME_STORAGE_KEY', 'THEME_STORAGE_KEY']);
+    expect(text).toContain("THEME_STORAGE_KEY = 'fleet-theme'");
+    expect(text).not.toMatch(/\.clear\(|\.key\(/);
+  });
+
+  it('the pre-paint theme script reads only the theme preference, with the theme module\'s key and values', () => {
+    const text = readFileSync(join(ROOT, 'public/theme-boot.js'), 'utf8');
+    expect(text).not.toMatch(/sessionStorage|document\.cookie|setItem|removeItem|fetch|XMLHttpRequest|innerHTML|eval/);
+    expect([...text.matchAll(/getItem\(\s*([^)]+)\)/g)].map(m => m[1]!.trim())).toEqual(["'fleet-theme'"]);
+    expect(readFileSync(join(ROOT, THEME_MODULE), 'utf8')).toContain("THEME_STORAGE_KEY = 'fleet-theme'");
+    expect(text).toContain("'(prefers-color-scheme: light)'");
+    const html = readFileSync(join(ROOT, 'index.html'), 'utf8');
+    expect(html.indexOf('<script src="/theme-boot.js"></script>')).toBeLessThan(html.indexOf('</head>'));
+  });
 
   it('the stylesheet loads no external resources (fonts, images, imports)', () => {
     for (const f of sources.filter(x => x.endsWith('.css'))) {

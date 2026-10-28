@@ -18,7 +18,7 @@ body.app h1[tabindex="-1"]:focus,body.app h2[tabindex="-1"]:focus,body.app #main
 .login-card .form>.btn{align-self:stretch;margin-top:10px}
 .btn.is-locked{opacity:.55;cursor:not-allowed}
 .btn-primary.is-locked:hover{background:var(--ink)}
-.btn-secondary.is-locked:hover{background:#fff}
+.btn-secondary.is-locked:hover{background:var(--field)}
 .btn-danger.is-locked:hover{background:var(--critical)}
 .lock-note{display:flex;align-items:center;gap:8px;margin-top:12px;font-size:12.5px;color:var(--muted)}
 .lock-note .ic{width:14px;height:14px;flex:none}
@@ -31,10 +31,10 @@ body.app h1[tabindex="-1"]:focus,body.app h2[tabindex="-1"]:focus,body.app #main
 .prob-note{margin-top:10px}
 .dep-note{margin-top:8px;max-width:640px}
 .empty-retry{display:flex;justify-content:center}
-.empty--error{background:var(--surface);border-radius:var(--r-lg);box-shadow:var(--sh-1),0 0 0 1px rgba(208,59,59,.2);margin:18px 0}
+.empty--error{background:var(--surface);border-radius:var(--r-lg);box-shadow:var(--sh-1),0 0 0 1px rgba(var(--critical-rgb),.2);margin:18px 0}
 .mono-ic.m-other{background:linear-gradient(135deg,#9aa3b2,#5d6573)}
 .toast--warning>.g,.toast--critical>.g{flex:none}
-.skel{border-radius:12px;background:linear-gradient(90deg,#ebe6dc 0%,#f3efe6 45%,#ebe6dc 90%);background-size:200% 100%;animation:shimmer 1.4s ease-in-out infinite}
+.skel{border-radius:12px;background:linear-gradient(90deg,var(--skel-a) 0%,var(--skel-b) 45%,var(--skel-a) 90%);background-size:200% 100%;animation:shimmer 1.4s ease-in-out infinite}
 .skel-title{height:34px;width:260px;margin:6px 0 12px}
 .skel-line{height:14px;margin:12px 10px 0}
 .skel-short{width:55%}
@@ -113,7 +113,7 @@ h1.dep-title{margin-top:8px}
 /* acknowledged and snoozed problems */
 .tag--state{background:var(--neutral-bg);color:var(--ink-2)}
 .prob-state .ic{color:var(--muted);flex:none}
-.prob-state--snoozed{background:var(--info-bg);box-shadow:inset 0 0 0 1px rgba(53,119,230,.28)}
+.prob-state--snoozed{background:var(--info-bg);box-shadow:inset 0 0 0 1px rgba(var(--info-rgb),.28)}
 .toolbar--states{gap:10px 22px}
 .snooze{display:inline-flex;align-items:center;gap:2px;padding:2px 4px 2px 11px;border-radius:999px;background:var(--surface-2);box-shadow:inset 0 0 0 1px var(--line)}
 .snooze-l{display:inline-flex;align-items:center;gap:6px;font-size:12.5px;font-weight:650;color:var(--muted);margin-right:2px}
@@ -141,10 +141,10 @@ h1.dep-title{margin-top:8px}
 .rv-times{display:flex;flex-direction:column;gap:2px;font-size:12.5px}
 .rv-t{white-space:nowrap}
 .rv-targets{list-style:none;margin:0;padding:0;display:flex;flex-wrap:wrap;gap:6px}
-.tchip{display:inline-flex;align-items:center;gap:6px;min-height:26px;padding:2px 10px 2px 6px;border-radius:8px;background:#fff;box-shadow:inset 0 0 0 1px var(--line);font-size:12.5px;color:var(--ink)}
+.tchip{display:inline-flex;align-items:center;gap:6px;min-height:26px;padding:2px 10px 2px 6px;border-radius:8px;background:var(--field);box-shadow:inset 0 0 0 1px var(--line);font-size:12.5px;color:var(--ink)}
 .tchip .g{width:15px;height:15px;flex:none}
 .tchip code{font-size:11.5px;overflow-wrap:anywhere}
-a.tchip--error{background:var(--critical-bg);box-shadow:inset 0 0 0 1px rgba(208,59,59,.35);font-weight:600}
+a.tchip--error{background:var(--critical-bg);box-shadow:inset 0 0 0 1px rgba(var(--critical-rgb),.35);font-weight:600}
 a.tchip--error:hover{text-decoration:none;box-shadow:inset 0 0 0 1px var(--critical)}
 @media (max-width:1000px){
   .rv-legend{display:none}

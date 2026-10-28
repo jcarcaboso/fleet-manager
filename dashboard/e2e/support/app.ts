@@ -1,10 +1,11 @@
 import { expect, type Locator, type Page } from '@playwright/test';
 import { appUrl, type Switches } from './mock';
 
-/** The 24-character-or-longer token the mock accepts (any token of 32 to 1024 characters that does not start with `bad`). */
-export const GOOD_TOKEN = 'e2e-operator-token-'.padEnd(40, 'x');
-/** A token the mock rejects. */
-export const BAD_TOKEN = 'bad-token-'.padEnd(40, 'x');
+/** The mock's signed-in account; its seeded password check accepts any password that does not start with `bad`. */
+export const ACCOUNT = 'joan';
+export const GOOD_PASSWORD = 'e2e-operator-password';
+/** A password the mock rejects. */
+export const BAD_PASSWORD = 'bad-password';
 
 export const h1 = (page: Page): Locator => page.getByRole('heading', { level: 1 });
 export const primaryNav = (page: Page): Locator => page.getByRole('navigation', { name: 'Primary' });
@@ -25,8 +26,9 @@ export async function openMachine(page: Page, alias: string, switches: Switches 
   await expect(h1(page)).toHaveText(alias);
 }
 
-export async function signIn(page: Page, token = GOOD_TOKEN): Promise<void> {
-  await page.getByLabel('Operator token').fill(token);
+export async function signIn(page: Page, password = GOOD_PASSWORD, name = ACCOUNT): Promise<void> {
+  await page.getByLabel('Name', { exact: true }).fill(name);
+  await page.getByLabel('Password', { exact: true }).fill(password);
   await page.getByRole('button', { name: 'Sign in' }).click();
 }
 

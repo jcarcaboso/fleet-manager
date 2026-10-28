@@ -8,7 +8,9 @@
 # Compose project name, builds the Rust clients into a temporary Cargo target directory, enrolls two real Agents (one of them
 # runs once, so it has reported its OS and disk), runs `npm run e2e:real` in dashboard/, and removes everything on exit, also
 # when something fails. The Operator token is read from the deployment's operator.env into the environment of the test run only:
-# it is never printed, written elsewhere, or passed on a command line.
+# it is never printed, written elsewhere, or passed on a command line. The dashboard signs in with accounts: the script replaces the
+# default fleet/fleet password with a random one and adds a read and an operate account, whose random passwords reach the test
+# run the same way (FLEET_E2E_{ADMIN,READ,OPERATE}_{NAME,PASSWORD}).
 #
 # Needs: Docker with Compose v2, Python 3, Rust (cargo), Node 24 and the dashboard's dependencies (`npm ci` in dashboard/), and
 # a browser: PLAYWRIGHT_CHROMIUM_EXECUTABLE, or Playwright's Chromium (`npx playwright install --with-deps chromium`).
@@ -118,6 +120,46 @@ started=1
     exit 1
 }
 
+# ------------------------------------------------------------------ dashboard accounts
+# Signs in as the default fleet account, replaces its password, and adds a read and an operate account that have already chosen
+# their own passwords, so the journeys start without the forced password change. Passwords go to a private file only.
+log "preparing the dashboard accounts"
+python3 - "$server_url" "$dashboard_url" "$deploy/secrets/tls/ca.pem" "$work/accounts.env" <<'PY'
+import http.cookiejar, json, os, secrets, ssl, sys, urllib.request
+server, dashboard, ca, out = sys.argv[1:]
+context = ssl.create_default_context(cafile=ca)
+
+def sign_in(name, password, new_password):
+    opener = urllib.request.build_opener(urllib.request.HTTPSHandler(context=context),
+                                         urllib.request.HTTPCookieProcessor(http.cookiejar.CookieJar()))
+    csrf = None
+    def call(method, path, body=None):
+        headers = {'Origin': dashboard, 'Accept': 'application/json'}
+        if method == 'POST':
+            headers.update({'Content-Type': 'application/json', 'X-Fleet-CSRF': csrf})
+        data = None if body is None else json.dumps(body).encode()
+        with opener.open(urllib.request.Request(server + '/dashboard/api' + path, data, headers, method=method), timeout=30) as response:
+            return json.load(response)
+    csrf = call('GET', '/csrf')['token']
+    session = call('POST', '/login', {'name': name, 'password': password})
+    csrf = call('GET', '/csrf')['token']
+    if session['mustChangePassword']:
+        call('POST', '/account/password', {'currentPassword': password, 'newPassword': new_password})
+    return call
+
+accounts = {'ADMIN': ('fleet', secrets.token_urlsafe(24))}
+admin = sign_in('fleet', 'fleet', accounts['ADMIN'][1])
+for key, name, scope in (('READ', 'e2e-reader', 'read'), ('OPERATE', 'e2e-operator', 'operate')):
+    first, final = secrets.token_urlsafe(24), secrets.token_urlsafe(24)
+    admin('POST', '/accounts', {'name': name, 'password': first, 'scope': scope})
+    sign_in(name, first, final)
+    accounts[key] = (name, final)
+fd = os.open(out, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+with os.fdopen(fd, 'w') as f:
+    for key, (name, password) in accounts.items():
+        f.write(f"FLEET_E2E_{key}_NAME={name}\nFLEET_E2E_{key}_PASSWORD={password}\n")
+PY
+
 # ------------------------------------------------------------------ the Rust clients
 log "building the Rust clients"
 CARGO_TARGET_DIR="$cargo_target" cargo build --quiet --manifest-path "$root/clients/Cargo.toml" --bin fleet --bin fleet-agent
@@ -157,7 +199,7 @@ HOOK
 chmod 700 "$hook"
 
 # ------------------------------------------------------------------ the journeys
-# With --keep, the settings are also written to $work/e2e.env (mode 0600, token included) so that single journeys can be run again
+# With --keep, the settings are also written to $work/e2e.env (mode 0600, token and passwords included) so that single journeys can be run again
 # with `. $work/e2e.env; (cd dashboard && npx playwright test -c playwright.real.config.ts ...)`.
 export_settings() {
     set -a; . "$deploy/operator.env"; set +a
@@ -165,6 +207,8 @@ export_settings() {
     export FLEET_E2E_OPERATOR_TOKEN=$FLEET_OPERATOR_TOKEN
     . "$work/scope-tokens.env"
     export FLEET_E2E_READ_TOKEN FLEET_E2E_OPERATE_TOKEN
+    . "$work/accounts.env"
+    export FLEET_E2E_ADMIN_NAME FLEET_E2E_ADMIN_PASSWORD FLEET_E2E_READ_NAME FLEET_E2E_READ_PASSWORD FLEET_E2E_OPERATE_NAME FLEET_E2E_OPERATE_PASSWORD
     export FLEET_E2E_AGENT_ALIAS=$agent_alias FLEET_E2E_IDLE_ALIAS=$idle_alias FLEET_E2E_AGENT_RUN=$hook
     unset FLEET_OPERATOR_TOKEN FLEET_SERVER_URL
 }

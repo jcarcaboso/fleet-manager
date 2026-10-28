@@ -645,20 +645,29 @@ public sealed partial class OperatorApiTests(OperatorApiFixture fixture) : IClas
         // The CSRF and origin checks of the dashboard also explain themselves.
         using var noCsrf = fixture.Factory.CreateClient(new() { BaseAddress = new Uri(OperatorApiFixture.Origin) });
         noCsrf.DefaultRequestHeaders.Add("Origin", "https://evil.example");
-        var origin = await OperatorApiFixture.ReadAsync(await noCsrf.PostAsJsonAsync("/dashboard/api/login", new { token = "x" }), HttpStatusCode.BadRequest);
+        var origin = await OperatorApiFixture.ReadAsync(await noCsrf.PostAsJsonAsync("/dashboard/api/login", new { name = "x", password = "x" }), HttpStatusCode.BadRequest);
         Assert.Equal("invalid_origin", origin["code"]!.GetValue<string>());
         Assert.False(string.IsNullOrWhiteSpace(origin["message"]!.GetValue<string>()));
 
-        // A rejected login explains itself too, for both the short-token and the unknown-token branch.
+        // A rejected login explains itself too, for a wrong password, an unknown name and an invalid name.
         using var login = fixture.Factory.CreateClient(new() { BaseAddress = new Uri(OperatorApiFixture.Origin) });
         login.DefaultRequestHeaders.Add("Origin", OperatorApiFixture.DashboardOrigin);
         await OperatorApiFixture.RefreshCsrfAsync(login);
-        foreach (var token in new[] { "short", new string('z', 40) })
+        foreach (var body in new object[]
         {
-            var rejected = await OperatorApiFixture.ReadAsync(await login.PostAsJsonAsync("/dashboard/api/login", new { token }), HttpStatusCode.Unauthorized);
+            new { name = "operator", password = "wrong-password" }, new { name = "nobody", password = OperatorApiFixture.AccountPassword },
+            new { name = "not a name", password = OperatorApiFixture.AccountPassword }
+        })
+        {
+            var rejected = await OperatorApiFixture.ReadAsync(await login.PostAsJsonAsync("/dashboard/api/login", body), HttpStatusCode.Unauthorized);
             Assert.Equal("unauthorized", rejected["code"]!.GetValue<string>());
             Assert.False(string.IsNullOrWhiteSpace(rejected["message"]!.GetValue<string>()));
         }
+        // The old token body no longer binds to the login request: it is malformed, and still explained.
+        var token = await OperatorApiFixture.ReadAsync(await login.PostAsJsonAsync("/dashboard/api/login", new { token = OperatorApiFixture.AdminToken }),
+            HttpStatusCode.BadRequest);
+        Assert.Equal("invalid_request", token["code"]!.GetValue<string>());
+        Assert.False(string.IsNullOrWhiteSpace(token["message"]!.GetValue<string>()));
 
         // Every code in the examples above that a Server-side route can emit is explained.
         foreach (var code in new[] { "enrollment_link_not_found", "invalid_expiry", "invalid_alias", "invalid_selection", "catalog_unavailable", "unauthorized", "credential_not_found" })

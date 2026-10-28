@@ -9,8 +9,10 @@ import { createAppRouter } from '@/router';
 import { watchMock } from './strict';
 
 /** A token the mock accepts (32 to 1024 characters, not starting with "bad"). */
-export const TOKEN = 'operator-token-0123456789-abcdefghijkl';
-export const BAD_TOKEN = 'bad-token-0123456789-abcdefghijklmnopq';
+/** The mock's signed-in account. Its seeded password check accepts anything that does not start with `bad`. */
+export const NAME = 'joan';
+export const PASSWORD = 'operator-password-0123456789';
+export const BAD_PASSWORD = 'bad-password-0123456789';
 
 export interface TestApp {
   wrapper: VueWrapper;
@@ -93,7 +95,7 @@ export async function mountApp(options: MountOptions = {}): Promise<TestApp> {
       for (let i = 0; i < 2000 && (i < 6 || pending > 0); i++) await flushPromises();
     },
     async signIn() {
-      await ctx.session.login(TOKEN);
+      await ctx.session.login(NAME, PASSWORD);
       await app.settle();
     },
     setScope(scope) {

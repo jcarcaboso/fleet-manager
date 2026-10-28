@@ -1,5 +1,54 @@
-/* Design tokens of the Fleet Manager dashboard (colours, radii, shadows, fonts). Ported verbatim from the Server's dashboard style.css. */
+/* Design tokens of the Fleet Manager dashboard (colours, radii, shadows, fonts). `:root` is the dark theme, the default, so a page
+   paints dark before any script runs; `:root[data-theme="light"]` is the light palette ported verbatim from the Server's dashboard
+   style.css. `src/theme.ts` sets `data-theme`. The `*-rgb` tokens are bare channel lists for `rgba(var(--x-rgb),alpha)`. */
 :root{
+  color-scheme:dark;
+  --canvas:#141413;--surface:#1d1d1b;--surface-2:#222220;
+  --ink:#ecebe6;--ink-2:#c9c5bd;--muted:#a19c93;--faint:#78736b;
+  --line:#2c2b28;--line-2:#3b3a36;--hair:rgba(255,255,255,.08);
+  --accent:#6b9bf5;--accent-ink:#93b6fb;--accent-bg:#1c2942;
+  --good:#3dbb3d;--good-bg:#16301a;--good-ink:#86da86;
+  --warning:#f5b631;--warning-bg:#362a10;--warning-ink:#f2cc75;
+  --serious:#ef8e66;--serious-bg:#3a2219;--serious-ink:#f5ad8e;
+  --critical:#e35b5b;--critical-bg:#3c1c1c;--critical-ink:#f6a0a0;
+  --info:#5b93f0;--info-bg:#1b2840;--info-ink:#93b6fb;
+  --neutral:#8a857c;--neutral-bg:#2a2927;--neutral-ink:#c9c4bb;
+  --series:#6f97e6;--series-hi:#a9c4ff;--track:#2f2e2b;
+  --tint-rgb:255,255,255;--accent-rgb:107,155,245;--info-rgb:91,147,240;--critical-rgb:227,91,91;--good-rgb:61,187,61;--warning-rgb:245,182,49;
+  /* Raised controls: inputs, secondary buttons, chips, the selected segment. */
+  --field:#2a2a27;--field-rgb:42,42,39;
+  /* Text and fills on an --ink background (primary buttons, the selected filter chip, the dirty selection bar). */
+  --on-ink:#161615;--on-ink-rgb:22,22,21;--ink-hover:#d4d1ca;
+  --danger:#c94141;--danger-hover:#b03636;
+  /* Status fills behind white text (the Problems count, the New badge, change markers): at least 4.5:1 against #fff. */
+  --critical-fill:#c23b3b;--info-fill:#2f66d0;--good-fill:#2a7f2a;
+  --topbar:rgba(20,20,19,.84);--scrim:rgba(0,0,0,.6);
+  /* Tooltips, toasts and terminals stay dark in both themes. */
+  --tip-bg:#34332f;--tip-ink:#f3f0ea;--tip-muted:#cfc9bd;--tip-icon:#bdb7ab;--tip-ring:0 0 0 1px rgba(255,255,255,.08);
+  --term-bg:#0d0d0c;--code-bg:#1a1a18;--code-ink:#e2ded6;--code-hl:#40201f;--code-diag:#191917;
+  --skel-a:#232321;--skel-b:#2d2c2a;
+  --dot-pending:#56534d;--dot-neutral:#6f6b64;--glyph-ring:#7c776e;--glyph-pending:#a9a397;
+  --bar-off:#4d4a45;--bar-used:#4a4843;--grid:#2a2927;--axis:#46443f;--crosshair:#8a857c;--switch-off:#4a4843;
+  --good-track:#1f3d23;--warning-track:#4a3814;--critical-track:#4a2323;--neutral-track:#33322f;
+  --serious-soft:#251c18;--serious-line:#4d3024;--critical-soft:#251a1a;--critical-line:#4d2828;
+  --device-shadow:#000;
+  --hero-glow:rgba(255,170,110,.07);
+  --stage:radial-gradient(130% 105% at 50% 112%,#34312c 0%,#282624 46%,#1f1f1d 100%);
+  --stage-failing:radial-gradient(130% 105% at 50% 112%,#432a24 0%,#2e2321 46%,#201e1d 100%);
+  --stage-never:radial-gradient(130% 105% at 50% 112%,#2f2c29 0%,#252422 46%,#1e1e1c 100%);
+  --stage-updating:radial-gradient(130% 105% at 50% 112%,#25303f 0%,#20252d 46%,#1d1e20 100%);
+  --stage-online:radial-gradient(130% 105% at 50% 112%,#22392a 0%,#1f2921 46%,#1c1e1c 100%);
+  --stage-retired:#232321;
+  --r-xl:24px;--r-lg:18px;--r-md:12px;
+  --sh-1:0 1px 2px rgba(0,0,0,.35),0 0 0 1px rgba(255,255,255,.04);
+  --sh-2:0 1px 2px rgba(0,0,0,.3),0 6px 18px -6px rgba(0,0,0,.45),0 22px 40px -26px rgba(0,0,0,.6),0 0 0 1px rgba(255,255,255,.04);
+  --sh-3:0 2px 4px rgba(0,0,0,.35),0 16px 32px -10px rgba(0,0,0,.55),0 36px 64px -32px rgba(0,0,0,.7),0 0 0 1px rgba(255,255,255,.05);
+  --font:system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,"Helvetica Neue",Arial,sans-serif;
+  --mono:ui-monospace,"SF Mono",SFMono-Regular,Menlo,Consolas,"Liberation Mono",monospace;
+  --focus:0 0 0 3px rgba(107,155,245,.5);
+}
+:root[data-theme="light"]{
+  color-scheme:light;
   --canvas:#f6f4ef;--surface:#fff;--surface-2:#fbfaf7;
   --ink:#1d1b18;--ink-2:#4b463f;--muted:#6b655c;--faint:#9a948a;
   --line:#ebe6dc;--line-2:#dcd5c8;--hair:rgba(29,27,24,.08);
@@ -11,11 +60,33 @@
   --info:#3577e6;--info-bg:#e9f1fd;--info-ink:#1f56c3;
   --neutral:#9a958c;--neutral-bg:#f0ede7;--neutral-ink:#55504a;
   --series:#5a83d8;--series-hi:#2a56b8;--track:#e7e2d8;
-  --r-xl:24px;--r-lg:18px;--r-md:12px;
+  --tint-rgb:29,27,24;--accent-rgb:47,106,224;--info-rgb:53,119,230;--critical-rgb:208,59,59;--good-rgb:12,163,12;--warning-rgb:250,178,25;
+  --field:#fff;--field-rgb:255,255,255;
+  --on-ink:#fff;--on-ink-rgb:255,255,255;--ink-hover:#3a362f;
+  --danger:#d03b3b;--danger-hover:#b62f2f;
+  --critical-fill:#d03b3b;--info-fill:#2a63cc;--good-fill:#2a7f2a;
+  --topbar:rgba(246,244,239,.86);--scrim:rgba(29,27,24,.4);
+  --tip-bg:#1f1e1c;--tip-ink:#f3f0ea;--tip-muted:#d2ccc0;--tip-icon:#bdb7ab;--tip-ring:0 0 0 0 transparent;
+  --term-bg:#1f1e1c;--code-bg:#fcfbf8;--code-ink:#2b2925;--code-hl:#fce4e2;--code-diag:#faf8f4;
+  --skel-a:#ebe6dc;--skel-b:#f3efe6;
+  --dot-pending:#cfc8ba;--dot-neutral:#b2ada4;--glyph-ring:#a9a397;--glyph-pending:#6f695f;
+  --bar-off:#b9b1a2;--bar-used:#d6d0c4;--grid:#ece7de;--axis:#cbc4b6;--crosshair:#8e877b;--switch-off:#c9c2b5;
+  --good-track:#d7efd7;--warning-track:#fdeac0;--critical-track:#f5d2d2;--neutral-track:#e9e5de;
+  --serious-soft:#fffaf7;--serious-line:#f2d9cb;--critical-soft:#fffafa;--critical-line:#f0d2d2;
+  --device-shadow:#3b2f1e;
+  --hero-glow:rgba(255,190,130,.20);
+  --stage:radial-gradient(130% 105% at 50% 112%,#e5ddcf 0%,#eee8de 46%,#f8f6f1 100%);
+  --stage-failing:radial-gradient(130% 105% at 50% 112%,#ecd8d1 0%,#f4e8e3 46%,#fbf8f5 100%);
+  --stage-never:radial-gradient(130% 105% at 50% 112%,#e6dfd6 0%,#efebe5 46%,#f8f7f4 100%);
+  --stage-updating:radial-gradient(130% 105% at 50% 112%,#d9e0ea 0%,#e9edf2 46%,#f8f8f7 100%);
+  --stage-online:radial-gradient(130% 105% at 50% 112%,#d6e7d6 0%,#e7f0e5 46%,#f7f9f5 100%);
+  --stage-retired:#efede9;
   --sh-1:0 1px 2px rgba(60,42,12,.06),0 1px 1px rgba(60,42,12,.03);
   --sh-2:0 1px 2px rgba(60,42,12,.05),0 6px 18px -6px rgba(60,42,12,.10),0 22px 40px -26px rgba(60,42,12,.20);
   --sh-3:0 2px 4px rgba(60,42,12,.06),0 16px 32px -10px rgba(60,42,12,.18),0 36px 64px -32px rgba(60,42,12,.30);
-  --font:system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,"Helvetica Neue",Arial,sans-serif;
-  --mono:ui-monospace,"SF Mono",SFMono-Regular,Menlo,Consolas,"Liberation Mono",monospace;
   --focus:0 0 0 3px rgba(47,106,224,.38);
 }
+/* SVG gradient stops and status glyph parts follow the theme through CSS, which overrides their presentation attributes. */
+#gShadow stop{stop-color:var(--device-shadow)}
+.g .g-ring{fill:var(--field);stroke:var(--glyph-ring)}
+.g--pending .g-mark{stroke:var(--glyph-pending)}

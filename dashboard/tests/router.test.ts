@@ -98,7 +98,7 @@ describe('guards', () => {
     const r = app.router.currentRoute.value;
     expect(r.name).toBe('login');
     expect(r.query.redirect).toBe('/deployments?x=1');
-    expect(app.wrapper.find('#operator-token').exists()).toBe(true);
+    expect(app.wrapper.find('#login-password').exists()).toBe(true);
   });
   it('does not add a redirect for the default page', async () => {
     app = await mountApp({ path: '/', mock: { signedOut: true } });

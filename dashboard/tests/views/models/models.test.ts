@@ -407,7 +407,7 @@ describe('Models page: scope (scopeRead)', () => {
     const locked = w().findAll('.is-locked');
     expect(locked.map(b => b.text())).toEqual(expect.arrayContaining(['Refresh models', 'Save selection']));
     expect(locked.every(b => b.attributes('aria-disabled') === 'true' && !!b.attributes('data-tip'))).toBe(true);
-    expect(w().find('.lock-note').text()).toBe('Needs the operate scope. Your token has read access.');
+    expect(w().find('.lock-note').text()).toBe('Needs the operate scope. Your account has read access.');
     expect(box('claude-opus-4-1').attributes('disabled')).toBeDefined();
     expect(sw('Sync Claude models').attributes('disabled')).toBeDefined();
     expect(sw('Skip Claude models for other clients').attributes('disabled')).toBeDefined();
@@ -445,13 +445,13 @@ describe('Models page: loading, errors and aborts', () => {
     await waitFor(() => w().find('.keybar').exists());
   });
 
-  it('a token that cannot read shows "Your token cannot open this"', async () => {
+  it('a token that cannot read shows "Your account cannot open this"', async () => {
     app = await mountApp({ path: '/audit' });
     const real = app.ctx.api.get.bind(app.ctx.api);
     (app.ctx.api as { get: unknown }).get = (path: string, ...rest: unknown[]) =>
       (path === 'cliproxy/status' ? Promise.reject(Object.assign(new Error('Your Operator scope does not allow this action.'), { status: 403, silent: false })) : (real as (p: string, ...r: unknown[]) => Promise<unknown>)(path, ...rest));
     await app.go('/models');
-    expect(w().find('h1').text()).toBe('Your token cannot open this');
+    expect(w().find('h1').text()).toBe('Your account cannot open this');
   });
 
   it('leaving the page aborts the reads in flight', async () => {

@@ -202,13 +202,13 @@ describe('Revision page: no rollout, missing, failing (depNoRollout, depMissing,
     await waitFor(() => w().find('h1.dep-title').exists());
   });
 
-  it('a token that cannot read shows "Your token cannot open this"', async () => {
+  it('a token that cannot read shows "Your account cannot open this"', async () => {
     app = await mountApp({ path: '/audit' });
     const real = app.ctx.api.get.bind(app.ctx.api);
     (app.ctx.api as { get: unknown }).get = (path: string, ...rest: unknown[]) =>
       (path.startsWith('desired-revisions/') ? Promise.reject(Object.assign(new Error('Your Operator scope does not allow this action.'), { status: 403, code: 'insufficient_scope', silent: false })) : (real as (p: string, ...r: unknown[]) => Promise<unknown>)(path, ...rest));
     await app.go('/deployments/' + revs()[0]!.id);
-    expect(w().find('h1').text()).toBe('Your token cannot open this');
+    expect(w().find('h1').text()).toBe('Your account cannot open this');
   });
 
   it('a machine without an Assignment in the rollout is not listed; an empty rollout says so', async () => {

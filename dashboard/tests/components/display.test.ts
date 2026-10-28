@@ -118,7 +118,7 @@ describe('text blocks', () => {
     await w.find('button').trigger('click');
     expect(w.emitted('retry')).toHaveLength(1);
     const forbidden = mount(ErrorState, { props: { error: { message: 'Needs the admin scope.', status: 403 } } });
-    expect(forbidden.find('h1').text()).toBe('Your token cannot open this');
+    expect(forbidden.find('h1').text()).toBe('Your account cannot open this');
     expect(forbidden.find('button').exists()).toBe(false);
     expect(mount(ErrorState, { props: { error: null, retry: false } }).find('p').text()).toBe('Something went wrong.');
     expect(mount(ErrorState, { props: { error: { message: XSS } } }).element.querySelector('img')).toBeNull();
@@ -278,17 +278,17 @@ describe('scope gating', () => {
     expect(locked.attributes('aria-disabled')).toBe('true');
     expect(locked.attributes('disabled')).toBeUndefined();
     expect(locked.attributes('data-need')).toBe('admin');
-    expect(locked.attributes('data-tip')).toBe('Not available|Needs the admin scope. Your token has operate access.');
+    expect(locked.attributes('data-tip')).toBe('Not available|Needs the admin scope. Your account has operate access.');
     await locked.trigger('click');
     expect(onClick).toHaveBeenCalledTimes(1);
     expect(operate.ctx.toasts.items).toHaveLength(1);
-    expect(operate.ctx.toasts.items[0]).toMatchObject({ title: 'Not available', tone: 'warning', text: 'Needs the admin scope. Your token has operate access.' });
+    expect(operate.ctx.toasts.items[0]).toMatchObject({ title: 'Not available', tone: 'warning', text: 'Needs the admin scope. Your account has operate access.' });
     expect(operate.mock.calls.filter(c => c.method !== 'GET')).toHaveLength(0);
     operate.cleanup();
   });
   it('LockNote and ScopeGate follow the scope', async () => {
     const read = await componentHarness({ scope: 'read' });
-    expect(mount(LockNote, { props: { level: 'admin' }, global: read.global }).text()).toBe('Needs the admin scope. Your token has read access.');
+    expect(mount(LockNote, { props: { level: 'admin' }, global: read.global }).text()).toBe('Needs the admin scope. Your account has read access.');
     expect(mount(LockNote, { props: { level: 'read' }, global: read.global }).find('p').exists()).toBe(false);
     const gate = (level: 'read' | 'operate') => mount(ScopeGate, { props: { level }, slots: { default: () => 'allowed', locked: () => 'locked' }, global: read.global });
     expect(gate('read').text()).toBe('allowed');

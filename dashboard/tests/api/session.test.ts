@@ -3,7 +3,7 @@ import { ApiError, createApiClient } from '@/api/client';
 import { createSession } from '@/api/session';
 import { jsonResponse, scriptedFetch } from '../helpers/fetch';
 import { mockApi } from '../helpers/mock';
-import { TOKEN, BAD_TOKEN } from '../helpers/app';
+import { BAD_PASSWORD, NAME, PASSWORD } from '../helpers/app';
 
 describe('restore', () => {
   it('is signed in when GET session succeeds', async () => {
@@ -61,35 +61,36 @@ describe('scope', () => {
     expect(session.can('operate')).toBe(false);
     expect(session.scopeLabel()).toBe('read');
     expect(session.scopeTitle()).toBe('Read');
-    expect(session.denied('admin')).toBe('Needs the admin scope. Your token has read access.');
+    expect(session.denied('admin')).toBe('Needs the admin scope. Your account has read access.');
   });
 });
 
 describe('login and logout', () => {
-  it('posts the token once, reads the session and keeps only actor and scope', async () => {
+  it('posts the name and password once, reads the session and keeps only actor, scope and the password flag', async () => {
     const { mock, session } = mockApi({ signedOut: true, scope: 'read' });
-    const info = await session.login(TOKEN);
-    expect(info).toEqual({ actor: 'joan', scope: 'read' });
-    expect(session.state).toMatchObject({ actor: 'joan', scope: 'read', status: 'signedIn' });
-    expect(Object.keys(session.state).sort()).toEqual(['actor', 'bootError', 'notice', 'scope', 'status']);
+    const info = await session.login(NAME, PASSWORD);
+    expect(info).toEqual({ actor: 'joan', scope: 'read', mustChangePassword: false });
+    expect(session.state).toMatchObject({ actor: 'joan', scope: 'read', status: 'signedIn', mustChangePassword: false });
+    expect(Object.keys(session.state).sort()).toEqual(['actor', 'bootError', 'mustChangePassword', 'notice', 'scope', 'status']);
+    expect(JSON.stringify(session.state)).not.toContain(PASSWORD);
     const logins = mock.calls.filter(c => c.path === 'login');
     expect(logins).toHaveLength(1);
-    expect(logins[0]!.body).toEqual({ token: TOKEN });
+    expect(logins[0]!.body).toEqual({ name: NAME, password: PASSWORD });
     expect(mock.calls.map(c => c.path)).toEqual(['csrf', 'login', 'session']);
   });
-  it('a rejected token is a visible invalid_token error and the session stays signed out', async () => {
+  it('a rejected password is a visible invalid_credentials error and the session stays signed out', async () => {
     const { session } = mockApi({ signedOut: true });
-    const error = await session.login(BAD_TOKEN).then(() => { throw new Error('expected a rejection'); }, (e: ApiError) => e);
-    expect(error).toMatchObject({ status: 401, code: 'invalid_token', message: 'That token was not accepted. Check it and try again.', silent: false });
+    const error = await session.login(NAME, BAD_PASSWORD).then(() => { throw new Error('expected a rejection'); }, (e: ApiError) => e);
+    expect(error).toMatchObject({ status: 401, code: 'invalid_credentials', message: 'That name and password were not accepted. Check them and try again.', silent: false });
     expect(session.signedIn).toBe(false);
   });
-  it('a too short token is also rejected', async () => {
+  it('an unknown account is also rejected', async () => {
     const { session } = mockApi({ signedOut: true });
-    await expect(session.login('short')).rejects.toMatchObject({ code: 'invalid_token' });
+    await expect(session.login('nobody', PASSWORD)).rejects.toMatchObject({ code: 'invalid_credentials' });
   });
   it('says the browser did not send the cookie when GET session is 401 right after a successful login', async () => {
     const { mock, session } = mockApi({ signedOut: true, cookie: false });
-    const error = await session.login(TOKEN).then(() => { throw new Error('expected a rejection'); }, (e: ApiError) => e);
+    const error = await session.login(NAME, PASSWORD).then(() => { throw new Error('expected a rejection'); }, (e: ApiError) => e);
     expect(error).toBeInstanceOf(ApiError);
     expect(error).toMatchObject({ status: 401, code: 'session_cookie_not_sent', silent: false });
     expect(error.message).toBe('Your browser did not send the session cookie. The dashboard and the Server must be on the same site.');
@@ -98,7 +99,7 @@ describe('login and logout', () => {
   });
   it('says the same thing when even the antiforgery cookie is dropped, as on another site', async () => {
     const { mock, session } = mockApi({ signedOut: true, csrfCookie: false });
-    const error = await session.login(TOKEN).then(() => { throw new Error('expected a rejection'); }, (e: ApiError) => e);
+    const error = await session.login(NAME, PASSWORD).then(() => { throw new Error('expected a rejection'); }, (e: ApiError) => e);
     expect(error).toMatchObject({ code: 'session_cookie_not_sent', silent: false });
     expect(error.message).toBe('Your browser did not send the session cookie. The dashboard and the Server must be on the same site.');
     expect(session.signedIn).toBe(false);
@@ -107,7 +108,7 @@ describe('login and logout', () => {
   });
   it('an unreachable Server during login is a network error that names the address', async () => {
     const { session } = mockApi({ signedOut: true, offline: true });
-    await expect(session.login(TOKEN)).rejects.toMatchObject({ code: 'network_error', message: expect.stringContaining('https://mock.fleet.invalid') });
+    await expect(session.login(NAME, PASSWORD)).rejects.toMatchObject({ code: 'network_error', message: expect.stringContaining('https://mock.fleet.invalid') });
   });
   it('logout signs out on the Server, clears the session and leaves a notice for the sign-in page', async () => {
     const { mock, session } = mockApi();
@@ -137,10 +138,37 @@ describe('login and logout', () => {
   });
   it('login needs the CSRF handshake: the token is fetched, then sent', async () => {
     const { mock, session } = mockApi({ signedOut: true });
-    await session.login(TOKEN);
+    await session.login(NAME, PASSWORD);
     /* The token that signed in was fetched while signed out; the Server's token changes with the identity, so the mock's has moved on. */
     expect(mock.calls.slice(0, 2).map(c => `${c.method} ${c.path}`)).toEqual(['GET csrf', 'POST login']);
     expect(mock.calls[1]!.headers['x-fleet-csrf']).toBeTruthy();
     expect(mock.calls[1]!.headers['x-fleet-csrf']).not.toBe(mock.state.csrf);
+  });
+});
+
+describe('password changes', () => {
+  it('an account with a given password signs in flagged, is refused elsewhere, and is free once it changes the password', async () => {
+    const { mock, api, session } = mockApi({ signedOut: true });
+    const info = await session.login('fleet', 'fleet');
+    expect(info).toEqual({ actor: 'fleet', scope: 'admin', mustChangePassword: true });
+    await expect(api.get('nodes')).rejects.toMatchObject({ status: 403, code: 'password_change_required', message: 'Change your password before continuing.' });
+    expect(session.state.mustChangePassword).toBe(true);
+    await expect(session.changePassword('wrong-password', 'a-new-passphrase')).rejects.toMatchObject({ code: 'invalid_current_password' });
+    await expect(session.changePassword('fleet', 'short')).rejects.toMatchObject({ code: 'invalid_password' });
+    const after = await session.changePassword('fleet', 'a-new-passphrase');
+    expect(after).toEqual({ actor: 'fleet', scope: 'admin', mustChangePassword: false });
+    expect(session.state.mustChangePassword).toBe(false);
+    await expect(api.get('nodes')).resolves.toBeTruthy();
+    /* The Server re-issues the cookie, so the client fetched a new CSRF token instead of having a mutation refused once. */
+    await api.post('source/rescan', {});
+    expect(mock.calls.some(c => c.status === 400 && c.path !== 'account/password')).toBe(false);
+    await session.logout();
+    await expect(session.login('fleet', 'fleet')).rejects.toMatchObject({ code: 'invalid_credentials' });
+    await expect(session.login('fleet', 'a-new-passphrase')).resolves.toMatchObject({ mustChangePassword: false });
+  });
+  it('a 403 password_change_required while signed in raises the flag; signed out it is ignored', () => {
+    const { session } = mockApi();
+    session.handlePasswordChangeRequired();
+    expect(session.state.mustChangePassword).toBe(false);
   });
 });

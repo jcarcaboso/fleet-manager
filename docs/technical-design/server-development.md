@@ -149,10 +149,15 @@ and are deleted when the script finishes.
 With the dashboard running as well (the homelab Compose stack, or a dashboard
 container pointed at the local Server), run `python3 scripts/smoke-dashboard.py`
 with `FLEET_SERVER_URL`, `FLEET_OPERATOR_TOKEN`, `FLEET_CA_CERT` and
-`FLEET_DASHBOARD_URL` set. It checks the dashboard's files, headers and
-`config.json`, the Server's redirect from `/dashboard`, CORS for the dashboard
-origin and its rejection for other origins, and an Operator-token sign-in with
-the session cookie and CSRF flow. `scripts/smoke-dashboard-image.sh IMAGE` starts
+`FLEET_DASHBOARD_URL` set, and `FLEET_DASHBOARD_NAME` and
+`FLEET_DASHBOARD_PASSWORD` for a dashboard account (default `fleet` / `fleet`).
+It checks the dashboard's files, headers and `config.json`, the Server's
+redirect from `/dashboard`, CORS for the dashboard origin and its rejection for
+other origins, that an Operator token no longer signs in to the dashboard, and an
+account sign-in with the session cookie and CSRF flow.
+`scripts/smoke-enrollment.py --agent PATH` enrolls a real Agent through the
+dashboard API; it needs the same variables and an operate or admin account whose
+password has already been changed. `scripts/smoke-dashboard-image.sh IMAGE` starts
 a dashboard image read-only with a throwaway certificate and checks its nginx
 behaviour (`make dashboard-image` builds the image and runs it). The dashboard
 itself is developed in `dashboard/` (`npm run dev:mock` needs no Server).

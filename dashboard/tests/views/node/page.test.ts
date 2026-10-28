@@ -64,7 +64,7 @@ describe('loading, errors and not found', () => {
       : (real as (...a: unknown[]) => Promise<unknown>)(path, ...rest)) as typeof t.app.ctx.api.get);
     await t.go('/machines/studio-mini');
     await t.until(() => t!.exists('.empty--error'));
-    expect(t.text('.empty--error h1')).toBe('Your token cannot open this');
+    expect(t.text('.empty--error h1')).toBe('Your account cannot open this');
     expect(t.text('.empty--error')).toContain('does not have the scope');
     expect(t.exists('.empty--error button'), 'no Try again for a 403').toBe(false);
   });

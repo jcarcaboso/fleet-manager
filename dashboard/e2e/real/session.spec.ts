@@ -16,25 +16,26 @@ test.describe('sign in and out against the real Server', () => {
     await expect(page.getByRole('heading', { level: 1 })).toHaveText('Sign in');
   });
 
-  test('a wrong token is refused and sets no session; the right one signs in', async ({ page, context, stack, allow }) => {
+  test('a wrong password is refused and sets no session; the right one signs in', async ({ page, context, stack, allow }) => {
     allow.request(/GET \S+\/dashboard\/api\/session -> 401$/);
     allow.request(/POST \S+\/dashboard\/api\/login -> 401$/);
     allow.console(/Failed to load resource: the server responded with a status of 401/);
     await page.goto('/login');
-    await page.getByLabel('Operator token').fill('wrong-token-'.padEnd(48, 'x'));
+    await page.getByLabel('Name', { exact: true }).fill(stack.admin.name);
+    await page.getByLabel('Password', { exact: true }).fill('wrong-password-'.padEnd(24, 'x'));
     await page.getByRole('button', { name: 'Sign in' }).click();
     await expect(page.locator('#login-msg')).toHaveClass(/is-err/);
     await expect(page.locator('#login-msg')).not.toHaveText('');
     await expect(page).toHaveURL(url => url.pathname === '/login');
     expect((await context.cookies(stack.server)).map(cookie => cookie.name)).not.toContain('__Host-Fleet-Session');
 
-    await page.getByLabel('Operator token').fill(stack.token);
+    await page.getByLabel('Password', { exact: true }).fill(stack.admin.password);
     await page.getByRole('button', { name: 'Sign in' }).click();
     await expect(page).toHaveURL(url => url.pathname === '/machines');
     expect((await context.cookies(stack.server)).map(cookie => cookie.name)).toContain('__Host-Fleet-Session');
   });
 
-  test('the session cookie is HttpOnly, Secure, SameSite=Strict and host-only; the token is stored nowhere', async ({ page, context, stack, allow }) => {
+  test('the session cookie is HttpOnly, Secure, SameSite=Strict and host-only; the password is stored nowhere', async ({ page, context, stack, allow }) => {
     const sent: string[] = [];
     page.on('request', request => { sent.push(`${request.method()} ${request.url()} ${request.postData() ?? ''} ${JSON.stringify(request.headers())}`); });
     await signIn(page, stack, allow);
@@ -42,22 +43,24 @@ test.describe('sign in and out against the real Server', () => {
     const session = (await context.cookies(stack.server)).find(cookie => cookie.name === '__Host-Fleet-Session');
     expect(session).toMatchObject({ httpOnly: true, secure: true, sameSite: 'Strict', path: '/' });
     expect(session?.domain.startsWith('.'), 'a __Host- cookie has no Domain attribute').toBe(false);
-    expect(session?.value).not.toBe(stack.token);
+    expect(session?.value).not.toContain(stack.admin.password);
     const cookies = await context.cookies(stack.server);
     for (const cookie of cookies) expect(cookie.secure, `${cookie.name} is Secure`).toBe(true);
 
-    // The page cannot read the session, and holds nothing of the token anywhere it could be recovered from.
+    // The page cannot read the session, and holds nothing of the password anywhere it could be recovered from. The theme preference
+    // is the only thing in localStorage.
     const inPage = await page.evaluate(() => ({
       cookie: document.cookie, local: JSON.stringify({ ...localStorage }), session: JSON.stringify({ ...sessionStorage }),
       href: location.href, html: document.documentElement.outerHTML, history: JSON.stringify(history.state),
     }));
     expect(inPage.cookie).toBe('');
-    expect(inPage.local + inPage.session).toBe('{}{}');
-    for (const [where, text] of Object.entries(inPage)) expect(text.includes(stack.token), `the token is in the page's ${where}`).toBe(false);
-    expect(JSON.stringify(await context.storageState()).includes(stack.token), 'the token is in the browser storage state').toBe(false);
+    expect(Object.keys(JSON.parse(inPage.local) as object).filter(key => key !== 'fleet-theme')).toEqual([]);
+    expect(inPage.session).toBe('{}');
+    for (const [where, text] of Object.entries(inPage)) expect(text.includes(stack.admin.password), `the password is in the page's ${where}`).toBe(false);
+    expect(JSON.stringify(await context.storageState()).includes(stack.admin.password), 'the password is in the browser storage state').toBe(false);
 
-    // On the wire the token travels once, in the body of the sign-in request, never in a URL or a header.
-    const carrying = sent.filter(line => line.includes(stack.token));
+    // On the wire the password travels once, in the body of the sign-in request, never in a URL or a header.
+    const carrying = sent.filter(line => line.includes(stack.admin.password));
     expect(carrying).toHaveLength(1);
     expect(carrying[0]).toMatch(/^POST \S+\/dashboard\/api\/login /);
   });
