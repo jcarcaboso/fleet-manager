@@ -27,8 +27,9 @@ pub const CURRENT: &str = "current";
 pub const EXECUTABLE: &str = "fleet-agent";
 /// The version of this executable.
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
-/// Largest executable accepted; release binaries are about a tenth of it.
-const MAX_EXECUTABLE_BYTES: u64 = 64 * 1024 * 1024;
+/// Largest executable copied. Only a sanity bound on this machine's own
+/// executable: debug builds exceed 100 MiB, release builds are far smaller.
+const MAX_EXECUTABLE_BYTES: u64 = 512 * 1024 * 1024;
 
 /// The executable a service definition runs: `<state-dir>/current/fleet-agent`.
 pub fn current_executable(state_dir: &Path) -> PathBuf {
@@ -78,7 +79,7 @@ fn digest(path: &Path) -> Result<[u8; 32]> {
         hasher.update(&buffer[..read]);
     }
     if total > MAX_EXECUTABLE_BYTES {
-        bail!("{} is larger than 64 MiB", path.display());
+        bail!("{} is larger than 512 MiB", path.display());
     }
     Ok(hasher.finalize().into())
 }
