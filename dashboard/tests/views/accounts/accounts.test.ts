@@ -75,9 +75,14 @@ describe('Your account', () => {
     await app.go('/audit');
     expect(app.router.currentRoute.value.name).toBe('account');
     expect(app.router.currentRoute.value.query.redirect).toBe('/audit');
+    /* The navigation badges wait too: their routes would only answer 403 password_change_required. */
+    const badgeReads = () => app!.mock.calls.filter(c => c.method === 'GET' && (c.path === 'issues' || c.path === 'cliproxy/status'));
+    expect(badgeReads()).toHaveLength(0);
+    expect(app.mock.calls.some(c => c.status === 403)).toBe(false);
     await changePassword('old-password', 'a-new-passphrase');
     await waitFor(() => app!.router.currentRoute.value.name === 'audit');
     expect(w().find('#nav').exists()).toBe(true);
+    await waitFor(() => badgeReads().length === 2);
   });
 
   it('a 403 password_change_required on an open page sends the visitor to the password page', async () => {
