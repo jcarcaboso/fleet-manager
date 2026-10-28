@@ -24,11 +24,11 @@ run_hardened() {
         --tmpfs /tmp:rw,noexec,nosuid,nodev,size=16m,mode=1777 -v "$volume":/run/dashboard-tls:ro "$@"
 }
 
-openssl req -x509 -newkey ec -pkeyopt ec_paramgen_curve:P-256 -nodes -keyout "$work/ca.key" -out "$work/ca.pem" \
-    -days 2 -subj '/CN=Fleet dashboard smoke CA' -addext basicConstraints=critical,CA:TRUE -addext keyUsage=critical,keyCertSign >/dev/null 2>&1
-openssl req -new -newkey ec -pkeyopt ec_paramgen_curve:P-256 -nodes -keyout "$work/dashboard.key" -out "$work/dashboard.csr" -subj /CN=localhost >/dev/null 2>&1
-printf 'basicConstraints=critical,CA:FALSE\nkeyUsage=critical,digitalSignature\nextendedKeyUsage=serverAuth\nsubjectAltName=DNS:localhost,IP:127.0.0.1\n' >"$work/dashboard.ext"
-openssl x509 -req -in "$work/dashboard.csr" -CA "$work/ca.pem" -CAkey "$work/ca.key" -CAcreateserial -out "$work/dashboard.pem" -days 2 -extfile "$work/dashboard.ext" >/dev/null 2>&1
+openssl req -x509 -sha256 -newkey ec -pkeyopt ec_paramgen_curve:P-256 -pkeyopt ec_param_enc:named_curve -nodes -keyout "$work/ca.key" -out "$work/ca.pem" \
+    -days 2 -subj '/CN=Fleet dashboard smoke CA' -addext basicConstraints=critical,CA:TRUE -addext keyUsage=critical,keyCertSign -addext subjectKeyIdentifier=hash >/dev/null 2>&1
+openssl req -new -newkey ec -pkeyopt ec_paramgen_curve:P-256 -pkeyopt ec_param_enc:named_curve -nodes -keyout "$work/dashboard.key" -out "$work/dashboard.csr" -subj /CN=localhost >/dev/null 2>&1
+printf 'basicConstraints=critical,CA:FALSE\nkeyUsage=critical,digitalSignature\nextendedKeyUsage=serverAuth\nsubjectKeyIdentifier=hash\nauthorityKeyIdentifier=keyid,issuer\nsubjectAltName=DNS:localhost,IP:127.0.0.1\n' >"$work/dashboard.ext"
+openssl x509 -req -sha256 -in "$work/dashboard.csr" -CA "$work/ca.pem" -CAkey "$work/ca.key" -CAcreateserial -out "$work/dashboard.pem" -days 2 -extfile "$work/dashboard.ext" >/dev/null 2>&1
 docker volume create "$volume" >/dev/null
 # Install the files as the configure service does: only these three, owned by 1655 with mode 0600 (directory 0700).
 docker run --rm --user 0:0 --entrypoint sh -v "$volume":/dashboard-tls -v "$work":/in:ro "$image" -ec \

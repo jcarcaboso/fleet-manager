@@ -40,7 +40,7 @@ with tempfile.TemporaryDirectory(prefix='fleet-tls-smoke-') as directory:
     csr = directory / 'node.csr'
     certificate = directory / 'node.pem'
     subprocess.run([
-        'openssl', 'req', '-new', '-newkey', 'ec', '-pkeyopt', 'ec_paramgen_curve:P-256',
+        'openssl', 'req', '-new', '-newkey', 'ec', '-pkeyopt', 'ec_paramgen_curve:P-256', '-pkeyopt', 'ec_param_enc:named_curve',
         '-nodes', '-keyout', str(key), '-out', str(csr), '-subj', '/CN=untrusted-request-subject',
     ], check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     key.chmod(0o600)

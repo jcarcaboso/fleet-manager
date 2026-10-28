@@ -106,7 +106,7 @@ with tempfile.TemporaryDirectory(prefix='fleet-enrollment-smoke-') as directory:
     # A validly formatted CA from another issuer must fail real TLS verification.
     key = root / 'wrong.key'
     certificate = root / 'wrong.pem'
-    subprocess.run(['openssl', 'req', '-x509', '-newkey', 'ec', '-pkeyopt', 'ec_paramgen_curve:P-256',
+    subprocess.run(['openssl', 'req', '-x509', '-sha256', '-newkey', 'ec', '-pkeyopt', 'ec_paramgen_curve:P-256', '-pkeyopt', 'ec_param_enc:named_curve',
                     '-nodes', '-keyout', str(key), '-out', str(certificate), '-days', '1',
                     '-subj', '/CN=Wrong test CA', '-addext', 'basicConstraints=critical,CA:TRUE'],
                    check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
