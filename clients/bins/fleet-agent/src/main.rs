@@ -6,6 +6,7 @@ mod disk;
 mod drift;
 mod inspect;
 mod protocol;
+mod repair;
 mod service;
 mod state;
 mod telemetry;
@@ -271,7 +272,9 @@ async fn main() -> Result<()> {
             let mut telemetry_worker = telemetry::worker(directory.clone(), config.home.clone());
             let mut telemetry_report: Option<TelemetryTask> = None;
             let mut drift_report: Option<drift::Task> = None;
+            let mut repairs = repair::Tracker::default();
             loop {
+                service::trim_log(&directory);
                 let mut drifted = Vec::new();
                 let result = cycle(
                     &config,
@@ -284,6 +287,7 @@ async fn main() -> Result<()> {
                     &mut disk_schedule,
                     &mut telemetry_schedule,
                     &mut drifted,
+                    &mut repairs,
                 )
                 .await;
                 // After the cycle, so the report and reconciliation never wait for it.
@@ -305,6 +309,7 @@ async fn main() -> Result<()> {
                 )
                 .await;
                 send_drift(&config, &identity, drifted, &mut drift_report);
+                send_repair_failures(&config, &identity, &mut repairs).await;
                 let outcome = match result {
                     Ok(outcome) => outcome,
                     Err(error) if once => return Err(error),
@@ -340,6 +345,19 @@ async fn main() -> Result<()> {
             }
             if once && let Some(report) = drift_report {
                 let _ = report.await;
+            }
+            if once {
+                repairs.finish().await;
+                if let Some(report) = repairs.report()
+                    && !report.failures.is_empty()
+                {
+                    let targets = report
+                        .failures
+                        .iter()
+                        .map(|failure| failure.target.as_str())
+                        .collect::<Vec<_>>();
+                    bail!("could not repair {}", targets.join(", "));
+                }
             }
         }
         Command::Status
@@ -735,6 +753,29 @@ fn send_drift(
     });
 }
 
+/// Sends the current idle repair failures when they changed. Best effort
+/// like drift: nothing here can fail or delay a cycle.
+async fn send_repair_failures(
+    config: &state::Config,
+    identity: &StoredIdentity,
+    repairs: &mut repair::Tracker,
+) {
+    repairs
+        .step(|report| {
+            let client = api(config, identity);
+            async move {
+                match client {
+                    Ok(client) => repair::deliver(&client, &report).await,
+                    Err(error) => {
+                        eprintln!("could not send repair failures: {error}");
+                        repair::Delivery::Retry
+                    }
+                }
+            }
+        })
+        .await;
+}
+
 async fn deliver_disk_usage(client: &Api, report: &DiskUsageReport) {
     if let Err(error) = client.disk_usage(report).await {
         eprintln!("could not send disk usage; will retry later: {error}");
@@ -753,6 +794,7 @@ async fn cycle(
     disk_schedule: &mut disk::Schedule,
     telemetry_schedule: &mut telemetry::Schedule,
     drifted: &mut Vec<drift::Report>,
+    repairs: &mut repair::Tracker,
 ) -> Result<CycleOutcome> {
     migrate_run_state(run);
     for assignment in run
@@ -832,6 +874,7 @@ async fn cycle(
             bail!("Server did not acknowledge applying state");
         }
         let outcome = actions.apply(&client, &assignment).await;
+        repairs.applied(&assignment.target_name);
         let attempt_id = assignment.attempt_id;
         let error_code = outcome.as_ref().err().map(|error| error.code().to_owned());
         if let Ok(repaired) = &outcome {
@@ -879,19 +922,77 @@ async fn cycle(
             .values()
             .filter_map(|target| target.active.clone())
             .collect::<Vec<_>>();
-        for assignment in active {
-            actions.prepare(&client, &assignment).await?;
-            let repaired = actions
-                .apply(&client, &assignment)
-                .await
-                .map_err(anyhow::Error::new)?;
-            drifted.extend(drift::Report::new(&assignment.target_name, repaired));
-        }
+        let redactor = detail::Redactor::new(&detail::home_prefixes(&config.home), directory);
+        repairs.idle_cycle(repair_active(actions, &client, &active, &redactor, drifted).await);
     }
     Ok(CycleOutcome {
         next_poll_seconds: delay,
         progressed,
     })
+}
+
+/// Applies every active Assignment again to repair changes made outside
+/// Fleet. A failing Target never stops the others: each failure is logged and
+/// returned for the Server (see [`repair`]).
+async fn repair_active<A: Actions>(
+    actions: &A,
+    client: &Api,
+    active: &[Assignment],
+    redactor: &detail::Redactor,
+    drifted: &mut Vec<drift::Report>,
+) -> BTreeMap<String, repair::Failure> {
+    let mut failures = BTreeMap::new();
+    for assignment in active {
+        let outcome = match actions.prepare(client, assignment).await {
+            Ok(()) => actions.apply(client, assignment).await,
+            Err(error) => Err(actions::ActionError::prepare(error)),
+        };
+        match outcome {
+            Ok(repaired) => drifted.extend(drift::Report::new(&assignment.target_name, repaired)),
+            Err(error) => {
+                eprintln!(
+                    "could not repair {}: {}",
+                    assignment.target_name,
+                    actions::describe(&error)
+                );
+                failures.insert(
+                    assignment.target_name.clone(),
+                    repair::Failure::new(
+                        &assignment.target_name,
+                        assignment.assignment_id,
+                        &error,
+                        redactor,
+                    ),
+                );
+            }
+        }
+    }
+    failures
+}
+
+/// What [`repair_active`] needs from [`actions::Registry`], so tests can fail
+/// one Target on purpose.
+trait Actions {
+    async fn prepare(&self, api: &Api, assignment: &Assignment) -> Result<()>;
+    async fn apply(
+        &self,
+        api: &Api,
+        assignment: &Assignment,
+    ) -> std::result::Result<Vec<String>, actions::ActionError>;
+}
+
+impl Actions for actions::Registry<'_> {
+    async fn prepare(&self, api: &Api, assignment: &Assignment) -> Result<()> {
+        actions::Registry::prepare(self, api, assignment).await
+    }
+
+    async fn apply(
+        &self,
+        api: &Api,
+        assignment: &Assignment,
+    ) -> std::result::Result<Vec<String>, actions::ActionError> {
+        actions::Registry::apply(self, api, assignment).await
+    }
 }
 
 #[cfg(test)]
@@ -1552,5 +1653,98 @@ mod tests {
                 .iter()
                 .all(|r| r.method == "PUT" && r.path == "/agent/v1/telemetry")
         );
+    }
+
+    struct FailingActions {
+        calls: std::sync::Mutex<Vec<String>>,
+    }
+
+    impl Actions for FailingActions {
+        async fn prepare(&self, _api: &Api, assignment: &Assignment) -> Result<()> {
+            if assignment.target_name == "agent-file/codex" {
+                bail!("download failed");
+            }
+            Ok(())
+        }
+
+        async fn apply(
+            &self,
+            _api: &Api,
+            assignment: &Assignment,
+        ) -> std::result::Result<Vec<String>, actions::ActionError> {
+            self.calls
+                .lock()
+                .unwrap()
+                .push(assignment.target_name.clone());
+            match assignment.target_name.as_str() {
+                "ai-client/codex" => Err(actions::ActionError::test_error(
+                    "ai_client_reconcile_failed",
+                    anyhow::anyhow!("Codex config is not UTF-8"),
+                )),
+                "skills" => Ok(vec![".agents/skills/a/SKILL.md".to_owned()]),
+                _ => Ok(Vec::new()),
+            }
+        }
+    }
+
+    fn idle_assignment(target_name: &str) -> Assignment {
+        serde_json::from_value(serde_json::json!({
+            "assignmentId": Uuid::new_v4(), "attemptId": Uuid::new_v4(),
+            "rolloutId": Uuid::new_v4(), "desiredRevisionId": Uuid::new_v4(),
+            "targetName": target_name, "target": {"base": "home", "path": ".x"}, "skills": []
+        }))
+        .unwrap()
+    }
+
+    #[tokio::test]
+    async fn idle_repair_continues_past_failing_targets_and_reports_them() {
+        // BTreeMap order: the failing ai-client Target comes first, as on the Node.
+        let active = [
+            "agent-file/codex",
+            "ai-client/codex",
+            "ai-client/opencode",
+            "skills",
+        ]
+        .map(idle_assignment);
+        let actions = FailingActions {
+            calls: Default::default(),
+        };
+        let mut drifted = Vec::new();
+        let redactor = detail::Redactor::new(&[PathBuf::from("/home/me")], Path::new("/state"));
+        let failures = repair_active(
+            &actions,
+            &Api::for_loopback_test("http://127.0.0.1:9/"),
+            &active,
+            &redactor,
+            &mut drifted,
+        )
+        .await;
+        assert_eq!(
+            *actions.calls.lock().unwrap(),
+            ["ai-client/codex", "ai-client/opencode", "skills"]
+        );
+        assert_eq!(
+            failures.keys().collect::<Vec<_>>(),
+            ["agent-file/codex", "ai-client/codex"]
+        );
+        let codex = &failures["ai-client/codex"];
+        assert_eq!(codex.assignment_id, active[1].assignment_id);
+        assert_eq!(codex.error_code, "ai_client_reconcile_failed");
+        assert_eq!(codex.diagnostic, "Codex config is not UTF-8");
+        assert_eq!(
+            failures["agent-file/codex"].error_code,
+            "bundle_download_failed"
+        );
+        assert_eq!(
+            failures["agent-file/codex"].step,
+            Some(fleet_reconcile::Step::Download)
+        );
+        assert_eq!(drifted.len(), 1);
+        assert_eq!(drifted[0].target, "skills");
+
+        let mut tracker = repair::Tracker::default();
+        tracker.idle_cycle(failures);
+        let report = tracker.report().unwrap();
+        assert_eq!(report.failures.len(), 2);
     }
 }

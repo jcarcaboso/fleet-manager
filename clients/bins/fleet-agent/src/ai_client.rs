@@ -117,6 +117,29 @@ struct Receipt {
     original_settings: BTreeMap<String, Option<serde_json::Value>>,
 }
 
+impl Receipt {
+    /// A receipt for Fleet settings found without one. The adapters fill in
+    /// the original settings; the expected ones are unknown and unused.
+    fn orphan(client: &str) -> Self {
+        Self {
+            version: 1,
+            client: client.to_owned(),
+            config_existed: true,
+            original_model: None,
+            original_provider: None,
+            original_catalog: None,
+            expected_model: String::new(),
+            automatic_model: true,
+            expected_base_url: String::new(),
+            expected_key_path: String::new(),
+            expected_catalog_path: None,
+            expected_models: Vec::new(),
+            expected_reasoning_levels: BTreeMap::new(),
+            original_settings: BTreeMap::new(),
+        }
+    }
+}
+
 #[derive(Deserialize, Serialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct Journal {
@@ -154,11 +177,14 @@ impl Reconciler {
         remove_state_file(&journal_path)
     }
 
+    /// Applies the assignment. Returns the config file, relative to the home
+    /// directory, when Fleet-owned settings in it had been changed outside
+    /// Fleet and were repaired.
     pub async fn reconcile(
         &self,
         api: &Api,
         assignment: &AiClientAssignment,
-    ) -> std::result::Result<(), ReconcileFailure> {
+    ) -> std::result::Result<Option<PathBuf>, ReconcileFailure> {
         let config_path = self.relative_config_path(&assignment.client);
         let configure = |error| ReconcileFailure::new(error, Step::Configure, config_path.clone());
         self.validate_assignment(assignment)
@@ -166,7 +192,10 @@ impl Reconciler {
         self.recover(&assignment.client)
             .map_err(|error| ReconcileFailure::new(error, Step::Recover, config_path.clone()))?;
         match assignment.mode.as_str() {
-            "native" => self.restore_native(&assignment.client).map_err(configure),
+            "native" => self
+                .restore_native(&assignment.client)
+                .map(|()| None)
+                .map_err(configure),
             "cliproxy" => {
                 let base_url = assignment
                     .base_url
@@ -177,8 +206,10 @@ impl Reconciler {
                 let fetch = |error| ReconcileFailure::new(error, Step::Download, None);
                 self.credential(api).await.map_err(fetch)?;
                 let models = self.models(api, base_url, model).await.map_err(fetch)?;
-                self.apply_proxy(&assignment.client, base_url, model, &models)
-                    .map_err(configure)
+                let drifted = self
+                    .apply_proxy(&assignment.client, base_url, model, &models)
+                    .map_err(configure)?;
+                Ok(config_path.clone().filter(|_| drifted))
             }
             _ => Err(ReconcileFailure::new(
                 anyhow::anyhow!("unsupported AI client mode"),
@@ -264,18 +295,28 @@ impl Reconciler {
         }
     }
 
+    /// Writes the Fleet settings. The Server assignment wins: Fleet-owned
+    /// settings changed or removed outside Fleet, or a deleted config file,
+    /// are repaired, and the original settings in the receipt are kept.
+    /// Returns whether such a repair happened.
+    ///
+    /// Without a receipt (for example after the state directory was wiped and
+    /// the Node enrolled again), Fleet takes over a `fleet-cliproxy` provider
+    /// it finds, but never records Fleet's own leftover values as the
+    /// originals: native mode then removes them instead of restoring them.
     fn apply_proxy(
         &self,
         client: &str,
         base_url: &str,
         model: Option<&str>,
         models: &[String],
-    ) -> Result<()> {
+    ) -> Result<bool> {
         let adapter = Adapter::find(client)?;
         let path = adapter.config_path(self);
+        adapter.check_managed_file(self, &path)?;
         let old = read_optional_config(&path)?;
         let previous = state::read_json::<Receipt>(&self.receipt_path(client)?)?;
-        let (new, receipt) = adapter.apply_proxy(
+        let rendered = adapter.apply_proxy(
             self,
             old.as_deref(),
             previous.as_ref(),
@@ -283,26 +324,56 @@ impl Reconciler {
             model,
             models,
         )?;
-        self.commit(client, &path, old.as_deref(), Some(&new), Some(receipt))
+        let drifted = rendered.drifted && old.as_deref() != Some(rendered.bytes.as_slice());
+        self.commit(
+            client,
+            &path,
+            old.as_deref(),
+            Some(&rendered.bytes),
+            Some(rendered.receipt),
+        )?;
+        Ok(drifted)
     }
 
+    /// Restores the original settings and removes whatever is left of the
+    /// Fleet ones, even when they were changed or removed outside Fleet or the
+    /// file is gone. Without a receipt, Fleet settings found in the file are
+    /// removed and everything else is kept.
     fn restore_native(&self, client: &str) -> Result<()> {
         let adapter = Adapter::find(client)?;
-        let Some(receipt) = state::read_json::<Receipt>(&self.receipt_path(client)?)? else {
-            adapter.remove_auxiliary_state(self)?;
-            return Ok(());
-        };
         let path = adapter.config_path(self);
+        let receipt = match state::read_json::<Receipt>(&self.receipt_path(client)?)? {
+            Some(receipt) => receipt,
+            // Native mode never required a readable config. If it cannot be
+            // read safely (a link, a parse error), Fleet cannot have left
+            // settings there it could remove, so this stays a no-op.
+            None => match self.orphan_receipt(adapter, &path).ok().flatten() {
+                Some(receipt) => receipt,
+                None => {
+                    adapter.remove_auxiliary_state(self)?;
+                    return Ok(());
+                }
+            },
+        };
+        adapter.check_managed_file(self, &path)?;
         let old = read_optional_config(&path)?;
         let restored = adapter.restore(old.as_deref(), &receipt)?;
-        let new = if !receipt.config_existed && adapter.config_is_empty(&restored)? {
-            None
-        } else {
-            Some(restored.as_slice())
-        };
+        // A file that did not exist, or that was deleted since, is not
+        // created again just to hold nothing.
+        let new =
+            if (!receipt.config_existed || old.is_none()) && adapter.config_is_empty(&restored)? {
+                None
+            } else {
+                Some(restored.as_slice())
+            };
         self.commit(client, &path, old.as_deref(), new, None)?;
         adapter.remove_auxiliary_state(self)?;
         Ok(())
+    }
+
+    fn orphan_receipt(&self, adapter: Adapter, path: &Path) -> Result<Option<Receipt>> {
+        adapter.check_managed_file(self, path)?;
+        adapter.orphan_receipt(self, read_optional_config(path)?.as_deref())
     }
 
     fn commit(
@@ -1236,7 +1307,11 @@ mod tests {
 }
 "#;
         let models = vec!["gpt-6-astra".to_owned(), "gpt-5.6-sol".to_owned()];
-        let (applied, receipt) = adapters::opencode::render_opencode(
+        let adapters::Rendered {
+            bytes: applied,
+            receipt,
+            ..
+        } = adapters::opencode::render_opencode(
             Some(original),
             None,
             "https://proxy.example/v1",
@@ -1246,7 +1321,7 @@ mod tests {
             &BTreeMap::new(),
         )
         .unwrap();
-        let (restarted, _) = adapters::opencode::render_opencode(
+        let restarted = adapters::opencode::render_opencode(
             Some(&applied),
             Some(&receipt),
             "https://proxy.example/v1",
@@ -1256,7 +1331,8 @@ mod tests {
             &BTreeMap::new(),
         )
         .unwrap();
-        assert_eq!(applied, restarted);
+        assert!(!restarted.drifted);
+        assert_eq!(applied, restarted.bytes);
         let restored = String::from_utf8(
             adapters::opencode::restore_opencode(Some(&applied), &receipt).unwrap(),
         )
@@ -1270,7 +1346,7 @@ mod tests {
     }
 
     #[test]
-    fn disk_transaction_rejects_drift_and_never_touches_oauth_files() {
+    fn disk_transaction_repairs_drift_and_never_touches_oauth_files() {
         let root = temp_root();
         let reconciler = disk_reconciler(&root);
         let auth = reconciler.home.join(".codex/auth.json");
@@ -1308,10 +1384,316 @@ mod tests {
                     Some("gpt-6-astra"),
                     &["gpt-6-astra".to_owned()],
                 )
-                .is_err()
+                .unwrap()
         );
+        assert_eq!(fs::read_to_string(&config_path).unwrap(), config);
         assert_eq!(fs::read(&auth).unwrap(), b"oauth-secret");
         fs::remove_dir_all(root).unwrap();
+    }
+
+    const PROXY: &str = "https://proxy.example/v1";
+
+    fn codex_models() -> Vec<String> {
+        vec!["gpt-6-astra".to_owned(), "gpt-6-mini".to_owned()]
+    }
+
+    const NATIVE_CODEX: &str = "# keep me\napproval_policy = \"never\"\nmodel = \"native-model\"\nmodel_provider = \"native-provider\"\nmodel_catalog_json = \"/native/catalog.json\"\n\n[model_providers.native-provider]\nname = \"Native\"\n";
+
+    /// A Codex config with Fleet's settings applied over [`NATIVE_CODEX`].
+    fn codex_on_proxy() -> (PathBuf, Reconciler, PathBuf) {
+        let root = temp_root();
+        let reconciler = disk_reconciler(&root);
+        fs::create_dir(reconciler.home.join(".codex")).unwrap();
+        let path = reconciler.config_path("codex").unwrap();
+        fs::write(&path, NATIVE_CODEX).unwrap();
+        reconciler
+            .apply_proxy("codex", PROXY, Some("gpt-6-astra"), &codex_models())
+            .unwrap();
+        (root, reconciler, path)
+    }
+
+    fn assert_native_codex(path: &Path) {
+        let restored = fs::read_to_string(path).unwrap();
+        assert!(restored.contains("# keep me"), "{restored}");
+        assert!(
+            restored.contains("approval_policy = \"never\""),
+            "{restored}"
+        );
+        assert!(restored.contains("model = \"native-model\""), "{restored}");
+        assert!(
+            restored.contains("model_provider = \"native-provider\""),
+            "{restored}"
+        );
+        assert!(
+            restored.contains("model_catalog_json = \"/native/catalog.json\""),
+            "{restored}"
+        );
+        assert!(
+            restored.contains("[model_providers.native-provider]"),
+            "{restored}"
+        );
+        assert!(!restored.contains(PROVIDER_NAME), "{restored}");
+    }
+
+    fn codex_receipt(reconciler: &Reconciler) -> Receipt {
+        state::read_json::<Receipt>(&reconciler.receipt_path("codex").unwrap())
+            .unwrap()
+            .unwrap()
+    }
+
+    /// The node's case: on Oct 16 something outside Fleet selected the
+    /// `openai` provider and removed Fleet's provider table.
+    fn switch_codex_to_openai(path: &Path) {
+        let mut document = adapters_test_document(path);
+        document["model_provider"] = toml_edit::value("openai");
+        document["model_providers"]
+            .as_table_mut()
+            .unwrap()
+            .remove(PROVIDER_NAME);
+        fs::write(path, document.to_string()).unwrap();
+    }
+
+    fn adapters_test_document(path: &Path) -> toml_edit::DocumentMut {
+        fs::read_to_string(path).unwrap().parse().unwrap()
+    }
+
+    #[test]
+    fn codex_external_model_change_is_repaired_and_native_restores_originals() {
+        let (root, reconciler, path) = codex_on_proxy();
+        let applied = fs::read_to_string(&path).unwrap();
+        let original = codex_receipt(&reconciler);
+        // Codex's own /model command writes `model`.
+        fs::write(
+            &path,
+            applied.replace("model = \"gpt-6-astra\"", "model = \"gpt-6-mini\""),
+        )
+        .unwrap();
+        assert!(
+            reconciler
+                .apply_proxy("codex", PROXY, Some("gpt-6-astra"), &codex_models())
+                .unwrap()
+        );
+        assert_eq!(fs::read_to_string(&path).unwrap(), applied);
+        let receipt = codex_receipt(&reconciler);
+        assert_eq!(receipt.original_model.as_deref(), Some("native-model"));
+        assert_eq!(receipt.original_provider, original.original_provider);
+        assert_eq!(receipt.original_catalog, original.original_catalog);
+        reconciler.restore_native("codex").unwrap();
+        assert_native_codex(&path);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn codex_provider_removed_outside_fleet_recovers_for_every_assignment() {
+        type Step = fn(&Reconciler) -> Result<bool>;
+        let steps: [(&str, Step); 4] = [
+            ("same settings", |r| {
+                r.apply_proxy("codex", PROXY, Some("gpt-6-astra"), &codex_models())
+            }),
+            ("new model", |r| {
+                r.apply_proxy("codex", PROXY, Some("gpt-6-mini"), &codex_models())
+            }),
+            ("automatic model", |r| {
+                r.apply_proxy("codex", PROXY, None, &codex_models())
+            }),
+            ("native", |r| r.restore_native("codex").map(|()| true)),
+        ];
+        for (name, step) in steps {
+            let (root, reconciler, path) = codex_on_proxy();
+            switch_codex_to_openai(&path);
+            assert!(step(&reconciler).unwrap(), "{name}");
+            if name == "native" {
+                assert_native_codex(&path);
+                assert!(!reconciler.receipt_path("codex").unwrap().exists());
+            } else {
+                let document = adapters_test_document(&path);
+                assert_eq!(document["model_provider"].as_str(), Some(PROVIDER_NAME));
+                assert!(document["model_providers"][PROVIDER_NAME].is_table());
+                assert!(document["model_providers"]["native-provider"].is_table());
+                let receipt = codex_receipt(&reconciler);
+                assert_eq!(
+                    receipt.original_provider.as_deref(),
+                    Some("native-provider")
+                );
+                reconciler.restore_native("codex").unwrap();
+                assert_native_codex(&path);
+            }
+            fs::remove_dir_all(root).unwrap();
+        }
+    }
+
+    #[test]
+    fn deleted_client_config_is_recreated_and_native_restore_succeeds() {
+        for client in ["codex", "opencode", "claude"] {
+            let root = temp_root();
+            let reconciler = disk_reconciler(&root);
+            let models = ["gpt-one".to_owned(), "claude-one".to_owned()];
+            let model = if client == "claude" {
+                "claude-one"
+            } else {
+                "gpt-one"
+            };
+            reconciler
+                .apply_proxy(client, PROXY, Some(model), &models)
+                .unwrap();
+            let path = reconciler.config_path(client).unwrap();
+            let applied = fs::read(&path).unwrap();
+
+            fs::remove_file(&path).unwrap();
+            assert!(
+                reconciler
+                    .apply_proxy(client, PROXY, Some(model), &models)
+                    .unwrap(),
+                "{client}"
+            );
+            assert_eq!(fs::read(&path).unwrap(), applied, "{client}");
+
+            // Deleted again, then native: nothing to restore and nothing created.
+            fs::remove_file(&path).unwrap();
+            reconciler.restore_native(client).unwrap();
+            assert!(!path.exists(), "{client}");
+            assert!(!reconciler.receipt_path(client).unwrap().exists());
+            fs::remove_dir_all(root).unwrap();
+        }
+    }
+
+    #[test]
+    fn deleted_codex_config_with_native_originals_restores_them() {
+        let (root, reconciler, path) = codex_on_proxy();
+        fs::remove_file(&path).unwrap();
+        reconciler.restore_native("codex").unwrap();
+        let restored = adapters_test_document(&path);
+        assert_eq!(restored["model"].as_str(), Some("native-model"));
+        assert_eq!(restored["model_provider"].as_str(), Some("native-provider"));
+        assert!(!fs::read_to_string(&path).unwrap().contains(PROVIDER_NAME));
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn lost_codex_receipt_takes_over_the_provider_without_recording_fleet_values() {
+        // Proxy mode again after the state directory was wiped.
+        let (root, reconciler, path) = codex_on_proxy();
+        remove_state_file(&reconciler.receipt_path("codex").unwrap()).unwrap();
+        reconciler
+            .apply_proxy("codex", PROXY, Some("gpt-6-mini"), &codex_models())
+            .unwrap();
+        let receipt = codex_receipt(&reconciler);
+        assert_eq!(receipt.original_model, None);
+        assert_eq!(receipt.original_provider, None);
+        assert_eq!(receipt.original_catalog, None);
+        reconciler.restore_native("codex").unwrap();
+        let restored = fs::read_to_string(&path).unwrap();
+        assert!(!restored.contains(PROVIDER_NAME));
+        assert!(!restored.contains("model = "));
+        assert!(!restored.contains("model_catalog_json"));
+        assert!(restored.contains("approval_policy = \"never\""));
+        assert!(restored.contains("[model_providers.native-provider]"));
+
+        // A leftover table next to the user's own provider keeps the user's.
+        let (root2, reconciler, path) = codex_on_proxy();
+        switch_codex_to_openai(&path);
+        let mut document = adapters_test_document(&path);
+        document["model_providers"][PROVIDER_NAME]["name"] = toml_edit::value("Fleet CLIProxy");
+        fs::write(&path, document.to_string()).unwrap();
+        remove_state_file(&reconciler.receipt_path("codex").unwrap()).unwrap();
+        reconciler
+            .apply_proxy("codex", PROXY, None, &codex_models())
+            .unwrap();
+        let receipt = codex_receipt(&reconciler);
+        assert_eq!(receipt.original_provider.as_deref(), Some("openai"));
+        assert_eq!(receipt.original_model.as_deref(), Some("gpt-6-astra"));
+        reconciler.restore_native("codex").unwrap();
+        let restored = adapters_test_document(&path);
+        assert_eq!(restored["model_provider"].as_str(), Some("openai"));
+        assert!(restored.get("model_catalog_json").is_none());
+        fs::remove_dir_all(root).unwrap();
+        fs::remove_dir_all(root2).unwrap();
+    }
+
+    #[test]
+    fn native_mode_without_a_receipt_removes_leftover_fleet_settings() {
+        for client in ["codex", "opencode", "claude"] {
+            let root = temp_root();
+            let reconciler = disk_reconciler(&root);
+            let path = reconciler.config_path(client).unwrap();
+            fs::create_dir_all(path.parent().unwrap()).unwrap();
+            let native: &[u8] = match client {
+                "codex" => b"approval_policy = \"never\"\n",
+                _ => b"{\"theme\":\"dark\"}",
+            };
+            fs::write(&path, native).unwrap();
+            let models = ["gpt-one".to_owned(), "claude-one".to_owned()];
+            let model = if client == "claude" {
+                "claude-one"
+            } else {
+                "gpt-one"
+            };
+            reconciler
+                .apply_proxy(client, PROXY, Some(model), &models)
+                .unwrap();
+            remove_state_file(&reconciler.receipt_path(client).unwrap()).unwrap();
+            reconciler.restore_native(client).unwrap();
+            let restored = fs::read_to_string(&path).unwrap();
+            assert!(!restored.contains(PROVIDER_NAME), "{client}: {restored}");
+            assert!(!restored.contains("api-key"), "{client}: {restored}");
+            assert!(!restored.contains(model), "{client}: {restored}");
+            assert!(
+                restored.contains("approval_policy") || restored.contains("dark"),
+                "{client}: {restored}"
+            );
+            // Nothing Fleet-owned is left, so a second run changes nothing.
+            reconciler.restore_native(client).unwrap();
+            assert_eq!(fs::read_to_string(&path).unwrap(), restored);
+            fs::remove_dir_all(root).unwrap();
+        }
+    }
+
+    #[test]
+    fn opencode_and_claude_external_changes_are_repaired_and_restored() {
+        for client in ["opencode", "claude"] {
+            let root = temp_root();
+            let reconciler = disk_reconciler(&root);
+            let path = reconciler.config_path(client).unwrap();
+            fs::create_dir_all(path.parent().unwrap()).unwrap();
+            let native = if client == "opencode" {
+                "{\"model\":\"native/model\",\"theme\":\"dark\"}"
+            } else {
+                "{\"model\":\"native\",\"theme\":\"dark\"}"
+            };
+            fs::write(&path, native).unwrap();
+            let models = ["one".to_owned(), "claude-one".to_owned()];
+            let model = if client == "claude" {
+                "claude-one"
+            } else {
+                "one"
+            };
+            reconciler
+                .apply_proxy(client, PROXY, Some(model), &models)
+                .unwrap();
+            // The user selects another model and Fleet's provider disappears.
+            let mut value: Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+            value["model"] = "other/model".into();
+            value.as_object_mut().unwrap().remove("provider");
+            value.as_object_mut().unwrap().remove("apiKeyHelper");
+            fs::write(&path, serde_json::to_vec(&value).unwrap()).unwrap();
+            assert!(
+                reconciler
+                    .apply_proxy(client, PROXY, Some(model), &models)
+                    .unwrap(),
+                "{client}"
+            );
+            let repaired = fs::read_to_string(&path).unwrap();
+            assert!(repaired.contains(model), "{client}: {repaired}");
+            assert!(!repaired.contains("other/model"), "{client}: {repaired}");
+            reconciler.restore_native(client).unwrap();
+            let restored: Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+            assert_eq!(
+                restored,
+                serde_json::from_str::<Value>(native).unwrap(),
+                "{client}"
+            );
+            fs::remove_dir_all(root).unwrap();
+        }
     }
 
     #[test]
@@ -1367,6 +1749,19 @@ mod tests {
                 .is_err()
         );
         assert!(fs::read(&outside).unwrap().is_empty());
+        // Native mode without a receipt leaves a linked config alone, as before.
+        fs::write(&outside, b"model_provider = \"fleet-cliproxy\"\n").unwrap();
+        reconciler.restore_native("codex").unwrap();
+        assert!(
+            fs::symlink_metadata(reconciler.config_path("codex").unwrap())
+                .unwrap()
+                .file_type()
+                .is_symlink()
+        );
+        assert_eq!(
+            fs::read(&outside).unwrap(),
+            b"model_provider = \"fleet-cliproxy\"\n"
+        );
         fs::remove_dir_all(root).unwrap();
     }
 

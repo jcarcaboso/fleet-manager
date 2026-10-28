@@ -14,7 +14,9 @@ const MAX_DETAIL_REQUEST_BYTES: usize = 16 * 1024;
 const MAX_DISK_USAGE_REQUEST_BYTES: usize = 4 * 1024;
 const MAX_TELEMETRY_REQUEST_BYTES: usize = 8 * 1024;
 const MAX_DRIFT_REQUEST_BYTES: usize = 64 * 1024;
-/// Timeout of the best-effort reports (disk usage, machine information and drift).
+const MAX_REPAIR_REQUEST_BYTES: usize = 512 * 1024;
+/// Timeout of the best-effort reports (disk usage, machine information, drift
+/// and repair failures).
 const SIDE_REPORT_TIMEOUT: Duration = Duration::from_secs(10);
 /// Tells the Server which optional features this Agent understands. Only then
 /// may the poll response carry the matching fields.
@@ -338,6 +340,21 @@ impl Api {
             "agent/v1/drift",
             report,
             MAX_DRIFT_REQUEST_BYTES,
+        )
+        .await
+    }
+
+    /// Replaces the Targets this Node currently fails to repair. Best effort
+    /// like [`Api::disk_usage`]: the response body is never read.
+    pub async fn repair_failures(
+        &self,
+        report: &crate::repair::Report,
+    ) -> Result<(), ProtocolError> {
+        self.send_report(
+            Method::PUT,
+            "agent/v1/repair-failures",
+            report,
+            MAX_REPAIR_REQUEST_BYTES,
         )
         .await
     }

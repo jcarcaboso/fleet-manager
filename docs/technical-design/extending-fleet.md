@@ -29,9 +29,13 @@ policy for a command.
 ## Add an AI client adapter
 
 Register the client and implement its config path, rendering, restoration, and
-auxiliary-state behavior. Preserve unrelated user settings. Restoration must
-check Fleet-owned settings against the receipt before changing them; it must
-not silently overwrite a user's intervening edits.
+auxiliary-state behavior. Preserve unrelated user settings. The assignment
+wins over local edits to the Fleet-owned settings: rendering overwrites them,
+keeps the originals recorded in an existing receipt, and reports whether they
+had drifted. Restoration must work from whatever is left (changed, partly
+removed or missing settings, or a missing file) and must not touch anything
+else. Without a receipt, never record Fleet's own leftover values as the
+user's originals; provide an orphan receipt so native mode can remove them.
 
 An Agent adapter alone does not make a client available in `fleet.yml`. Add
 the corresponding Server validation and publication support, and test both
@@ -39,7 +43,8 @@ ends. Deploy compatible Agents before publishing assignments for the new
 client. Do not put provider credentials in manifests, assignments, or logs.
 
 Test adapter lookup, unknown-client rejection, render/restore round trips,
-existing-file preservation, conflicts, and interrupted-write recovery. Existing
+existing-file preservation, external changes and deletion of the Fleet-owned
+settings, a lost receipt, conflicts, and interrupted-write recovery. Existing
 receipt and journal formats remain compatibility contracts.
 
 ## Add a target publisher or action

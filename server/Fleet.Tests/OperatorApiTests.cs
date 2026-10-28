@@ -750,12 +750,12 @@ public sealed partial class OperatorApiTests(OperatorApiFixture fixture) : IClas
             "non_regular_entry", "missing_owned_skill", "malformed_bundle", "lock_failed", "invalid_target", "invalid_state_directory",
             "invalid_skill_name", "invalid_home", "invalid_digest", "invalid_bundle_path", "filesystem_escape", "duplicate_skill",
             "corrupt_receipt", "bundle_size_mismatch", "bundle_path_collision", "bundle_limit_exceeded", "bundle_digest_mismatch",
-            "assignment_superseded", "ai_client_reconcile_failed", "io"
+            "assignment_superseded", "ai_client_reconcile_failed", "bundle_download_failed", "io"
         ];
         string[] serverCodes = ["node_not_found", "target_not_found", "target_not_failed", "node_revoked", "insufficient_scope", "invalid_request"];
         string[] issueCodes =
         [
-            "assignment_failed", "node_not_contacting", "more_failed_assignments", "cliproxy_key_missing", "cliproxy_discovery_pending",
+            "assignment_failed", "repair_failed", "node_not_contacting", "more_failed_assignments", "cliproxy_key_missing", "cliproxy_discovery_pending",
             "cliproxy_refresh_failed", "source_not_configured", "source_sync_failed", "source_not_scanned"
         ];
 

@@ -1,3 +1,4 @@
+use super::Rendered;
 use crate::ai_client::{
     ContextLimits, MAX_MODEL_RESPONSE_BYTES, PROVIDER_NAME, Receipt, valid_model_id,
     validate_receipt,
@@ -19,6 +20,16 @@ pub(super) fn parse_document(text: &str) -> Result<DocumentMut> {
         })
 }
 
+/// Writes the Fleet-owned Codex settings: `model`, `model_provider`,
+/// `model_catalog_json` and the `[model_providers.fleet-cliproxy]` table.
+/// Everything else in the file is kept.
+///
+/// The Server assignment wins. When a receipt exists, its original settings
+/// are kept and the Fleet-owned keys are overwritten even if something outside
+/// Fleet changed or removed them (Codex's own `/model` writes `model`); the
+/// returned flag says whether that happened, so it can be reported as drift.
+/// Without a receipt, the current settings become the originals, except
+/// leftovers of an earlier Fleet installation (see [`unowned_originals`]).
 pub(super) fn render_codex(
     old: Option<&[u8]>,
     previous: Option<&Receipt>,
@@ -27,14 +38,9 @@ pub(super) fn render_codex(
     models: &[String],
     key_path: &Path,
     catalog_path: &Path,
-) -> Result<(Vec<u8>, Receipt)> {
+) -> Result<Rendered> {
     let existed = old.is_some();
-    let text = std::str::from_utf8(old.unwrap_or_default()).context("Codex config is not UTF-8")?;
-    let mut document = if existed {
-        parse_document(text)?
-    } else {
-        DocumentMut::new()
-    };
+    let mut document = document(old)?;
     let current_model = optional_toml_string(&document, "model")?;
     let current_provider = optional_toml_string(&document, "model_provider")?;
     let current_catalog = optional_toml_string(&document, "model_catalog_json")?;
@@ -51,28 +57,29 @@ pub(super) fn render_codex(
         .context("Codex catalog path is not UTF-8")?
         .to_owned();
     let selected = super::super::select_model(model, current_model.as_deref(), models)?.to_owned();
-    let (original_model, original_provider, original_catalog) = match previous {
+    let (original_model, original_provider, original_catalog, drifted) = match previous {
         Some(receipt) => {
             validate_receipt(receipt, "codex")?;
-            if (!receipt.automatic_model
+            let drifted = (!receipt.automatic_model
                 && current_model.as_deref() != Some(receipt.expected_model.as_str()))
                 || current_provider.as_deref() != Some(PROVIDER_NAME)
                 || current_catalog.as_deref() != receipt.expected_catalog_path.as_deref()
-                || !codex_provider_matches(fleet_provider, receipt)
-            {
-                bail!("Fleet-owned Codex settings changed outside Fleet");
-            }
+                || !codex_provider_matches(fleet_provider, receipt);
             (
                 receipt.original_model.clone(),
                 receipt.original_provider.clone(),
                 receipt.original_catalog.clone(),
+                drifted,
             )
         }
         None => {
-            if fleet_provider.is_some() {
-                bail!("Codex provider name fleet-cliproxy is already in use");
-            }
-            (current_model, current_provider, current_catalog)
+            let (model, provider, catalog) = unowned_originals(
+                current_model,
+                current_provider,
+                current_catalog,
+                &catalog_path,
+            );
+            (model, provider, catalog, false)
         }
     };
     document["model_provider"] = value(PROVIDER_NAME);
@@ -93,9 +100,9 @@ pub(super) fn render_codex(
     auth["refresh_interval_ms"] = value(300000);
     provider["auth"] = Item::Table(auth);
     providers[PROVIDER_NAME] = Item::Table(provider);
-    Ok((
-        document.to_string().into_bytes(),
-        Receipt {
+    Ok(Rendered {
+        bytes: document.to_string().into_bytes(),
+        receipt: Receipt {
             version: 1,
             client: "codex".to_owned(),
             config_existed: previous.map_or(existed, |receipt| receipt.config_existed),
@@ -111,28 +118,70 @@ pub(super) fn render_codex(
             expected_reasoning_levels: BTreeMap::new(),
             original_settings: BTreeMap::new(),
         },
-    ))
+        drifted,
+    })
 }
 
-pub(super) fn restore_codex(old: Option<&[u8]>, receipt: &Receipt) -> Result<Vec<u8>> {
-    validate_receipt(receipt, "codex")?;
-    let text = std::str::from_utf8(old.context("managed Codex config is missing")?)
-        .context("Codex config is not UTF-8")?;
-    let mut document = parse_document(text)?;
-    let current_catalog = optional_toml_string(&document, "model_catalog_json")?;
-    let provider = document
+/// The settings to restore when Fleet finds no receipt. Values that Fleet
+/// itself writes are never treated as the user's: a `model_provider` of
+/// `fleet-cliproxy` (and the `model` chosen for it) and a `model_catalog_json`
+/// that is Fleet's catalog or belongs to that provider. They are restored by
+/// removing them, so Codex falls back to its defaults.
+fn unowned_originals(
+    model: Option<String>,
+    provider: Option<String>,
+    catalog: Option<String>,
+    catalog_path: &str,
+) -> (Option<String>, Option<String>, Option<String>) {
+    let fleet_selected = provider.as_deref() == Some(PROVIDER_NAME);
+    let catalog = catalog.filter(|catalog| !fleet_selected && catalog != catalog_path);
+    if fleet_selected {
+        (None, None, catalog)
+    } else {
+        (model, provider, catalog)
+    }
+}
+
+/// A receipt for Fleet settings left in the config without one, for example
+/// after the state directory was wiped. `None` when the config holds no Fleet
+/// setting. Restoring it removes the Fleet settings and keeps the user's.
+pub(super) fn orphan_receipt(old: Option<&[u8]>, catalog_path: &Path) -> Result<Option<Receipt>> {
+    let Some(old) = old else {
+        return Ok(None);
+    };
+    let document = document(Some(old))?;
+    let catalog_path = catalog_path
+        .to_str()
+        .context("Codex catalog path is not UTF-8")?;
+    let model = optional_toml_string(&document, "model")?;
+    let provider = optional_toml_string(&document, "model_provider")?;
+    let catalog = optional_toml_string(&document, "model_catalog_json")?;
+    let has_table = document
         .get("model_providers")
         .and_then(Item::as_table)
-        .and_then(|table| table.get(PROVIDER_NAME));
-    if (!receipt.automatic_model
-        && optional_toml_string(&document, "model")?.as_deref()
-            != Some(receipt.expected_model.as_str()))
-        || optional_toml_string(&document, "model_provider")?.as_deref() != Some(PROVIDER_NAME)
-        || current_catalog.as_deref() != receipt.expected_catalog_path.as_deref()
-        || !codex_provider_matches(provider, receipt)
+        .is_some_and(|table| table.contains_key(PROVIDER_NAME));
+    if !has_table
+        && provider.as_deref() != Some(PROVIDER_NAME)
+        && catalog.as_deref() != Some(catalog_path)
     {
-        bail!("Fleet-owned Codex settings changed outside Fleet");
+        return Ok(None);
     }
+    let (original_model, original_provider, original_catalog) =
+        unowned_originals(model, provider, catalog, catalog_path);
+    Ok(Some(Receipt {
+        original_model,
+        original_provider,
+        original_catalog,
+        ..Receipt::orphan("codex")
+    }))
+}
+
+/// Restores the original settings and removes Fleet's provider table. It
+/// does not require the Fleet settings to be intact: whatever is left of
+/// them is replaced, and a missing file is treated as empty.
+pub(super) fn restore_codex(old: Option<&[u8]>, receipt: &Receipt) -> Result<Vec<u8>> {
+    validate_receipt(receipt, "codex")?;
+    let mut document = document(old)?;
     restore_toml_string(&mut document, "model", receipt.original_model.as_deref());
     restore_toml_string(
         &mut document,
@@ -154,6 +203,15 @@ pub(super) fn restore_codex(old: Option<&[u8]>, receipt: &Receipt) -> Result<Vec
         }
     }
     Ok(document.to_string().into_bytes())
+}
+
+fn document(old: Option<&[u8]>) -> Result<DocumentMut> {
+    match old {
+        Some(bytes) => {
+            parse_document(std::str::from_utf8(bytes).context("Codex config is not UTF-8")?)
+        }
+        None => Ok(DocumentMut::new()),
+    }
 }
 
 pub(super) fn render_codex_catalog(

@@ -149,6 +149,11 @@ fn registered_action(assignment: &Assignment) -> Result<&'static str> {
     Ok(registered(assignment)?.name())
 }
 
+/// The error with its code and every source, for the Agent's own log.
+pub fn describe(error: &ActionError) -> String {
+    format!("{} ({})", error.diagnostic_chain(), error.code())
+}
+
 /// A failed Action. `code` is the stable identity reported to the Server; the
 /// optional step and Target-relative path only describe where it happened.
 #[derive(Debug)]
@@ -178,6 +183,11 @@ impl ActionError {
             path,
             ..Self::new(code, error)
         }
+    }
+
+    /// A failure to fetch what an Assignment needs before applying it.
+    pub fn prepare(error: anyhow::Error) -> Self {
+        Self::new("bundle_download_failed", error).with_step(Step::Download)
     }
 
     fn invalid_assignment(error: anyhow::Error) -> Self {

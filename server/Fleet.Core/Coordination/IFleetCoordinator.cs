@@ -130,6 +130,16 @@ public interface IFleetCoordinator
         DriftReport report,
         CancellationToken cancellationToken = default);
 
+    /// <summary>
+    /// Replaces the Node's stored repair failures with the report, in one transaction under the Node row lock. The report is validated
+    /// and sanitized with <see cref="RepairFailureRules"/>; invalid reports throw invalid_request. Entries whose Assignment is not the
+    /// Node's current Assignment of that Target are skipped. An unchanged failure (same Assignment and error code) keeps its first time.
+    /// </summary>
+    Task RecordRepairFailuresAsync(
+        NodeAuthentication authentication,
+        RepairFailureReport report,
+        CancellationToken cancellationToken = default);
+
     Task<Page<NodeStatus>> GetNodesAsync(
         PageRequest page,
         DateTimeOffset now,

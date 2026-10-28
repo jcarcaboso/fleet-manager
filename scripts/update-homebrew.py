@@ -53,6 +53,8 @@ def formula(binary: str, version: str, repository: str, sums: dict[str, str]) ->
     run [opt_bin/"fleet-agent", "run"]
     keep_alive true
     restart_delay 15
+    log_path var/"log/fleet-agent.log"
+    error_log_path var/"log/fleet-agent.log"
   end
 '''
         caveats = '''
@@ -62,7 +64,9 @@ def formula(binary: str, version: str, repository: str, sums: dict[str, str]) ->
 
         brew services start fleet-agent
 
-      Do not run the Homebrew service and `fleet-agent service` at the same time.
+      Manage this service with `brew services`, not `fleet-agent service`, and
+      do not run both at the same time. Its log is
+      #{var}/log/fleet-agent.log.
     EOS
   end
 '''

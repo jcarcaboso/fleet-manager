@@ -1,3 +1,4 @@
+use super::Rendered;
 use crate::ai_client::{PROVIDER_NAME, Receipt, validate_receipt};
 use anyhow::{Context, Result, bail};
 use jsonc_parser::{
@@ -7,6 +8,10 @@ use jsonc_parser::{
 use serde_json::Value;
 use std::{collections::BTreeMap, path::Path};
 
+/// Writes the Fleet-owned OpenCode settings, `model` and the
+/// `provider.fleet-cliproxy` object, and keeps everything else. As for Codex,
+/// the Server assignment wins over changes made outside Fleet, the receipt
+/// keeps the original model, and the returned flag reports the repair.
 pub(in crate::ai_client) fn render_opencode(
     old: Option<&[u8]>,
     previous: Option<&Receipt>,
@@ -15,7 +20,7 @@ pub(in crate::ai_client) fn render_opencode(
     models: &[String],
     key_path: &Path,
     efforts: &BTreeMap<String, Vec<String>>,
-) -> Result<(Vec<u8>, Receipt)> {
+) -> Result<Rendered> {
     let existed = old.is_some();
     let text =
         std::str::from_utf8(old.unwrap_or(b"{}\n")).context("OpenCode config is not UTF-8")?;
@@ -44,24 +49,16 @@ pub(in crate::ai_client) fn render_opencode(
         models,
     )?
     .to_owned();
-    let original_model = match previous {
+    let (original_model, drifted) = match previous {
         Some(receipt) => {
             validate_receipt(receipt, "opencode")?;
-            if (!receipt.automatic_model
+            let drifted = (!receipt.automatic_model
                 && current_model.as_deref()
                     != Some(format!("{PROVIDER_NAME}/{}", receipt.expected_model).as_str()))
-                || !opencode_provider_matches(fleet_provider.as_ref(), receipt)
-            {
-                bail!("Fleet-owned OpenCode settings changed outside Fleet");
-            }
-            receipt.original_model.clone()
+                || !opencode_provider_matches(fleet_provider.as_ref(), receipt);
+            (receipt.original_model.clone(), drifted)
         }
-        None => {
-            if fleet_provider.is_some() {
-                bail!("OpenCode provider name fleet-cliproxy is already in use");
-            }
-            current_model
-        }
+        None => (unowned_model(current_model), false),
     };
     set_json_property(
         &object,
@@ -120,9 +117,9 @@ pub(in crate::ai_client) fn render_opencode(
             ("models".to_owned(), CstInputValue::Object(models_value)),
         ]),
     );
-    Ok((
-        root.to_string().into_bytes(),
-        Receipt {
+    Ok(Rendered {
+        bytes: root.to_string().into_bytes(),
+        receipt: Receipt {
             version: 1,
             client: "opencode".to_owned(),
             config_existed: previous.map_or(existed, |receipt| receipt.config_existed),
@@ -138,41 +135,79 @@ pub(in crate::ai_client) fn render_opencode(
             expected_reasoning_levels: efforts.clone(),
             original_settings: BTreeMap::new(),
         },
-    ))
+        drifted,
+    })
 }
 
+/// Without a receipt, a model that selects Fleet's provider is a leftover of
+/// an earlier Fleet installation, not the user's: it is restored by removal.
+fn unowned_model(model: Option<String>) -> Option<String> {
+    model.filter(|model| !model.starts_with(&format!("{PROVIDER_NAME}/")))
+}
+
+/// Whether the config holds Fleet's provider. Used to find which of
+/// `opencode.json` and `opencode.jsonc` Fleet manages.
+pub(in crate::ai_client) fn has_fleet_provider(old: &[u8]) -> Result<bool> {
+    Ok(parse(old)?
+        .object_value()
+        .and_then(|object| object.object_value("provider"))
+        .is_some_and(|providers| providers.get(PROVIDER_NAME).is_some()))
+}
+
+/// A receipt for Fleet settings left in the config without one (see the
+/// Codex adapter). `None` when the config holds no Fleet setting.
+pub(in crate::ai_client) fn orphan_receipt(old: Option<&[u8]>) -> Result<Option<Receipt>> {
+    let Some(old) = old else {
+        return Ok(None);
+    };
+    let root = parse(old)?;
+    let object = root
+        .object_value()
+        .context("OpenCode config root must be an object")?;
+    let model = optional_json_string(&object, "model")?;
+    let fleet_model = model
+        .as_deref()
+        .is_some_and(|model| model.starts_with(&format!("{PROVIDER_NAME}/")));
+    if !fleet_model && !has_fleet_provider(old)? {
+        return Ok(None);
+    }
+    Ok(Some(Receipt {
+        original_model: unowned_model(model),
+        ..Receipt::orphan("opencode")
+    }))
+}
+
+fn parse(old: &[u8]) -> Result<CstRootNode> {
+    let text = std::str::from_utf8(old).context("OpenCode config is not UTF-8")?;
+    CstRootNode::parse(text, &ParseOptions::default()).context("invalid OpenCode JSONC")
+}
+
+/// Restores the original model and removes Fleet's provider, whatever is
+/// left of them. A missing file is treated as empty.
 pub(in crate::ai_client) fn restore_opencode(
     old: Option<&[u8]>,
     receipt: &Receipt,
 ) -> Result<Vec<u8>> {
     validate_receipt(receipt, "opencode")?;
-    let text = std::str::from_utf8(old.context("managed OpenCode config is missing")?)
-        .context("OpenCode config is not UTF-8")?;
-    let root =
-        CstRootNode::parse(text, &ParseOptions::default()).context("invalid OpenCode JSONC")?;
+    let root = parse(old.unwrap_or(b"{}\n"))?;
     let object = root
         .object_value()
         .context("OpenCode config root must be an object")?;
-    if !receipt.automatic_model
-        && optional_json_string(&object, "model")?.as_deref()
-            != Some(format!("{PROVIDER_NAME}/{}", receipt.expected_model).as_str())
-    {
-        bail!("Fleet-owned OpenCode model changed outside Fleet");
-    }
-    let providers = object
-        .object_value("provider")
-        .context("managed OpenCode provider is missing")?;
-    let provider = providers.get(PROVIDER_NAME);
-    if !opencode_provider_matches(provider.as_ref(), receipt) {
-        bail!("Fleet-owned OpenCode provider changed outside Fleet");
-    }
     match receipt.original_model.as_deref() {
         Some(model) => set_json_property(&object, "model", model.into()),
-        None => object.get("model").unwrap().remove(),
+        None => {
+            if let Some(property) = object.get("model") {
+                property.remove();
+            }
+        }
     }
-    provider.unwrap().remove();
-    if providers.properties().is_empty() {
-        object.get("provider").unwrap().remove();
+    if let Some(providers) = object.object_value("provider") {
+        if let Some(provider) = providers.get(PROVIDER_NAME) {
+            provider.remove();
+        }
+        if providers.properties().is_empty() {
+            object.get("provider").unwrap().remove();
+        }
     }
     Ok(root.to_string().into_bytes())
 }

@@ -269,7 +269,12 @@ Receipt and observed digests.
   If the Skill is updated in the same Assignment, there is no known baseline,
   so the Skill directory is named.
 - A new Assignment revision over clean content, removals, and the first
-  installation are not drift. AI-client settings are out of scope.
+  installation are not drift.
+- An AI-client config counts when Fleet-owned settings in it no longer match
+  what the receipt says Fleet wrote (changed, removed, or the file deleted)
+  and Fleet wrote them again. Its path is the client's config file, such as
+  `.codex/config.toml`. A model the user picked while the assignment selects
+  none is not drift.
 
 `repaired` holds Home-relative paths, sorted, unique, at most 20 per Target and
 passed through `report_path` (relative, no `..`, no control characters, at most
@@ -284,6 +289,29 @@ the previous one is still running, the new reports are dropped. The response is
 ignored, and nothing is persisted or retried, so a 404 from an older Server or
 any other error drops the report. The route does not need a capability header.
 The [Operator API](../technical-design/operator-api.md#drift-reports) defines
+the request.
+
+A repair on an idle cycle can also fail, for example when the Agent cannot
+rewrite Fleet-owned AI-client settings. The Assignment's Attempt has already
+succeeded, so the failure cannot go through `POST /agent/v1/reports` or the
+Attempt detail route. Instead the Agent sends `PUT /agent/v1/repair-failures`
+with every repair that currently fails (`target`, `assignmentId`,
+`errorCode`, `diagnostic` and optional `path` and `step`). The list replaces
+what the Server stored for the Node, so an empty list clears it, and the
+Server raises a `repair_failed` issue for each failure of a current, not
+failed Assignment.
+
+The idle cycle applies every active Assignment even when an earlier one fails,
+so one broken Target never blocks the repair of the others; each failure is
+also logged as `could not repair <target>: …`. The report is a side task like
+drift, at most one in flight, and the list is sent only when it changed since
+the Server last stored it, plus once after every start so that a failure fixed
+while the Agent was stopped is cleared. Transport errors, HTTP 429 and 5xx keep
+the list for the next cycle; any other response, including 404 from an older
+Server, is not retried until the list changes. A Target whose new Assignment is
+applied leaves the list until the next idle cycle checks it again. `run --once`
+exits with an error when a repair failed. The
+[Operator API](../technical-design/operator-api.md#repair-failures) defines
 the request.
 
 ## Work loop

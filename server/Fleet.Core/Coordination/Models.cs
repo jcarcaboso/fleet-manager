@@ -303,6 +303,15 @@ public sealed record NodeDriftEvent(string Target, IReadOnlyList<string> Files, 
 /// <summary>What an Agent reports after repairing drift: the assigned Target and its Target-relative file paths.</summary>
 public sealed record DriftReport(string Target, IReadOnlyList<string> Files);
 
+/// <summary>
+/// An idle repair of a current Assignment that failed after the Assignment's own Attempt succeeded. <c>Diagnostic</c>, <c>Path</c> and
+/// <c>Step</c> follow <see cref="AttemptDetailRules"/>.
+/// </summary>
+public sealed record RepairFailure(string Target, AssignmentId AssignmentId, string ErrorCode, string Diagnostic, string? Path, string? Step);
+
+/// <summary>Every repair that currently fails on a Node. The Server stores exactly these; an empty list clears them.</summary>
+public sealed record RepairFailureReport(IReadOnlyList<RepairFailure> Failures);
+
 public sealed record CheckinBucket(DateTimeOffset Hour, int Polls);
 
 public sealed record NodeCheckins(int Hours, IReadOnlyList<CheckinBucket> Buckets);

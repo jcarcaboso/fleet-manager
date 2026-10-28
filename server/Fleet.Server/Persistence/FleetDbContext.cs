@@ -25,6 +25,7 @@ public sealed class FleetDbContext(DbContextOptions<FleetDbContext> options) : D
     public DbSet<AuditEventRow> AuditEvents => Set<AuditEventRow>();
     public DbSet<CliProxySelectionRow> CliProxySelections => Set<CliProxySelectionRow>();
     public DbSet<NodeDriftEventRow> NodeDriftEvents => Set<NodeDriftEventRow>();
+    public DbSet<NodeRepairFailureRow> NodeRepairFailures => Set<NodeRepairFailureRow>();
     public DbSet<IssueStateRow> IssueStates => Set<IssueStateRow>();
 
     protected override void OnModelCreating(ModelBuilder model)
@@ -47,6 +48,12 @@ public sealed class FleetDbContext(DbContextOptions<FleetDbContext> options) : D
         model.Entity<NodeDriftEventRow>().Property(x => x.Files).HasColumnType("text[]");
         model.Entity<NodeDriftEventRow>().HasIndex(x => new { x.NodeId, x.DetectedAt, x.Id });
         model.Entity<NodeDriftEventRow>().HasOne<NodeRow>().WithMany().HasForeignKey(x => x.NodeId).OnDelete(DeleteBehavior.Cascade);
+        model.Entity<NodeRepairFailureRow>().ToTable("node_repair_failures").HasKey(x => new { x.NodeId, x.Target });
+        model.Entity<NodeRepairFailureRow>().Property(x => x.Target).HasMaxLength(RepairFailureRules.MaximumTargetLength);
+        model.Entity<NodeRepairFailureRow>().Property(x => x.ErrorCode).HasMaxLength(RepairFailureRules.MaximumErrorCodeLength);
+        model.Entity<NodeRepairFailureRow>().Property(x => x.Path).HasMaxLength(AttemptDetailRules.MaximumPathLength);
+        model.Entity<NodeRepairFailureRow>().Property(x => x.Step).HasMaxLength(AttemptDetailRules.MaximumStepLength);
+        model.Entity<NodeRepairFailureRow>().HasOne<NodeRow>().WithMany().HasForeignKey(x => x.NodeId).OnDelete(DeleteBehavior.Cascade);
         model.Entity<IssueStateRow>().ToTable("issue_states").HasKey(x => new { x.WorkspaceId, x.IssueId });
         model.Entity<IssueStateRow>().Property(x => x.IssueId).HasMaxLength(300);
         model.Entity<IssueStateRow>().Property(x => x.State).HasMaxLength(16);
@@ -312,6 +319,19 @@ public sealed class NodeDriftEventRow
     public required string Target { get; set; }
     public required string[] Files { get; set; }
     public DateTimeOffset DetectedAt { get; set; }
+}
+// An idle repair of a current Assignment that fails on the Node. The Agent's latest report replaces all rows of the Node.
+public sealed class NodeRepairFailureRow
+{
+    public Guid NodeId { get; set; }
+    public required string Target { get; set; }
+    public Guid AssignmentId { get; set; }
+    public required string ErrorCode { get; set; }
+    public required string Diagnostic { get; set; }
+    public string? Path { get; set; }
+    public string? Step { get; set; }
+    public DateTimeOffset FailedSince { get; set; }
+    public DateTimeOffset ReportedAt { get; set; }
 }
 // An Operator's acknowledgement or snooze of one issue. Expired and obsolete rows are deleted lazily by the next change.
 public sealed class IssueStateRow

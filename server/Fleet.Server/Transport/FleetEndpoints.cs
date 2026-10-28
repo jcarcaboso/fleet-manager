@@ -130,6 +130,18 @@ public static class FleetEndpoints
             await coordinator.RecordDriftAsync(Node(context), new(request.Target, request.Files!.Select(x => x!).ToList()), ct);
             return Results.NoContent();
         }).LimitPerNode();
+        // The Agent reports every idle repair that currently fails, after the Assignment's Attempt succeeded. The list replaces the
+        // stored one, so an empty list clears it; failures of an Assignment that is no longer current are skipped.
+        agents.MapPut("/repair-failures", async (RepairFailuresRequest request, HttpContext context, IFleetCoordinator coordinator,
+            CancellationToken ct) =>
+        {
+            if (request.Failures is null) throw new CoordinationException("invalid_request", "failures is required.");
+            var failures = request.Failures.Select(x => x is { Target: not null, AssignmentId: { } assignmentId, ErrorCode: not null, Diagnostic: not null }
+                ? new RepairFailure(x.Target, new(assignmentId), x.ErrorCode, x.Diagnostic, x.Path, x.Step)
+                : throw new CoordinationException("invalid_request", "target, assignmentId, errorCode and diagnostic are required.")).ToList();
+            await coordinator.RecordRepairFailuresAsync(Node(context), new(failures), ct);
+            return Results.NoContent();
+        }).LimitPerNode();
         agents.MapPost("/credentials/renew", async (RenewalRequest request, HttpContext context, IFleetCoordinator coordinator,
             NodeCertificateIssuer issuer, TimeProvider time, CancellationToken ct) =>
         {
@@ -174,7 +186,7 @@ public static class FleetEndpoints
 
 /// <summary>
 /// Per-Node limit shared by <c>POST /agent/v1/attempts/{attemptId}/detail</c>, <c>PUT /agent/v1/disk-usage</c>,
-/// <c>PUT /agent/v1/telemetry</c> and <c>POST /agent/v1/drift</c>: a bucket of 30
+/// <c>PUT /agent/v1/telemetry</c>, <c>POST /agent/v1/drift</c> and <c>PUT /agent/v1/repair-failures</c>: a bucket of 30
 /// that refills one request every 2 seconds (30 a minute sustained), with no queue. A healthy Agent sends one detail per failed
 /// Attempt plus retries, and one disk report every few hours, far below this. Partitions exist only for authenticated Nodes
 /// and the framework removes idle ones.
