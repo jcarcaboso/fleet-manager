@@ -8,7 +8,7 @@ x-server-environment: &server-environment
   HOME: /home/app
 
 x-server: &server
-  image: ${FLEET_IMAGE:-skorcius/fleet-manager:0.11.0}
+  image: ${FLEET_IMAGE:-skorcius/fleet-manager:0.12.0}
   user: "1654:1654"
   read_only: true
   cap_drop: [ALL]
@@ -31,7 +31,7 @@ x-server: &server
 
 services:
   configure:
-    image: ${FLEET_IMAGE:-skorcius/fleet-manager:0.11.0}
+    image: ${FLEET_IMAGE:-skorcius/fleet-manager:0.12.0}
     user: "0:0"
     entrypoint: [/bin/sh, -ec]
     command:
@@ -119,7 +119,7 @@ services:
       start_period: 20s
 
   dashboard:
-    image: ${FLEET_DASHBOARD_IMAGE:-skorcius/fleet-manager:dashboard-0.11.0}
+    image: ${FLEET_DASHBOARD_IMAGE:-skorcius/fleet-manager:dashboard-0.12.0}
     restart: unless-stopped
     # Its own uid and its own volume: the dashboard reads dashboard.pem, dashboard.key and the public ca.pem,
     # and nothing the Server owns (no CA key, Server key, database password or Operator token digests).
