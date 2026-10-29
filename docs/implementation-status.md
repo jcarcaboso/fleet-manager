@@ -50,8 +50,10 @@ The first Node Agent implements P-256 enrollment, real mTLS, certificate renewal
 polling, bounded Bundle downloads, receipt-based ownership, journaled filesystem
 activation and rollback, cached drift repair, multi-Target run state, Managed-file
 reconciliation, and durable terminal report retry.
-The [Agent setup guide](../deploy/agent/README.md) covers the Linux amd64 binary
-and user service. It works with the deployed Server 0.2.0 API.
+The [Agent setup guide](../deploy/agent/README.md) covers installation with
+Homebrew, release archives (Linux amd64, macOS Apple silicon and Intel) or Cargo,
+and the `fleet-agent service install` user service (`systemd --user` or a
+launchd agent).
 
 The 0.6.0 integration adds strict `fleet/v2` parsing and typed
 AI-client Assignments for Codex and OpenCode. Assigned Nodes retrieve a
@@ -73,9 +75,22 @@ models separately from repository ingestion and show catalog status. Agents
 update active client catalogs even when the source revision does not change;
 OpenCode reconciliation respects an existing JSONC configuration.
 
+Version 0.12.1 publishes Agent self-update, which 0.12.0 introduced but could
+not publish. `fleet-agent service install` runs the Agent from a Fleet-owned
+copy in its state directory; Operators update it with **Update Agent** in the
+dashboard or `fleet nodes update`. The Server mirrors its own signed release
+from GitHub, and the Agent checks the Ed25519 manifest signature with the keys
+compiled into it, switches versions and rolls back by itself when the new
+version does not reach the Server. Tagged releases publish the signed
+`fleet-agent-release.json`. See the
+[client update guide](technical-design/client-updates.md#agent-self-update).
+An update between two published releases with the real key, and a launchd
+update on a real Mac, have not been verified yet.
+
 Still required for the full POC:
 
-- a real macOS deployment, macOS service packaging, and broader failure exercises;
+- a real macOS deployment (installation, login startup and self-update of the
+  launchd agent on physical Macs) and broader failure exercises;
 - the full Agent recovery/reporting conversation and Operator-authorized
   replacement of a lost Node key while preserving its stable identity;
 - measured polling, publication, and Bundle throughput budgets. A 1,000-Node
@@ -84,5 +99,6 @@ Still required for the full POC:
   deployment-selected metrics collector;
 - adopted retention periods, backup scheduling/encryption and recovery
   objectives, CA rotation, and enforced source mirror disk quotas;
-- release security, published artifact inventories/signing, private
+- release security beyond the signed Agent manifest (image signing, macOS
+  signing and notarization, published artifact inventories), private
   vulnerability reporting, and contribution attestation.

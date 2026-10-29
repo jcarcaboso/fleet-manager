@@ -31,15 +31,15 @@ commands. The [Agent guide](../../deploy/agent/README.md) covers service command
    uninstall under a real `systemd --user` in a container. The macOS launchd
    branch still needs a Mac.
 3. Update one Node first. Preserve its private Agent state directory.
-4. For Agents from 0.12.0 that run from `fleet-agent service install`, run
-   `fleet nodes update <node>` and follow `agentUpdate` in `fleet nodes show`
-   (see Agent self-update below). Otherwise get the new executable
-   (`brew upgrade fleet-agent`, a release archive or Cargo) and run
-   `fleet-agent service install` with it. The command copies it
-   to `<state-dir>/versions/<version>/`, switches the `current` link the service
-   runs, and restarts the service. Verify the version and successful
-   contact/sync. Agents up to 0.11.0 have no managed copy: stop the service,
-   install the new executable at the same absolute path, and restart it.
+4. For Agents that report `agent.selfUpdate: true` in `fleet nodes show`
+   (0.12.1 or newer, run from `fleet-agent service install`), run
+   `fleet nodes update <node>` and follow `agentUpdate` (see Agent self-update
+   below). Otherwise get the new executable (`brew upgrade fleet-agent`, a
+   release archive or Cargo) and run `fleet-agent service install` with it. The
+   command copies it to `<state-dir>/versions/<version>/`, switches the
+   `current` link the service runs, and restarts the service; for an Agent up
+   to 0.11.0 it also replaces the old service definition, including a
+   `brew services` one. Verify the version and successful contact/sync.
 5. Update the remaining Nodes. The previous version stays installed;
    `fleet-agent update rollback` switches back to it. State migrations must
    explicitly document rollback compatibility.
@@ -48,13 +48,14 @@ commands. The [Agent guide](../../deploy/agent/README.md) covers service command
    ignores the file.
 
 For the Operator CLI, replace the binary and check `fleet --version`. For a Cargo
-installation, rebuild with the chosen `--tag` plus `--locked --force`, then
-restart the Agent service. If installation moves the executable to a different
-path, reinstall the service definition so it references that path.
+installation of the Agent, rebuild with the chosen `--tag` plus `--locked
+--force`, then run `~/.cargo/bin/fleet-agent service install`.
 
-From 0.12.0, Agents installed with `fleet-agent service install` can also be
-updated from the Server, described next. A checksum next to an archive detects
-corruption but does not replace release signing.
+From 0.12.1, Agents installed with `fleet-agent service install` can also be
+updated from the Server, described next. 0.12.1 is the first release that
+published self-updating Agents: the `v0.12.0` tag workflow failed before it
+published any client archive. A checksum next to an archive detects corruption
+but does not replace release signing.
 
 ## Agent self-update
 
@@ -107,8 +108,10 @@ like downloaded files and keeps the archives.
 
 A Server or Agent built without a committed public key refuses every update
 (`agent_release_unavailable` on the Server, `agent_update_untrusted` on the
-Agent), so self-update starts working with the first release that embeds the
-key. `scripts/smoke-agent-update.sh` runs a complete update and a crash-loop
+Agent). 0.12.1 is the first release whose Server and published Agents embed the
+key. A 0.12.0 Server has no published release of its own version to mirror and
+answers every update request with `agent_release_unavailable`; upgrade it to
+0.12.1. `scripts/smoke-agent-update.sh` runs a complete update and a crash-loop
 rollback under `systemd --user` with a throwaway key; run it when a release
 changes the updater, the Server mirror or the service definition.
 
@@ -123,7 +126,7 @@ executable inside each archive:
 {
   "schema": 1,
   "name": "fleet-agent",
-  "version": "0.11.0",
+  "version": "0.12.1",
   "gitCommit": "…",
   "binaries": [
     { "os": "linux", "arch": "amd64", "sha256": "…", "size": 9123456 }

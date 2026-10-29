@@ -2,8 +2,11 @@
 
 Each `*.pem` file here is an Ed25519 public key that signs Agent releases. The
 tag workflow refuses to publish a release whose manifest does not verify with
-one of these keys. Self-updating Agents will embed the same keys and run only
-binaries listed in a manifest signed by one of them.
+one of these keys. Every Agent build compiles in the same keys (through
+`build.rs`), and the Server embeds them; both run or serve only binaries listed
+in a manifest signed by one of them. `release-2026.pem` is the current key;
+0.12.1 is the first published release that embeds it. CI checks that the
+packaged Linux Agent contains every key here.
 
 Keep at most two keys: the current one and, during a rotation, the next one.
 
