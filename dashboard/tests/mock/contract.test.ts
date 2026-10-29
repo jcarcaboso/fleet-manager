@@ -459,7 +459,7 @@ describe('Agent self-update (agent-self-update.md, "Server")', () => {
     mock.dispose();
   });
 
-  it('the simulated Agent goes requested, downloading, restarting, succeeded, and then runs the new version', async () => {
+  it('the simulated Agent goes requested, downloading, restarting, succeeded, and then reports the new version', async () => {
     vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'Date'] });
     const { get, post, is, mock } = setup({ releaseDelay: 0, updateDelay: 1000 });
     try {
@@ -477,7 +477,9 @@ describe('Agent self-update (agent-self-update.md, "Server")', () => {
       const done = (await get('nodes/fedora-ws')).body as NodeDetail;
       expect(done.agentUpdate).toMatchObject({ state: 'succeeded', errorCode: null });
       expect(done.agentUpdate!.finishedAt).not.toBeNull();
-      expect(done.agent).toMatchObject({ version: '0.9.0', outdated: false });
+      expect(done.agent, 'success comes first; the new version arrives with telemetry').toMatchObject({ version: '0.9.0-rc.2', outdated: true });
+      await vi.advanceTimersByTimeAsync(1000);
+      expect(((await get('nodes/fedora-ws')).body as NodeDetail).agent).toMatchObject({ version: '0.9.0', outdated: false });
       expect(mock.audit.find(e => e.action === 'agent.update_succeeded')).toMatchObject({ actor: fedora.id, nodeId: fedora.id, detail: '0.9.0' });
       const events = ((await get(`audit?node=${fedora.id}&order=newest`)).body as Page<AuditEvent>).items;
       expect(events.slice(0, 2).map(e => e.action)).toEqual(['agent.update_succeeded', 'agent.update_requested']);
@@ -545,6 +547,23 @@ describe('Agent self-update (agent-self-update.md, "Server")', () => {
     ]);
     expect(all.body.items[1].agentUpdate, 'still requested: the same update').toEqual(picked.body.items[2].agentUpdate);
     mock.dispose();
+  });
+
+  it('the Node is checked again after the release is mirrored: one revoked meanwhile is refused, alone or in a bulk request', async () => {
+    const one = setup({ releaseDelay: 50 });
+    const pending = one.post('nodes/fedora-ws/agent-update');
+    one.mock.nodes.find(n => n.alias === 'fedora-ws')!.revokedAt = new Date().toISOString();
+    one.is(await pending, 409, 'node_revoked');
+    expect(one.mock.nodes.find(n => n.alias === 'fedora-ws')!._update).toBeNull();
+    const bulk = setup({ releaseDelay: 50 });
+    const asked = bulk.post('agent-updates', { nodes: ['fedora-ws', 'build-runner-03'] });
+    bulk.mock.nodes.find(n => n.alias === 'fedora-ws')!.revokedAt = new Date().toISOString();
+    const res = await asked;
+    bulk.is(res, 200);
+    expect(res.body.items.map((i: any) => [i.node, i.requested, i.code])).toEqual([['fedora-ws', false, 'node_revoked'], ['build-runner-03', true, null]]);
+    expect(bulk.mock.nodes.find(n => n.alias === 'fedora-ws')!._update).toBeNull();
+    one.mock.dispose();
+    bulk.mock.dispose();
   });
 
   it('a release that cannot be mirrored fails the request: 503 agent_release_unavailable, 502 agent_release_invalid; admin only', async () => {

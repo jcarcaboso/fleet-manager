@@ -9,7 +9,7 @@
  * - Every load goes through a lane (`useLoad` for the machine, one lane per tab group): only the newest counts and the older request is aborted.
  * - The disk refresh is a POST followed by a bounded poll with an independent deadline. Leaving the page aborts both.
  * - An Agent update is followed the same way: while it is requested, downloading or restarting (after Update Agent, or when the page opens
- *   on one), the machine is read every `UPDATE_POLL_MS` until it finishes or `UPDATE_WAIT_MS` passes.
+ *   on one), the machine is read every `UPDATE_POLL_MS` until it finishes and the Agent reports the new version, or `UPDATE_WAIT_MS` passes.
  */
 import { computed, inject, reactive, ref, watch, type ComputedRef, type InjectionKey } from 'vue';
 import { useRouter } from 'vue-router';
@@ -20,7 +20,7 @@ import { useFleet } from '@/context';
 import { isSilent, serverMessage, soft } from '@/lib/errors';
 import { enc, ms, now } from '@/lib/format';
 import {
-  agentUpdateOf, canUpdateAgent, diskDetail, errorCount, fromDetail, health as modelHealth, osText, patchIssue, SNOOZE, updateActive, type DiskView, type Health, type IssueLevel,
+  agentUpdateOf, canUpdateAgent, diskDetail, errorCount, fromDetail, health as modelHealth, osText, patchIssue, SNOOZE, updatePending, type DiskView, type Health, type IssueLevel,
   type NodeDetailView,
 } from '@/lib/model';
 import { targetLabel } from '@/lib/targets';
@@ -403,17 +403,20 @@ export function createNodePage(getAlias: () => string, getTab: () => NodeTab) {
     return { text: serverMessage(e, 'The update was not requested.'), tone: status === 403 || status === 409 ? 'warning' : 'critical' };
   };
 
-  /** Follows an active update until the Agent finishes it. Started after Update Agent and whenever the loaded machine has an active update. */
+  /**
+   * Follows an active update until the Agent finishes it and reports the new version, which comes with telemetry after the success.
+   * Started after Update Agent and whenever the loaded machine has a pending update (`updatePending`).
+   */
   function followUpdate(): void {
     const n = node.value;
-    if (!n || updatePoll || !updateActive(n.update)) return;
+    if (!n || updatePoll || !updatePending(n)) return;
     const id = n.id;
     updatePoll = view.poll<NodeDetail>(token => api.get<NodeDetail>(`nodes/${enc(id)}`, undefined, { signal: token.signal }), {
       intervalMs: UPDATE_POLL_MS, timeoutMs: UPDATE_WAIT_MS, immediate: false,
       done: d => {
         const next = fromDetail(d);
         patchLoaded(l => (l.node.id === id ? { ...l, node: { ...l.node, agent: next.agent, update: next.update, lastContactAt: next.lastContactAt, freshness: next.freshness } } : l));
-        if (updateActive(next.update)) return false;
+        if (updatePending(next)) return false;
         /* Finished: read the machine and its issues again, so health, the Problems count and agent_update_failed follow the result. */
         void reload();
         return true;

@@ -855,10 +855,10 @@ export function createMockServer(overrides: Partial<MockOptions> = {}): MockServ
       step('downloading', () => {
         if (cfg.updateFail.includes(n.alias)) return report(n, u, 'failed', 'agent_update_smoke_test');
         report(n, u, 'restarting');
+        /* The new version reports success after its first poll; its telemetry, with the new version, follows separately. */
         step('restarting', () => {
-          n._agent!.version = u.targetVersion;
-          n._agent!.reportedAt = nowIso();
           report(n, u, 'succeeded');
+          later(() => { n._agent!.version = u.targetVersion; n._agent!.reportedAt = nowIso(); }, cfg.updateDelay);
         });
       });
     });
@@ -1123,6 +1123,9 @@ export function createMockServer(overrides: Partial<MockOptions> = {}): MockServ
       if (refused) return err(refused.status, refused.code, refused.message);
       const failed = await mirror();
       if (failed) return err(failed.status, failed.code, failed.message);
+      /* The Server checks the Node again when it records the request: it may have changed while the release was mirrored. */
+      const late = updateRefusal(n);
+      if (late) return err(late.status, late.code, late.message);
       return json({ ...requestUpdate(n) }, 202);
     }
     if (path === 'agent-updates') {
@@ -1148,7 +1151,12 @@ export function createMockServer(overrides: Partial<MockOptions> = {}): MockServ
         const failed = await mirror();
         if (failed) return err(failed.status, failed.code, failed.message);
       }
-      for (const [name, n] of ready) items.push({ node: name, nodeId: n.id, requested: true, code: null, message: null, agentUpdate: { ...requestUpdate(n) } });
+      for (const [name, n] of ready) {
+        const late = updateRefusal(n); // checked again when recorded, as for a single request
+        items.push(late
+          ? { node: name, nodeId: n.id, requested: false, code: late.code, message: late.message, agentUpdate: null }
+          : { node: name, nodeId: n.id, requested: true, code: null, message: null, agentUpdate: { ...requestUpdate(n) } });
+      }
       const order = new Map(targets.map(([name], i) => [name, i]));
       return json({ targetVersion: LATEST, items: items.sort((a, b) => order.get(a.node)! - order.get(b.node)!) });
     }

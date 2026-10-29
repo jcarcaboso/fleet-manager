@@ -10,13 +10,14 @@ import StatusGlyph from '@/components/StatusGlyph.vue';
 import { useFleet } from '@/context';
 import { isSilent, serverMessage } from '@/lib/errors';
 import { listText, plural } from '@/lib/format';
-import { agentOutdated, updateActive, type NodeView } from '@/lib/model';
+import { agentOutdated, updatePending, type NodeView } from '@/lib/model';
 import { nodeRoute } from '@/router';
 
 /**
  * The bulk Agent update of the Machines page: a bar while Agents are older than the Server, and a dialog that lists them, asks first,
- * and then shows what the Server did for each machine. With every machine that can update ticked it sends `{ allOutdated: true }`,
- * otherwise `{ nodes: [...] }` with the ticked Node IDs. Agents that cannot update themselves, or are already updating, cannot be ticked.
+ * and then shows what the Server did for each machine. It sends `{ nodes: [...] }` with the ticked Node IDs, never `allOutdated`, which
+ * would also replace updates the Server considers abandoned and reach machines the page does not show. Agents that cannot update
+ * themselves, or are already updating, cannot be ticked; a stranded update (see `updateStranded`) can be.
  * The request is not tied to the page: the first one of a release can take minutes while the Server fetches it.
  */
 const props = defineProps<{ nodes: NodeView[] }>();
@@ -24,9 +25,9 @@ const emit = defineEmits<{ requested: [] }>();
 const { api, toasts } = useFleet();
 
 const outdated = computed(() => props.nodes.filter(agentOutdated).sort((a, b) => a.alias.localeCompare(b.alias)));
-const eligible = (n: NodeView): boolean => n.agent?.selfUpdate === true && !updateActive(n.update);
+const eligible = (n: NodeView): boolean => n.agent?.selfUpdate === true && !updatePending(n);
 const ready = computed(() => outdated.value.filter(eligible));
-const updating = computed(() => outdated.value.filter(n => updateActive(n.update)).length);
+const updating = computed(() => outdated.value.filter(updatePending).length);
 const manual = computed(() => outdated.value.filter(n => n.agent?.selfUpdate === false).length);
 /** A Server before Agent self-update says nothing about it and has no update routes. */
 const supported = computed(() => props.nodes.some(n => n.agent?.selfUpdate != null));
@@ -36,7 +37,7 @@ const summary = computed(() => listText([
   updating.value ? `${updating.value} ${updating.value === 1 ? 'is' : 'are'} updating` : '',
   manual.value ? `${manual.value} ${manual.value === 1 ? 'needs' : 'need'} a manual upgrade first` : '',
 ].filter(Boolean)).replace(/^./, c => c.toUpperCase()));
-const why = (n: NodeView): string => (updateActive(n.update) ? 'Already updating.' : 'Cannot update itself yet. Upgrade it by hand once, then run fleet-agent service install.');
+const why = (n: NodeView): string => (updatePending(n) ? 'Already updating.' : 'Cannot update itself yet. Upgrade it by hand once, then run fleet-agent service install.');
 
 const open = ref(false);
 const picked = ref(new Set<string>());
@@ -44,6 +45,9 @@ const busy = ref(false);
 const error = ref<string | null>(null);
 const result = ref<AgentUpdatesResponse | null>(null);
 const requested = computed(() => result.value?.items.filter(i => i.requested).length ?? 0);
+/** The request names machines by Node ID; the results show their aliases. */
+const aliases = computed(() => new Map(props.nodes.map(n => [n.id, n.alias] as const)));
+const nameOf = (item: { node: string; nodeId?: string | null }): string => (item.nodeId && aliases.value.get(item.nodeId)) || item.node;
 
 function show(): void {
   picked.value = new Set(ready.value.map(n => n.id));
@@ -63,8 +67,7 @@ function toggle(id: string, on: boolean): void {
 
 async function submit(): Promise<void> {
   if (busy.value || !picked.value.size) return;
-  const all = ready.value.every(n => picked.value.has(n.id));
-  const body: AgentUpdatesRequest = all ? { allOutdated: true } : { nodes: [...picked.value] };
+  const body: AgentUpdatesRequest = { nodes: [...picked.value] };
   busy.value = true;
   error.value = null;
   let res: AgentUpdatesResponse;
@@ -111,10 +114,10 @@ async function submit(): Promise<void> {
     <template v-else>
       <p>{{ `Requested for ${requested} of ${plural(result.items.length, 'machine')}.` }}{{ requested ? ` They install ${result.targetVersion} after their next check-in.` : '' }}</p>
       <ul class="upd-list" aria-label="Results">
-        <li v-for="item in result.items" :key="item.node" :data-node="item.node" :data-requested="item.requested">
+        <li v-for="item in result.items" :key="item.node" :data-node="nameOf(item)" :data-requested="item.requested">
           <StatusGlyph :level="item.requested ? 'good' : 'warning'" :kind="item.requested ? 'check' : 'bang'" />
           <span>
-            <RouterLink v-if="item.nodeId" :to="nodeRoute(item.node)" @click="close()"><b>{{ item.node }}</b></RouterLink><b v-else>{{ item.node }}</b>
+            <RouterLink v-if="item.nodeId" :to="nodeRoute(nameOf(item))" @click="close()"><b>{{ nameOf(item) }}</b></RouterLink><b v-else>{{ nameOf(item) }}</b>
             {{ item.requested ? ' · Update requested' : ' · Not requested' }}
             <span v-if="!item.requested" class="muted"><code v-if="item.code">{{ item.code }}</code>{{ item.code ? ' ' : '' }}<MdText :text="item.message" /></span>
           </span>

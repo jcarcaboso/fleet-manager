@@ -35,7 +35,7 @@ describe('Update outdated Agents', () => {
     expect($('#agent-updates [data-act=update-outdated]')!.hasAttribute('disabled')).toBe(false);
   });
 
-  it('asks first, lists every outdated machine, sends allOutdated and shows a result per machine', async () => {
+  it('asks first, lists every outdated machine, sends the ticked Node IDs and shows a result per machine', async () => {
     await open();
     await click($('[data-act=update-outdated]'));
     expect(dialog()!.getAttribute('aria-modal')).toBe('true');
@@ -51,13 +51,13 @@ describe('Update outdated Agents', () => {
     await click(confirm());
     await waitFor(() => $('[role=dialog] [data-requested]'));
     expect(bulk()).toHaveLength(1);
-    expect(bulk()[0]!.body).toEqual({ allOutdated: true });
-    expect(text('[role=dialog] .modal-body > p')).toBe('Requested for 2 of 4 machines. They install 0.9.0 after their next check-in.');
-    expect(rows().map(r => [r.getAttribute('data-node'), r.getAttribute('data-requested')])).toEqual([
-      ['build-runner-03', 'true'], ['fedora-ws', 'true'], ['laptop-ana', 'false'], ['mba-travel', 'false'],
+    const id = (alias: string): string => app!.mock.nodes.find(n => n.alias === alias)!.id;
+    expect(bulk()[0]!.body, 'never allOutdated, which reaches machines the dialog did not offer').toEqual({ nodes: [id('build-runner-03'), id('fedora-ws')] });
+    expect(text('[role=dialog] .modal-body > p')).toBe('Requested for 2 of 2 machines. They install 0.9.0 after their next check-in.');
+    expect(rows().map(r => [r.getAttribute('data-node'), r.getAttribute('data-requested')]), 'by alias, not by the Node ID sent').toEqual([
+      ['build-runner-03', 'true'], ['fedora-ws', 'true'],
     ]);
     expect(textOf(row('fedora-ws'))).toBe('fedora-ws · Update requested');
-    expect(textOf(row('laptop-ana'))).toMatch(/^laptop-ana · Not requested agent_update_unsupported The Agent on this Node cannot update itself\./);
     expect(row('fedora-ws').querySelector('a')!.getAttribute('href')).toBe('/machines/fedora-ws');
     expect(textOf($('#toasts'))).toMatch(/Update requested for 2 machines/);
 
@@ -81,7 +81,7 @@ describe('Update outdated Agents', () => {
     await click(confirm());
     await waitFor(() => $('[role=dialog] [data-requested]'));
     expect(bulk()[0]!.body).toEqual({ nodes: [app!.mock.nodes.find(n => n.alias === 'build-runner-03')!.id] });
-    expect(rows().map(r => r.getAttribute('data-node'))).toEqual([app!.mock.nodes.find(n => n.alias === 'build-runner-03')!.id]);
+    expect(rows().map(r => r.getAttribute('data-node'))).toEqual(['build-runner-03']);
   });
 
   it('nothing ticked: the confirm button is disabled', async () => {

@@ -3,7 +3,7 @@ import type { DesiredRevisionDetail, Issue, NodeDetail, NodeListItem, RolloutDet
 import { DAY, HOUR, MIN } from '@/lib/format';
 import { contract } from '../helpers/contracts';
 import {
-  DISK_CRIT, DISK_WARN, SEMVER, agentInfo, agentOutdated, agentUpdateOf, canUpdateAgent, needsManualUpgrade, updateActive, updateBadge, updateMeta, certFlag, certText, commit, diskDetail, diskHot, diskLevel, diskOf, diskVolume, drift, errorCount, failuresFromIssues,
+  DISK_CRIT, DISK_WARN, SEMVER, agentInfo, agentOutdated, agentUpdateOf, canUpdateAgent, needsManualUpgrade, updateActive, updateBadge, updateMeta, updatePending, updateSettling, updateStranded, certFlag, certText, commit, diskDetail, diskHot, diskLevel, diskOf, diskVolume, drift, errorCount, failuresFromIssues,
   fixSteps, fromDetail, fromList, health, isAttention, isOpen, issueBadge, issueKind, issueLevel, issueSection, issueState, issuesByNode, nodeRank, osText, patchIssue,
   recentDrift, revTitle, revisionDetail, rolloutDetail, scanOutcome, seenText, sortIssues, upgradePlan,
 } from '@/lib/model';
@@ -110,6 +110,27 @@ describe('Agent self-update', () => {
     expect(needsManualUpgrade({ agent: agent({ selfUpdate: false }), revoked: false })).toBe(true);
     expect(needsManualUpgrade({ agent: agent({ selfUpdate: undefined }), revoked: false }), 'unknown is not "cannot"').toBe(false);
     expect(needsManualUpgrade({ agent: agent({ selfUpdate: false, outdated: false }), revoked: false })).toBe(false);
+  });
+  it('offers it again for an update the Server would replace: a request for another version, or no progress for 30 minutes', () => {
+    const stale = { updatedAt: ago(31 * MIN) };
+    expect(updateStranded({ agent: agent(), update: update('requested', { targetVersion: '0.8.5' }) }), 'the Server was upgraded since').toBe(true);
+    expect(updateStranded({ agent: agent(), update: update('requested', stale) }), 'a request is never abandoned').toBe(false);
+    for (const s of ['downloading', 'restarting']) {
+      expect(updateStranded({ agent: agent(), update: update(s, stale) }), s).toBe(true);
+      expect(canUpdateAgent({ agent: agent(), revoked: false, update: update(s, stale) }), s).toBe(true);
+      expect(updateStranded({ agent: agent(), update: update(s, { updatedAt: ago(29 * MIN) }) }), s).toBe(false);
+    }
+    expect(updateStranded({ agent: agent(), update: update('failed', stale) })).toBe(false);
+    expect(canUpdateAgent({ agent: agent(), revoked: false, update: update('requested', { targetVersion: '0.8.5' }) })).toBe(true);
+  });
+  it('waits for the new version after a success: telemetry reports it separately, for at most 10 minutes', () => {
+    const done = (over: object = {}) => update('succeeded', { finishedAt: ago(MIN), ...over });
+    expect(updateSettling({ agent: agent(), update: done() })).toBe(true);
+    expect(updatePending({ agent: agent(), update: done() })).toBe(true);
+    expect(canUpdateAgent({ agent: agent(), revoked: false, update: done() }), 'no second request for the same version').toBe(false);
+    expect(updateSettling({ agent: agent({ version: '0.9.0', outdated: false }), update: done() }), 'reported').toBe(false);
+    expect(updateSettling({ agent: agent(), update: done({ finishedAt: ago(11 * MIN) }) }), 'gave up').toBe(false);
+    expect(updatePending({ agent: agent(), update: update('restarting', { updatedAt: ago(31 * MIN) }) }), 'stranded').toBe(false);
   });
   it('labels every state with an icon and a word, and the list badge says updating or update failed', () => {
     expect(updateMeta('requested')).toMatchObject({ level: 'info', kind: 'clock', label: 'Update requested' });

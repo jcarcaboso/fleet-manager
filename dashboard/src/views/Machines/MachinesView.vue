@@ -12,7 +12,7 @@ import { useLoad } from '@/composables/useLoad';
 import { useFleet } from '@/context';
 import { soft } from '@/lib/errors';
 import { enc, num, slug } from '@/lib/format';
-import { errorCount, failuresFromIssues, fromList, health, issuesByNode, updateActive, type Health, type NodeView } from '@/lib/model';
+import { errorCount, failuresFromIssues, fromList, health, issuesByNode, updatePending, type Health, type NodeView } from '@/lib/model';
 import { useRepositorySync } from '../Repository/useRepositorySync';
 import AgentUpdates from './AgentUpdates.vue';
 import { GROUPS, SORTS, comparator, matches, sections, sortByName, type GroupKey } from './gallery';
@@ -93,20 +93,20 @@ watch(data, () => { polled.value = new Map(); });
 const allNodes = computed(() => (data.value?.nodes ?? []).map(n => polled.value.get(n.id) ?? n));
 let updatePoll: { stop(): void } | null = null;
 function followUpdates(): void {
-  if (updatePoll || !allNodes.value.some(n => !n.revoked && updateActive(n.update))) return;
+  if (updatePoll || !allNodes.value.some(n => !n.revoked && updatePending(n))) return;
   updatePoll = view.poll(token => api.all<NodeListItem>('nodes', { maxPages: 5, signal: token.signal }), {
     intervalMs: UPDATE_POLL_MS, timeoutMs: UPDATE_WAIT_MS, immediate: false,
     done: r => {
       const next = new Map(r.items.map(x => [x.nodeId, fromList(x)] as const));
       polled.value = next;
-      if ([...next.values()].some(n => !n.revoked && updateActive(n.update))) return false;
+      if ([...next.values()].some(n => !n.revoked && updatePending(n))) return false;
       void quietReload(); // health, issues and the navigation badge follow the results
       return true;
     },
     onStop: () => { updatePoll = null; },
   });
 }
-watch(() => allNodes.value.filter(n => !n.revoked && updateActive(n.update)).length, () => followUpdates());
+watch(() => allNodes.value.filter(n => !n.revoked && updatePending(n)).length, () => followUpdates());
 const { sync } = useRepositorySync(quietReload);
 /* A link was created or revoked, or a wizard that made one closed: the gallery and its Enrollment tile are stale. */
 watch(() => bus.version, () => { void quietReload(); });

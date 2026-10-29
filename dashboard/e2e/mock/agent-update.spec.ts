@@ -104,7 +104,7 @@ test.describe('Agent self-update on the machine page', () => {
 });
 
 test.describe('updating outdated Agents from the Machines page', () => {
-  test('asks first, sends allOutdated, shows a result per machine and the cards follow', async ({ page }) => {
+  test('asks first, sends the ticked machines, shows a result per machine and the cards follow', async ({ page }) => {
     await open(page, '/machines', { releasedelay: 0 });
     const bar = page.locator('#agent-updates');
     await expect(bar).toContainText('4 Agents older than the Server. 2 can update themselves and 2 need a manual upgrade first.');
@@ -118,12 +118,13 @@ test.describe('updating outdated Agents from the Machines page', () => {
     expect(await mockWrites(page)).toHaveLength(0);
 
     await dialog(page).getByRole('button', { name: 'Update 2 Agents' }).click();
-    await expect(dialog(page)).toContainText('Requested for 2 of 4 machines. They install 0.9.0 after their next check-in.');
+    await expect(dialog(page)).toContainText('Requested for 2 of 2 machines. They install 0.9.0 after their next check-in.');
     await expect(dialog(page).locator('li[data-requested="true"]')).toHaveCount(2);
-    await expect(dialog(page).locator('li[data-node="mba-travel"]')).toContainText('agent_update_unsupported');
+    await expect(dialog(page).locator('li[data-node="fedora-ws"]')).toContainText('Update requested');
     const writes = await mockWrites(page);
     expect(writes).toHaveLength(1);
-    expect(writes[0]).toMatchObject({ path: 'agent-updates', status: 200, body: { allOutdated: true } });
+    expect(writes[0]).toMatchObject({ path: 'agent-updates', status: 200 });
+    expect(writes[0]!.body).toEqual({ nodes: [expect.stringMatching(/^[0-9a-f-]{36}$/), expect.stringMatching(/^[0-9a-f-]{36}$/)] });
 
     await dialog(page).getByRole('button', { name: 'Done' }).click();
     await expect(dialog(page)).toBeHidden();

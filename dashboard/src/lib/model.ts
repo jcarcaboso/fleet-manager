@@ -7,7 +7,7 @@ import type {
   AgentUpdate, AssignmentState, CommitInfo, DesiredRevisionDetail, DriftEvent, Freshness, InstallMethod, Issue, IssueStateKey, NodeAgent, NodeCredential, NodeDetail,
   NodeDisk, NodeListAgent, NodeListDisk, NodeListItem, NodeTarget, RolloutDetail, ScanOutcome, ServiceManager, StateCounts,
 } from '@/api/types';
-import { DAY, listText, ms, now, plural, rel, shortSha, span, valid } from './format';
+import { DAY, listText, MIN, ms, now, plural, rel, shortSha, span, valid } from './format';
 import type { GlyphKind, GlyphLevel, StatusMeta } from './status';
 import { countTotal, emptyCounts, targetShort, type TargetLike } from './targets';
 
@@ -164,8 +164,29 @@ export const agentOutdated = (n: Pick<NodeView, 'agent' | 'revoked'>): boolean =
 /** Requested, downloading and restarting: the Server or the Agent is still working on it. */
 export const UPDATE_ACTIVE: readonly string[] = ['requested', 'downloading', 'restarting'];
 export const updateActive = (u: Pick<AgentUpdateView, 'state'> | null | undefined): boolean => !!u && UPDATE_ACTIVE.includes(u.state);
-/** Whether to offer Update Agent: an outdated Agent that can update itself, on a live machine, with no update in progress. */
-export const canUpdateAgent = (n: Pick<NodeView, 'agent' | 'revoked' | 'update'>): boolean => agentOutdated(n) && n.agent!.selfUpdate === true && !updateActive(n.update);
+/** The Server's `AgentUpdateRules.AbandonedAfter`: a download or restart without progress for this long can be replaced. */
+export const UPDATE_ABANDONED = 30 * MIN;
+/**
+ * An active update the Server would replace on a new request, like `RequestAgentUpdateAsync`: a request for another version than the
+ * Server's (it was upgraded since, and the Agent is no longer sent the old one), or a download or restart without progress for 30 minutes.
+ */
+export function updateStranded(n: Pick<NodeView, 'agent' | 'update'>): boolean {
+  const u = n.update;
+  if (!u || !updateActive(u)) return false;
+  if (u.state === 'requested') return !!n.agent?.latestVersion && !!u.targetVersion && u.targetVersion !== n.agent.latestVersion;
+  return now() - (ms(u.updatedAt) ?? now()) > UPDATE_ABANDONED;
+}
+/**
+ * A succeeded update whose new version the Agent has not reported yet: success follows the first poll, telemetry comes separately. Only
+ * for 10 minutes after it finished, so an Agent that never reports does not keep the page waiting.
+ */
+export const updateSettling = (n: Pick<NodeView, 'agent' | 'update'>): boolean =>
+  n.update?.state === 'succeeded' && !!n.agent && !!n.update.targetVersion && n.agent.version !== n.update.targetVersion
+  && now() - (ms(n.update.finishedAt) ?? 0) <= 10 * MIN;
+/** The dashboard follows the update until the Agent finishes it and reports the new version; a stranded one can be requested again. */
+export const updatePending = (n: Pick<NodeView, 'agent' | 'update'>): boolean => (updateActive(n.update) && !updateStranded(n)) || updateSettling(n);
+/** Whether to offer Update Agent: an outdated Agent that can update itself, on a live machine, with no update pending. */
+export const canUpdateAgent = (n: Pick<NodeView, 'agent' | 'revoked' | 'update'>): boolean => agentOutdated(n) && n.agent!.selfUpdate === true && !updatePending(n);
 /** An outdated Agent that cannot update itself: it needs one manual upgrade and `fleet-agent service install` first. */
 export const needsManualUpgrade = (n: Pick<NodeView, 'agent' | 'revoked'>): boolean => agentOutdated(n) && n.agent!.selfUpdate === false;
 export const UPDATE_STATE: Record<string, StatusMeta> = {

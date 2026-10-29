@@ -326,8 +326,12 @@ the wire contract.
 - **Dashboard.** The machine page has no Agent tab, so **Update Agent** and the
   update state are in the Machine panel on Overview. **Update outdated Agents**
   on the machines list asks for confirmation, lets the Operator untick machines
-  (`{"nodes": [...]}`, or `{"allOutdated": true}` when all stay ticked) and
-  shows a result per machine. The Problems pages offer the action for
+  and sends the ticked Node IDs (`{"nodes": [...]}`; never `allOutdated`, which
+  would also replace abandoned updates the dialog did not offer) and shows a
+  result per machine. An update the Server would replace (a request for an
+  older Server version, or no progress for 30 minutes) can be requested again,
+  and the dashboard keeps reading a machine after `succeeded` until its
+  telemetry reports the new version. The Problems pages offer the action for
   `agent_update_failed`, and for `agent_outdated` when the issue's commands
   include `fleet nodes update`.
 - **End-to-end test.** `scripts/smoke-agent-update.sh` builds a Server and two

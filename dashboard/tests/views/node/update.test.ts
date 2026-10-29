@@ -48,6 +48,11 @@ describe('Update Agent (an Agent that can update itself)', () => {
     expect(t.exists('#agent-update [data-act=agent-update-cancel]'), 'no Cancel once the Agent started').toBe(false);
     await advance(5000);
     expect(state().attributes('data-state')).toBe('succeeded');
+    /* Success follows the new version's first poll; the version it runs arrives with its telemetry 3 s later. */
+    expect(t.exists('#agent-upgrade [data-act=agent-update]'), 'not offered again while the new version has not reported').toBe(false);
+    const settling = reads('fedora-ws');
+    await advance(5000);
+    expect(reads('fedora-ws'), 'still read after the success').toBeGreaterThan(settling);
     await t.app.settle();
     expect(t.text('#agent-update .aupd-head')).toBe('Updated 0.9.0-rc.2 → 0.9.0');
     expect(t.text('#agent-update')).toMatch(/The Agent runs the new version\./);
