@@ -1,54 +1,48 @@
 class FleetAgent < Formula
   desc "Node agent for Fleet Manager"
   homepage "https://github.com/jcarcaboso/fleet-manager"
-  version "0.11.0"
+  version "0.12.1"
   license "MIT"
 
   on_macos do
     depends_on macos: :ventura
 
     if Hardware::CPU.arm?
-      url "https://github.com/jcarcaboso/fleet-manager/releases/download/v0.11.0/fleet-agent-macos-arm64.tar.gz"
-      sha256 "12d8f07052e2ee789eaef50cbf2c767f302b6b40eefa10101c22a6f48eb6881b"
+      url "https://github.com/jcarcaboso/fleet-manager/releases/download/v0.12.1/fleet-agent-macos-arm64.tar.gz"
+      sha256 "79acb1375bc5962971ff7118928309f36beeb908d6b1985036c41da2f659f6f0"
     else
-      url "https://github.com/jcarcaboso/fleet-manager/releases/download/v0.11.0/fleet-agent-macos-amd64.tar.gz"
-      sha256 "3d65734f43ab84559d8250e7d85792774ab0ac9b1aacf032488a338ced2a428d"
+      url "https://github.com/jcarcaboso/fleet-manager/releases/download/v0.12.1/fleet-agent-macos-amd64.tar.gz"
+      sha256 "10cd3e4c6f2dc25c76ccd773fc1436a01223aee3aa32b48e77e0368a4295444e"
     end
   end
 
   on_linux do
     depends_on arch: :x86_64
 
-    url "https://github.com/jcarcaboso/fleet-manager/releases/download/v0.11.0/fleet-agent-linux-amd64.tar.gz"
-    sha256 "947c4cdd66862b4847d76c5c976a606a2652512e31fb0b148734058737bdb375"
+    url "https://github.com/jcarcaboso/fleet-manager/releases/download/v0.12.1/fleet-agent-linux-amd64.tar.gz"
+    sha256 "f84f1b6a5d5f67247dd5503492f0d8b9ae7a13ea3a396ee1c90430df61f7280e"
   end
 
   def install
     bin.install "fleet-agent"
   end
 
-  service do
-    run [opt_bin/"fleet-agent", "run"]
-    keep_alive true
-    restart_delay 15
-    log_path var/"log/fleet-agent.log"
-    error_log_path var/"log/fleet-agent.log"
-  end
-
   def caveats
     <<~EOS
-      Enroll the Agent before starting its Homebrew service. Then run:
+      Enroll the Agent, then install and start its background service:
 
-        brew services start fleet-agent
+        fleet-agent enroll --link
+        fleet-agent service install
 
-      Manage this service with `brew services`, not `fleet-agent service`, and
-      do not run both at the same time. Its log is
-      #{var}/log/fleet-agent.log.
+      The service runs its own copy of fleet-agent. After `brew upgrade
+      fleet-agent`, run `fleet-agent service install` again to switch it to
+      the new version. If an older release runs as a Homebrew service,
+      `fleet-agent service install` stops it and replaces it.
     EOS
   end
 
   test do
-    assert_match "fleet-agent 0.11.0", shell_output("#{bin}/fleet-agent --version")
+    assert_match "fleet-agent 0.12.1", shell_output("#{bin}/fleet-agent --version")
     system "#{bin}/fleet-agent", "--help"
   end
 end
