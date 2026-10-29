@@ -103,3 +103,25 @@ jobs:
         env:
           FLEET_DASHBOARD_IMAGE: fleet-dashboard:ci
       - run: scripts/smoke-dashboard-image.sh fleet-dashboard:ci
+
+  linux-archives:
+    name: Linux client archives
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      # The tag workflow packages Linux clients with this script from a partial copy of the source; build it on every change.
+      - name: Build and package
+        run: |
+          version=$(sed -n 's/^version = "\(.*\)"$/\1/p' clients/Cargo.toml | head -n 1)
+          FLEET_RELEASE_VERSION="v$version" ./scripts/build-cli.sh
+      - name: The Agent embeds every committed release key
+        run: |
+          set -eu
+          work=$(mktemp -d)
+          tar -xzf artifacts/fleet-agent-linux-amd64.tar.gz -C "$work"
+          for key in clients/bins/fleet-agent/release-keys/*.pem; do
+            [ -f "$key" ] || continue
+            body=$(sed -n '2p' "$key")
+            grep -aqF "$body" "$work/fleet-agent" || { echo "fleet-agent does not embed $key" >&2; exit 1; }
+            echo "fleet-agent embeds $key"
+          done

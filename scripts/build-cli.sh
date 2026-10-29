@@ -36,6 +36,16 @@ for client_dir in bins/fleet-agent crates/fleet-reconcile; do
     install -m 0644 "$repo_dir/clients/$client_dir/Cargo.toml" "$work_dir/context/clients/$client_dir/Cargo.toml"
     cp -R "$repo_dir/clients/$client_dir/src" "$work_dir/context/clients/$client_dir/src"
 done
+# The Agent's build script compiles in the release public keys; without them it would refuse every self-update.
+install -m 0644 "$repo_dir/clients/bins/fleet-agent/build.rs" "$work_dir/context/clients/bins/fleet-agent/build.rs"
+mkdir -p "$work_dir/context/clients/bins/fleet-agent/release-keys"
+set -- "$repo_dir"/clients/bins/fleet-agent/release-keys/*.pem
+if [ -f "$1" ]; then
+    install -m 0644 "$@" "$work_dir/context/clients/bins/fleet-agent/release-keys/"
+elif [ -n "${FLEET_RELEASE_VERSION:-}" ]; then
+    printf 'No Agent release public key in clients/bins/fleet-agent/release-keys/\n' >&2
+    exit 1
+fi
 install -m 0644 \
     "$repo_dir/contracts/operator/nodes-page.json" \
     "$work_dir/context/contracts/operator/nodes-page.json"
