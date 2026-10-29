@@ -7,7 +7,7 @@ import type { ErrorCatalog } from '@/composables/catalog';
 import { actorName, auditLabel } from '@/lib/audit';
 import { DAY, bytes, fmtDay, fmtFull, listText, ms, now, platformLabel, plural, rel, shortSha, span, valid } from '@/lib/format';
 import {
-  agentOutdated, certLeft, diskLevel, issueBadge, issueKind, issueLevel, issueState, LRANK, recentDrift, total,
+  agentOutdated, certLeft, diskLevel, updateActive, updateMeta, issueBadge, issueKind, issueLevel, issueState, LRANK, recentDrift, total,
   INSTALL, type Failure, type IssueLevel, type IssueStateView, type NodeDetailView,
 } from '@/lib/model';
 import type { GlyphKind, GlyphLevel } from '@/lib/status';
@@ -110,9 +110,14 @@ export function healthChecks(n: NodeDetailView): HealthCheck[] {
 
   if (!n.revoked && n.agent?.version) {
     const a = n.agent;
-    out.push(a.outdated
-      ? { level: 'warning', kind: 'bang', title: 'Agent update available', text: `Running ${a.version}${a.latestVersion ? `; ${a.latestVersion} is the latest` : ''}` }
-      : { level: 'good', kind: 'check', title: 'Agent is up to date', text: `Running ${a.version}` });
+    const u = n.update;
+    out.push(updateActive(u)
+      ? { level: 'info', kind: 'sync', title: 'Agent is updating', text: `${updateMeta(u!.state).label}: ${a.version} → ${u!.targetVersion ?? 'a newer version'}` }
+      : a.outdated && u?.state === 'failed'
+        ? { level: 'warning', kind: 'bang', title: 'Agent update failed', text: `Running ${a.version}; the update to ${u.targetVersion ?? 'a newer version'} failed${u.errorCode ? ` with ${u.errorCode}` : ''}` }
+        : a.outdated
+          ? { level: 'warning', kind: 'bang', title: 'Agent update available', text: `Running ${a.version}${a.latestVersion ? `; ${a.latestVersion} is the latest` : ''}` }
+          : { level: 'good', kind: 'check', title: 'Agent is up to date', text: `Running ${a.version}` });
   }
 
   const drift = recentDrift(n);
@@ -169,7 +174,8 @@ export function agentFact(n: NodeDetailView): { version: string; warn: boolean; 
   if (!a?.version) return null;
   const old = agentOutdated(n);
   const method = a.installMethod ? (INSTALL as Record<string, string>)[a.installMethod] || a.installMethod : 'install method not reported';
-  return { version: a.version, warn: old, sub: `${method} · ${old ? `${a.latestVersion || 'a newer version'} available` : n.revoked ? 'revoked' : 'up to date'}` };
+  const state = n.revoked ? 'revoked' : updateActive(n.update) ? `updating to ${n.update!.targetVersion || 'a newer version'}` : old ? `${a.latestVersion || 'a newer version'} available` : 'up to date';
+  return { version: a.version, warn: old, sub: `${method} · ${state}` };
 }
 
 /* ------------------------------------------------------------------ Activity */

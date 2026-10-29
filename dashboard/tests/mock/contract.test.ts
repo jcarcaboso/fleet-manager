@@ -2,7 +2,7 @@
  * The mock answers like the Server (ports of the `fixtureContract` and `fixturePhase4` scenarios of the old Dev/drive.js,
  * plus the response shapes of contracts/operator/*.json). Every view test relies on this, so it is tested on its own.
  */
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import type { AuditEvent, DesiredRevisionDetail, DesiredRevisionItem, Issue, NodeDetail, NodeListItem, Page, RolloutDetail, RolloutItem } from '@/api/types';
 import { contract } from '../helpers/contracts';
 import { loginClient, mockApi } from '../helpers/mock';
@@ -390,6 +390,187 @@ describe('conventions', () => {
       expect(node.freshness).toBe('fresh');
       expect(mock.audit.some(e => e.action === 'node_enrolled' && e.subject === 'new-box')).toBe(true);
     } finally { vi.useRealTimers(); mock.dispose(); }
+  });
+});
+
+describe('Agent self-update (agent-self-update.md, "Server")', () => {
+  const UPDATE_KEYS = 'errorCode,finishedAt,fromVersion,requestedAt,requestedBy,state,targetVersion,updatedAt';
+  const byAlias = (mock: { nodes: Array<{ alias: string; id: string }> }, alias: string) => mock.nodes.find(n => n.alias === alias)!;
+
+  it('the list and the detail carry agent.selfUpdate and agentUpdate (null without an update); agent=0 has neither', async () => {
+    const { get, mock } = setup({ releaseDelay: 0 });
+    const list = ((await get('nodes')).body as Page<NodeListItem>).items;
+    const item = (alias: string) => list.find(i => i.name === alias)!;
+    expect(item('fedora-ws').agent!.selfUpdate).toBe(true);
+    expect(item('laptop-ana').agent!.selfUpdate).toBe(false);
+    expect(item('fedora-ws').agentUpdate).toBeNull();
+    expect(item('kitchen-mini').agent).toBeNull();
+    expect(item('kitchen-mini').agentUpdate).toBeNull();
+    const failed = item('build-runner-03').agentUpdate!;
+    expect(keys(failed)).toBe(UPDATE_KEYS);
+    expect(failed).toMatchObject({ fromVersion: '0.9.0-rc.1', targetVersion: '0.9.0', state: 'failed', errorCode: 'agent_update_smoke_test', requestedBy: 'ana' });
+    expect(failed.finishedAt).toBe(failed.updatedAt);
+    const detail = (await get('nodes/' + byAlias(mock, 'build-runner-03').id)).body as NodeDetail;
+    expect(detail.agentUpdate).toEqual(failed);
+    expect(detail.agent!.selfUpdate).toBe(true);
+    const old = setup({ agent: false });
+    const oldItem = ((await old.get('nodes')).body as Page<NodeListItem>).items[0]!;
+    expect('agentUpdate' in oldItem || 'agent' in oldItem).toBe(false);
+  });
+
+  it('requesting checks the Node first, in the Server\'s order, then returns the request (202) and repeats it unchanged', async () => {
+    const { post, is, mock } = setup({ releaseDelay: 0 });
+    is(await post('nodes/nobody-here/agent-update'), 404, 'node_not_found');
+    is(await post('nodes/old-laptop/agent-update'), 409, 'node_revoked');
+    const manual = await post('nodes/laptop-ana/agent-update');
+    is(manual, 409, 'agent_update_unsupported');
+    expect(manual.body.message).toContain('fleet-agent service install');
+    is(await post('nodes/kitchen-mini/agent-update'), 409, 'agent_update_unsupported');
+    const current = await post('nodes/studio-mini/agent-update');
+    is(current, 409, 'agent_update_current');
+    expect(current.body.message).toBe('The Agent already runs version 0.9.0.');
+    const first = await post('nodes/fedora-ws/agent-update');
+    is(first, 202);
+    expect(keys(first.body)).toBe(UPDATE_KEYS);
+    expect(first.body).toMatchObject({ fromVersion: '0.9.0-rc.2', targetVersion: '0.9.0', state: 'requested', errorCode: null, requestedBy: 'joan', finishedAt: null });
+    const again = await post('nodes/fedora-ws/agent-update');
+    is(again, 202);
+    expect(again.body).toEqual(first.body);
+    const fedora = byAlias(mock, 'fedora-ws');
+    const audited = mock.audit.filter(e => e.action === 'agent.update_requested');
+    expect(audited, 'only the first request is recorded').toHaveLength(1);
+    expect(audited[0]).toMatchObject({ actor: 'joan', nodeId: fedora.id, detail: '0.9.0-rc.2 -> 0.9.0' });
+    mock.dispose();
+  });
+
+  it('cancel works only while the Agent has not picked the request up', async () => {
+    const { post, is, mock } = setup({ releaseDelay: 0 });
+    is(await post('nodes/nobody-here/agent-update/cancel'), 404, 'node_not_found');
+    is(await post('nodes/fedora-ws/agent-update/cancel'), 409, 'agent_update_not_cancellable');
+    is(await post('nodes/build-runner-03/agent-update/cancel'), 409, 'agent_update_not_cancellable');
+    is(await post('nodes/build-runner-03/agent-update'), 202);
+    const cancelled = await post('nodes/build-runner-03/agent-update/cancel');
+    is(cancelled, 200);
+    expect(cancelled.body).toMatchObject({ state: 'cancelled', targetVersion: '0.9.0' });
+    expect(cancelled.body.finishedAt).toBe(cancelled.body.updatedAt);
+    is(await post('nodes/build-runner-03/agent-update/cancel'), 409, 'agent_update_not_cancellable');
+    expect(mock.audit.find(e => e.action === 'agent.update_cancelled')).toMatchObject({ actor: 'joan', detail: '0.9.0' });
+    is(await post('nodes/build-runner-03/agent-update'), 202);
+    mock.dispose();
+  });
+
+  it('the simulated Agent goes requested, downloading, restarting, succeeded, and then runs the new version', async () => {
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'Date'] });
+    const { get, post, is, mock } = setup({ releaseDelay: 0, updateDelay: 1000 });
+    try {
+      const fedora = byAlias(mock, 'fedora-ws');
+      const state = async () => ((await get('nodes/fedora-ws')).body as NodeDetail).agentUpdate!.state;
+      is(await post('nodes/fedora-ws/agent-update'), 202);
+      expect(await state()).toBe('requested');
+      await vi.advanceTimersByTimeAsync(1000);
+      expect(await state()).toBe('downloading');
+      is(await post('nodes/fedora-ws/agent-update'), 409, 'agent_update_in_progress');
+      is(await post('nodes/fedora-ws/agent-update/cancel'), 409, 'agent_update_not_cancellable');
+      await vi.advanceTimersByTimeAsync(1000);
+      expect(await state()).toBe('restarting');
+      await vi.advanceTimersByTimeAsync(1000);
+      const done = (await get('nodes/fedora-ws')).body as NodeDetail;
+      expect(done.agentUpdate).toMatchObject({ state: 'succeeded', errorCode: null });
+      expect(done.agentUpdate!.finishedAt).not.toBeNull();
+      expect(done.agent).toMatchObject({ version: '0.9.0', outdated: false });
+      expect(mock.audit.find(e => e.action === 'agent.update_succeeded')).toMatchObject({ actor: fedora.id, nodeId: fedora.id, detail: '0.9.0' });
+      const events = ((await get(`audit?node=${fedora.id}&order=newest`)).body as Page<AuditEvent>).items;
+      expect(events.slice(0, 2).map(e => e.action)).toEqual(['agent.update_succeeded', 'agent.update_requested']);
+      expect(((await get('issues')).body.items as Issue[]).some(i => i.nodeId === fedora.id && /^agent_/.test(i.code)), 'no Agent issue any more').toBe(false);
+      is(await post('nodes/fedora-ws/agent-update'), 409, 'agent_update_current');
+    } finally { vi.useRealTimers(); mock.dispose(); }
+  });
+
+  it('a machine in updateFail fails the smoke test; its issue becomes agent_update_failed; an offline machine never picks the request up', async () => {
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'Date'] });
+    const { get, post, is, mock } = setup({ releaseDelay: 0, updateDelay: 1000, updateFail: ['fedora-ws'] });
+    try {
+      const fedora = byAlias(mock, 'fedora-ws');
+      const issue = async (alias: string) => ((await get('issues')).body.items as Issue[]).find(i => i.nodeName === alias && /^agent_/.test(i.code));
+      expect((await issue('fedora-ws'))!.code).toBe('agent_outdated');
+      is(await post('nodes/fedora-ws/agent-update'), 202);
+      is(await post('nodes/build-runner-03/agent-update'), 202);
+      expect((await issue('build-runner-03'))!.code, 'a requested update is not a failed one').toBe('agent_outdated');
+      await vi.advanceTimersByTimeAsync(5000);
+      expect(((await get('nodes/fedora-ws')).body as NodeDetail).agentUpdate).toMatchObject({ state: 'failed', errorCode: 'agent_update_smoke_test' });
+      expect(((await get('nodes/fedora-ws')).body as NodeDetail).agent!.version).toBe('0.9.0-rc.2');
+      expect(((await get('nodes/build-runner-03')).body as NodeDetail).agentUpdate!.state, 'offline: still waiting').toBe('requested');
+      const failed = (await issue('fedora-ws'))!;
+      expect(failed).toMatchObject({
+        id: `agent_update_failed:${fedora.id}`, code: 'agent_update_failed', severity: 'warning', title: 'fedora-ws: Agent update failed', errorCode: 'agent_update_smoke_test',
+        detail: 'The update to 0.9.0 failed with agent_update_smoke_test; the Agent still runs version 0.9.0-rc.2.',
+        commands: ['fleet nodes show fedora-ws', 'fleet explain agent_update_smoke_test', 'fleet nodes update fedora-ws'],
+      });
+      expect(failed.action).toMatch(/fleet-agent --version/);
+      expect(mock.audit.find(e => e.action === 'agent.update_failed')).toMatchObject({ actor: fedora.id, detail: 'agent_update_smoke_test' });
+    } finally { vi.useRealTimers(); mock.dispose(); }
+  });
+
+  it('agent_outdated lists fleet nodes update only for an Agent that can update itself', async () => {
+    const { get } = setup();
+    const items = (await get('issues')).body.items as Issue[];
+    const of = (alias: string) => items.find(i => i.nodeName === alias && /^agent_/.test(i.code))!;
+    expect(of('fedora-ws').commands).toEqual(['fleet nodes show fedora-ws', 'fleet nodes update fedora-ws']);
+    expect(of('fedora-ws').action).toMatch(/^Update it with Update Agent in the dashboard/);
+    expect(of('laptop-ana').commands).toEqual(['fleet nodes show laptop-ana']);
+    expect(of('mba-travel').action).toMatch(/brew upgrade fleet-agent/);
+    expect(of('build-runner-03').code).toBe('agent_update_failed');
+  });
+
+  it('POST agent-updates: one result per Node, in the order asked; allOutdated takes every outdated live Node by alias', async () => {
+    const { post, is, mock } = setup({ releaseDelay: 0 });
+    for (const body of [{}, { nodes: [] }, { allOutdated: false }, { allOutdated: true, nodes: ['fedora-ws'] }, { nodes: ['fedora-ws', ' '] }, { nodes: Array(501).fill('x') }]) {
+      is(await post('agent-updates', body), 400, 'invalid_request');
+    }
+    const picked = await post('agent-updates', { nodes: ['nobody', 'laptop-ana', 'fedora-ws', 'fedora-ws', byAlias(mock, 'studio-mini').id] });
+    is(picked, 200);
+    expect(keys(picked.body)).toBe('items,targetVersion');
+    expect(picked.body.targetVersion).toBe('0.9.0');
+    expect(picked.body.items.map((i: any) => [i.node, i.requested, i.code])).toEqual([
+      ['nobody', false, 'node_not_found'], ['laptop-ana', false, 'agent_update_unsupported'], ['fedora-ws', true, null], [byAlias(mock, 'studio-mini').id, false, 'agent_update_current'],
+    ]);
+    expect(keys(picked.body.items[0])).toBe('agentUpdate,code,message,node,nodeId,requested');
+    expect(picked.body.items[0]).toMatchObject({ nodeId: null, message: 'Node was not found.', agentUpdate: null });
+    expect(picked.body.items[2].agentUpdate).toMatchObject({ state: 'requested', targetVersion: '0.9.0' });
+    expect(picked.body.items[2].nodeId).toBe(byAlias(mock, 'fedora-ws').id);
+    const all = await post('agent-updates', { allOutdated: true });
+    is(all, 200);
+    expect(all.body.items.map((i: any) => [i.node, i.requested, i.code])).toEqual([
+      ['build-runner-03', true, null], ['fedora-ws', true, null], ['laptop-ana', false, 'agent_update_unsupported'], ['mba-travel', false, 'agent_update_unsupported'],
+    ]);
+    expect(all.body.items[1].agentUpdate, 'still requested: the same update').toEqual(picked.body.items[2].agentUpdate);
+    mock.dispose();
+  });
+
+  it('a release that cannot be mirrored fails the request: 503 agent_release_unavailable, 502 agent_release_invalid; admin only', async () => {
+    const unavailable = setup({ releaseDelay: 0, release: 'unavailable' });
+    const r = await unavailable.post('nodes/fedora-ws/agent-update');
+    unavailable.is(r, 503, 'agent_release_unavailable');
+    expect(r.body.message).toMatch(/^Agent release 0\.9\.0 is not published yet/);
+    unavailable.is(await unavailable.post('agent-updates', { allOutdated: true }), 503, 'agent_release_unavailable');
+    unavailable.is(await unavailable.post('nodes/laptop-ana/agent-update'), 409, 'agent_update_unsupported');
+    expect(unavailable.mock.nodes.every(n => n._update?.state !== 'requested')).toBe(true);
+    const invalid = setup({ releaseDelay: 0, release: 'invalid' });
+    invalid.is(await invalid.post('nodes/fedora-ws/agent-update'), 502, 'agent_release_invalid');
+    const op = setup({ scope: 'operate' });
+    op.is(await op.post('nodes/fedora-ws/agent-update'), 403, 'insufficient_scope');
+    op.is(await op.post('nodes/fedora-ws/agent-update/cancel'), 403, 'insufficient_scope');
+    op.is(await op.post('agent-updates', { allOutdated: true }), 403, 'insufficient_scope');
+  });
+
+  it('the error catalog has every Agent update code', async () => {
+    const { get } = setup();
+    const codes = ((await get('errors')).body.items as Array<{ code: string; source: string }>);
+    const source = (code: string) => codes.find(c => c.code === code)?.source;
+    for (const c of ['unmanaged', 'untrusted', 'invalid_manifest', 'downgrade', 'platform', 'download', 'too_large', 'digest', 'smoke_test', 'install', 'crash_loop', 'no_contact', 'rolled_back']) expect(source(`agent_update_${c}`), c).toBe('agent');
+    for (const c of ['agent_update_unsupported', 'agent_update_current', 'agent_update_in_progress', 'agent_update_not_cancellable', 'agent_update_not_requested', 'agent_release_unavailable', 'agent_release_invalid', 'agent_release_not_found']) expect(source(c), c).toBe('server');
+    expect(source('agent_update_failed')).toBe('issue');
+    expect((await get('errors/agent_update_smoke_test')).body.title).toBe('The new binary did not start on this machine');
   });
 });
 

@@ -15,7 +15,7 @@ import StatusPill from '@/components/StatusPill.vue';
 import StepsList from '@/components/StepsList.vue';
 import { useFleet } from '@/context';
 import { fmtFull, num, rel, shortId, shortSha, slug } from '@/lib/format';
-import { fixSteps, type NodeDetailView } from '@/lib/model';
+import { canUpdateAgent, fixSteps, type NodeDetailView } from '@/lib/model';
 import { hasDetail, stepLabel, targetLabel, targetWhere, tstate } from '@/lib/targets';
 import { nodeRoute } from '@/router';
 import type { ProblemEntry } from './nodeModel';
@@ -23,7 +23,8 @@ import { useNodePage } from './nodePage';
 
 /**
  * One problem of the machine: a failed Target (with the Agent's detail, a retry, and its recent attempts) or an issue (disk, Agent
- * outdated, not contacting). The catalog's explanation and fix steps come first; commands from the Server are shown as text.
+ * outdated, not contacting). The catalog's explanation and fix steps come first; commands from the Server are shown as text. An outdated
+ * Agent that can update itself, or one whose update failed, gets Update Agent.
  */
 const props = defineProps<{ node: NodeDetailView; problem: ProblemEntry }>();
 const { openState } = useFleet();
@@ -68,6 +69,8 @@ const attempts = computed(() => (t.value ? page.tab.tAttempts.get(t.value.name) 
 const retrying = computed(() => !!t.value && page.retrying.has(props.node.id + ':' + t.value.name));
 const quiet = computed(() => p.value.st.key !== 'open');
 const busy = computed(() => !!i.value && page.issueBusy.has(i.value.id));
+const updatable = computed(() => (i.value?.code === 'agent_outdated' || i.value?.code === 'agent_update_failed') && canUpdateAgent(props.node));
+const requesting = computed(() => page.update.busy === 'request');
 const techKey = computed(() => 'tech:' + props.node.id + p.value.id);
 const onToggle = (e: Event): void => { openState.set(techKey.value, (e.target as HTMLDetailsElement).open); };
 </script>
@@ -140,6 +143,10 @@ const onToggle = (e: Event): void => { openState.set(techKey.value, (e.target as
       </details>
       <footer v-if="t || i" class="prob-actions">
         <ScopeButton v-if="t" level="operate" cls="btn-sm btn-primary" data-act="retry" :data-target="t.name" :disabled="retrying || undefined" @click="page.retry(t.name)"><Icon name="retry" :class="{ spin: retrying }" />{{ retrying ? 'Requesting…' : 'Retry now' }}</ScopeButton>
+        <ScopeButton
+          v-if="updatable" level="admin" cls="btn-sm btn-primary" data-act="agent-update" :disabled="requesting || undefined" :aria-busy="requesting ? 'true' : undefined"
+          @click="page.updateAgent()"
+        ><Icon name="sync" :class="{ spin: requesting }" />{{ requesting ? 'Requesting…' : 'Update Agent' }}</ScopeButton>
         <IssueActions v-if="i" :issue="i" :busy="busy" @state="page.changeIssue($event)" />
         <LockNote level="operate" class="lock-note--inline" />
       </footer>

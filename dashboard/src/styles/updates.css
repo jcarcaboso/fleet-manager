@@ -1,0 +1,33 @@
+/* Agent self-update: the update state on the machine page, its badges in the gallery, the gallery's bulk action and its dialog.
+   Colours come from tokens.css only, so both themes apply. */
+.upgrade .btn-row{margin-top:2px}
+.upgrade .lock-note{margin-top:8px}
+.aupd{display:flex;gap:10px;align-items:flex-start;padding:12px 14px;border-radius:12px;margin:0 0 18px;font-size:13.5px;background:var(--surface-2);box-shadow:inset 0 0 0 1px var(--line)}
+.aupd>div{flex:1;min-width:0}
+.aupd p{color:var(--ink-2);margin-top:2px}
+.aupd .g,.aupd>.ic{margin-top:2px}
+.aupd .btn{margin-top:10px}
+.aupd--info{background:var(--info-bg);box-shadow:none}
+.aupd--good{background:var(--good-bg);box-shadow:none}
+.aupd--critical{background:var(--critical-bg);box-shadow:none}
+.aupd-head{display:flex;flex-wrap:wrap;gap:4px 8px;align-items:baseline}
+.aupd-head p{margin:0}
+.aupd-why code{margin-right:4px}
+.aupd-msg{font-size:13.5px;font-weight:600;margin:0 0 14px;color:var(--ink-2)}
+.aupd-msg:empty{display:none}
+.aupd-msg--warning{color:var(--warning-ink)}
+.aupd-msg--critical{color:var(--critical-ink)}
+.chip--updating{background:var(--info-bg);color:var(--info-ink);box-shadow:inset 0 0 0 1px rgba(var(--info-rgb),.45);font-weight:650}
+.chip--update-failed{background:var(--critical-bg);color:var(--critical-ink);box-shadow:inset 0 0 0 1px rgba(var(--critical-rgb),.45);font-weight:650}
+.chip--updating .g,.chip--update-failed .g{width:14px;height:14px}
+.agent-badge.is-updating{background:var(--info-bg);color:var(--info-ink);box-shadow:0 0 0 1px rgba(var(--info-rgb),.5)}
+.agent-badge.is-failed{background:var(--critical-bg);color:var(--critical-ink);box-shadow:0 0 0 1px rgba(var(--critical-rgb),.5)}
+.upd-bar{display:flex;align-items:center;gap:10px 14px;flex-wrap:wrap;padding:12px 14px;border-radius:12px;background:var(--warning-bg);font-size:13.5px;color:var(--ink-2);margin:0 0 18px}
+.upd-bar>span{display:flex;gap:10px;align-items:flex-start;flex:1 1 280px;min-width:0}
+.upd-bar .g{margin-top:2px;flex:none}
+.upd-list{list-style:none;margin:12px 0 4px;padding:0;display:flex;flex-direction:column;gap:9px;font-size:14px;color:var(--ink-2)}
+.upd-list li{display:flex;gap:10px;align-items:flex-start;min-width:0}
+.upd-list .g{margin-top:2px;flex:none}
+.upd-list li>span{min-width:0;overflow-wrap:anywhere}
+.upd-list .model-check{flex:0 1 auto;font-size:14px}
+.upd-list .muted{display:block;font-size:12.5px}

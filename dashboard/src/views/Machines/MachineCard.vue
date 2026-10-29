@@ -6,13 +6,13 @@ import Icon from '@/components/Icon.vue';
 import StatusGlyph from '@/components/StatusGlyph.vue';
 import { totalPolls } from '@/lib/charts';
 import { HOUR, bytes as bytesText, fmtDay, fmtFull, ms, now, num, platformLabel, rel } from '@/lib/format';
-import { agentOutdated, certFlag, certText, diskLevel, isAttention, osText, seenText, type Health, type NodeView } from '@/lib/model';
+import { agentOutdated, certFlag, certText, diskLevel, isAttention, osText, seenText, updateBadge, type Health, type NodeView } from '@/lib/model';
 import { tstate } from '@/lib/targets';
 import { nodeRoute } from '@/router';
 import type { StripScheduler } from './stripScheduler';
 
 /**
- * One machine in the gallery: the picture with its status and Agent badge, the name, what the Agent reported, the reason for its
+ * One machine in the gallery: the picture with its status and Agent badge (outdated, updating, update failed), the name, what the Agent reported, the reason for its
  * health, the disk meter, the check-in strip (loaded lazily by the scheduler) and the Assignment state chips.
  */
 const props = defineProps<{ node: NodeView; health: Health; strips: StripScheduler }>();
@@ -31,7 +31,10 @@ onBeforeUnmount(() => {
 const platformIcon = computed(() => (props.node.platform === 'macos' ? 'apple' : props.node.platform === 'linux' ? 'tux' : null));
 const agent = computed(() => props.node.agent);
 const outdated = computed(() => agentOutdated(props.node));
-const badgeTip = computed(() => `Agent ${agent.value?.version}|${outdated.value ? 'Update available' : props.node.revoked ? 'Revoked' : 'Up to date'}`);
+const update = computed(() => updateBadge(props.node));
+const target = computed(() => props.node.update?.targetVersion || 'a newer version');
+const updateText = computed(() => (update.value?.key === 'updating' ? `Updating to ${target.value}` : update.value ? `Update to ${target.value} failed` : ''));
+const badgeTip = computed(() => `Agent ${agent.value?.version}|${updateText.value || (outdated.value ? 'Update available' : props.node.revoked ? 'Revoked' : 'Up to date')}`);
 const sub = computed(() => {
   const a = agent.value;
   if (!a) return `${platformLabel(props.node.platform)} · enrolled ${fmtDay(props.node.enrolledAt)}`;
@@ -72,7 +75,9 @@ const stripTotal = computed(() => (buckets.value ? num(totalPolls(buckets.value)
       <DeviceArt :node="node" :health="health" />
       <span class="pill on-stage" :class="`t-${health.level}`"><StatusGlyph :level="health.level" :kind="health.kind" /><span>{{ health.label }}</span></span>
       <span v-if="!agent?.version" class="agent-badge"><Icon v-if="platformIcon" :name="platformIcon" />{{ platformLabel(node.platform) }}</span>
-      <span v-else class="agent-badge" :class="{ 'is-old': outdated }" :data-tip="badgeTip"><StatusGlyph v-if="outdated" level="warning" kind="bang" /><Icon v-else-if="platformIcon" :name="platformIcon" />Agent {{ agent.version }}</span>
+      <span v-else class="agent-badge" :class="update ? `is-${update.key}` : { 'is-old': outdated }" :data-tip="badgeTip">
+        <StatusGlyph v-if="update" :level="update.level" :kind="update.kind" /><StatusGlyph v-else-if="outdated" level="warning" kind="bang" /><Icon v-else-if="platformIcon" :name="platformIcon" />Agent {{ agent.version }}
+      </span>
     </div>
     <div class="card-body">
       <div class="card-title"><h3><RouterLink class="stretch" :to="nodeRoute(node.alias)">{{ node.alias }}</RouterLink></h3><span class="seen">{{ seenText(node) }}</span></div>
@@ -81,8 +86,9 @@ const stripTotal = computed(() => (buckets.value ? num(totalPolls(buckets.value)
       <RouterLink class="reason z" :class="`reason--${health.level}`" :to="nodeRoute(node.alias, toProblems ? 'problems' : undefined)">
         <StatusGlyph :level="health.level" :kind="health.kind" /><span>{{ health.reason }}<span v-if="health.extra" class="reason-extra">{{ ' · ' + health.extra }}</span></span><Icon name="chevR" class="rchev" />
       </RouterLink>
-      <div v-if="flag || outdated" class="flags">
-        <span v-if="outdated" class="chip chip--update"><StatusGlyph level="warning" kind="bang" />Update available</span>
+      <div v-if="flag || outdated || update" class="flags">
+        <span v-if="update" class="chip" :class="update.key === 'updating' ? 'chip--updating' : 'chip--update-failed'" data-agent-update><StatusGlyph :level="update.level" :kind="update.kind" />{{ updateText }}</span>
+        <span v-else-if="outdated" class="chip chip--update"><StatusGlyph level="warning" kind="bang" />Update available</span>
         <span v-if="flag" class="flag"><StatusGlyph :level="flag.level" :kind="flag.kind" />{{ flag.text }}</span>
       </div>
       <template v-if="!node.revoked">

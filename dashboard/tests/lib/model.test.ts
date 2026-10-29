@@ -3,7 +3,7 @@ import type { DesiredRevisionDetail, Issue, NodeDetail, NodeListItem, RolloutDet
 import { DAY, HOUR, MIN } from '@/lib/format';
 import { contract } from '../helpers/contracts';
 import {
-  DISK_CRIT, DISK_WARN, SEMVER, agentInfo, agentOutdated, certFlag, certText, commit, diskDetail, diskHot, diskLevel, diskOf, diskVolume, drift, errorCount, failuresFromIssues,
+  DISK_CRIT, DISK_WARN, SEMVER, agentInfo, agentOutdated, agentUpdateOf, canUpdateAgent, needsManualUpgrade, updateActive, updateBadge, updateMeta, certFlag, certText, commit, diskDetail, diskHot, diskLevel, diskOf, diskVolume, drift, errorCount, failuresFromIssues,
   fixSteps, fromDetail, fromList, health, isAttention, isOpen, issueBadge, issueKind, issueLevel, issueSection, issueState, issuesByNode, nodeRank, osText, patchIssue,
   recentDrift, revTitle, revisionDetail, rolloutDetail, scanOutcome, seenText, sortIssues, upgradePlan,
 } from '@/lib/model';
@@ -24,6 +24,8 @@ describe('contract fixtures', () => {
     expect(n.disk).toMatchObject({ label: 'home', usedPercent: 92.3 });
     expect(n.agent).toMatchObject({ version: '0.8.0', outdated: true, os: { name: 'Fedora Linux', version: '44', kernel: null } });
     expect(osText(n)).toBe('Fedora Linux 44');
+    expect(n.agent!.selfUpdate).toBe(true);
+    expect(n.update).toMatchObject({ fromVersion: '0.8.0', targetVersion: '0.8.1', state: 'failed', errorCode: 'agent_update_crash_loop', requestedBy: 'operator', finishedAt: '2026-10-25T13:06:00Z' });
   });
   it('turns the GET nodes/{node} fixture into a detail view model', () => {
     const d = fromDetail(contract<NodeDetail>('node-detail'));
@@ -74,6 +76,51 @@ describe('disk', () => {
     expect(diskHot(hot)).toBe(true);
     expect(diskOf({ ...hot, revoked: true })).toBeNull();
     expect(diskHot({ revoked: false, disk: null })).toBe(false);
+  });
+});
+
+describe('Agent self-update', () => {
+  const agent = (over: object = {}) => agentInfo({ version: '0.8.0', latestVersion: '0.9.0', outdated: true, selfUpdate: true, ...over } as never);
+  const update = (state: string, over: object = {}) => agentUpdateOf({ fromVersion: '0.8.0', targetVersion: '0.9.0', state, errorCode: null, requestedBy: 'joan', requestedAt: ago(HOUR), updatedAt: ago(MIN), finishedAt: null, ...over });
+  it('reads selfUpdate (null when the Server does not say) and the update; a missing or broken update is null', () => {
+    expect(agent()!.selfUpdate).toBe(true);
+    expect(agent({ selfUpdate: false })!.selfUpdate).toBe(false);
+    expect(agentInfo({ version: '0.8.0', outdated: true } as never)!.selfUpdate).toBeNull();
+    expect(agentUpdateOf(null)).toBeNull();
+    expect(agentUpdateOf(undefined)).toBeNull();
+    expect(agentUpdateOf({ state: '' } as never)).toBeNull();
+    expect(update('requested', { fromVersion: null })).toMatchObject({ fromVersion: null, state: 'requested', finishedAt: null });
+    expect(fromList({ ...contract<{ items: NodeListItem[] }>('nodes-page').items[0]!, agentUpdate: undefined }).update, 'a Server before self-update').toBeNull();
+  });
+  it('offers Update Agent only for an outdated, live Agent that can update itself and is not updating', () => {
+    expect(canUpdateAgent({ agent: agent(), revoked: false, update: null })).toBe(true);
+    expect(canUpdateAgent({ agent: agent(), revoked: false, update: update('failed') })).toBe(true);
+    expect(canUpdateAgent({ agent: agent(), revoked: false, update: update('cancelled') })).toBe(true);
+    for (const s of ['requested', 'downloading', 'restarting']) {
+      expect(updateActive(update(s))).toBe(true);
+      expect(canUpdateAgent({ agent: agent(), revoked: false, update: update(s) }), s).toBe(false);
+    }
+    expect(updateActive(update('succeeded'))).toBe(false);
+    expect(updateActive(null)).toBe(false);
+    expect(canUpdateAgent({ agent: agent(), revoked: true, update: null }), 'revoked').toBe(false);
+    expect(canUpdateAgent({ agent: agent({ outdated: false }), revoked: false, update: null }), 'current').toBe(false);
+    expect(canUpdateAgent({ agent: agent({ selfUpdate: false }), revoked: false, update: null }), 'cannot').toBe(false);
+    expect(canUpdateAgent({ agent: agent({ selfUpdate: undefined }), revoked: false, update: null }), 'old Server').toBe(false);
+    expect(canUpdateAgent({ agent: null, revoked: false, update: null })).toBe(false);
+    expect(needsManualUpgrade({ agent: agent({ selfUpdate: false }), revoked: false })).toBe(true);
+    expect(needsManualUpgrade({ agent: agent({ selfUpdate: undefined }), revoked: false }), 'unknown is not "cannot"').toBe(false);
+    expect(needsManualUpgrade({ agent: agent({ selfUpdate: false, outdated: false }), revoked: false })).toBe(false);
+  });
+  it('labels every state with an icon and a word, and the list badge says updating or update failed', () => {
+    expect(updateMeta('requested')).toMatchObject({ level: 'info', kind: 'clock', label: 'Update requested' });
+    expect(updateMeta('failed')).toMatchObject({ level: 'critical', label: 'Update failed' });
+    expect(updateMeta('something_new').label).toBe('something new');
+    expect(updateBadge({ agent: agent(), revoked: false, update: update('downloading') })).toMatchObject({ key: 'updating', label: 'Updating' });
+    expect(updateBadge({ agent: agent(), revoked: false, update: update('failed') })).toMatchObject({ key: 'failed', label: 'Update failed' });
+    expect(updateBadge({ agent: agent({ outdated: false }), revoked: false, update: update('failed') }), 'upgraded by hand since').toBeNull();
+    expect(updateBadge({ agent: agent(), revoked: false, update: update('succeeded') })).toBeNull();
+    expect(updateBadge({ agent: agent(), revoked: true, update: update('requested') })).toBeNull();
+    expect(updateBadge({ agent: agent(), revoked: false, update: null })).toBeNull();
   });
 });
 

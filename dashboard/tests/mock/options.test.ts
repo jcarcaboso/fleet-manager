@@ -23,6 +23,14 @@ describe('parseMockOptions', () => {
     expect(parseMockOptions('?scope=nonsense').scope).toBe('admin');
     expect(parseMockOptions('?scope=operate').scope).toBe('operate');
   });
+  it('reads the Agent update switches', () => {
+    expect(parseMockOptions('')).toMatchObject({ updateDelay: 4000, updateFail: ['build-runner-03'], release: 'ok', releaseDelay: 1500 });
+    expect(parseMockOptions('?updatedelay=1000&updatefail=fedora-ws,gpu-box&release=unavailable&releasedelay=0'))
+      .toMatchObject({ updateDelay: 1000, updateFail: ['fedora-ws', 'gpu-box'], release: 'unavailable', releaseDelay: 0 });
+    expect(parseMockOptions('?updatefail=').updateFail).toEqual([]);
+    expect(parseMockOptions('?release=invalid').release).toBe('invalid');
+    expect(parseMockOptions('?release=other').release).toBe('ok');
+  });
   it('startMock reads the query string and returns a config that needs no config.json', async () => {
     const { config, fetch, server } = startMock('?scope=read&signedout=1');
     expect(config.apiUrl).toBe('https://mock.fleet.invalid');

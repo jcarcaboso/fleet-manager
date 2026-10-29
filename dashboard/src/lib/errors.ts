@@ -31,3 +31,12 @@ export const errorMessage = (error: unknown, fallback = 'Something went wrong.')
   error && typeof error === 'object' && typeof (error as { message?: unknown }).message === 'string' && (error as { message: string }).message
     ? (error as { message: string }).message
     : fallback;
+
+/**
+ * The Server's own `message` of an error response, else `errorMessage`. For refusals where the Server's text says more than the code
+ * (why the Agent release is unavailable, which version the Agent already runs). Show it as text.
+ */
+export function serverMessage(error: unknown, fallback = 'Something went wrong.'): string {
+  const said = (error as { details?: { message?: unknown } | null } | null)?.details?.message;
+  return typeof said === 'string' && said.trim() ? said : errorMessage(error, fallback);
+}

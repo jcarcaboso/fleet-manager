@@ -252,7 +252,8 @@ describe('catalog text, steps and commands (diskProblems, agentProblems, detailP
   it('agent_outdated: one warning per outdated, non-revoked machine with the install-method action first', async () => {
     app = await mountApp({ path: '/problems' });
     const list = rows().filter(r => /Agent is outdated/.test(r.find('b').text()));
-    expect(list, 'one issue per outdated, non-revoked machine').toHaveLength(4);
+    expect(list, 'one issue per outdated, non-revoked machine; build-runner-03 has agent_update_failed instead').toHaveLength(3);
+    expect(rows().filter(r => /Agent update failed/.test(r.find('b').text()))).toHaveLength(1);
     await openAll();
     const r = list.find(x => /fedora-ws/.test(x.text()))!;
     expect(r.find('summary').text()).toMatch(/Warning/);
@@ -261,12 +262,50 @@ describe('catalog text, steps and commands (diskProblems, agentProblems, detailP
     expect(r.find('.prob-expl').text()).toMatch(/runs version 0\.9\.0-rc\.2; the latest version is 0\.9\.0/);
     expect(r.find('.prob-expl strong').exists(), 'the specific detail is emphasised').toBe(true);
     const steps = r.findAll('.fix li').map(l => l.text());
-    expect(steps[0]).toMatch(/release archive/);
+    expect(steps[0], 'an Agent that can update itself is told to').toMatch(/Update Agent in the dashboard/);
     expect(steps).toHaveLength(7);
-    expect(r.findAll('.cmd code').map(c => c.text()).join()).toBe('fleet nodes show fedora-ws');
+    expect(r.findAll('.cmd code').map(c => c.text()).join()).toBe('fleet nodes show fedora-ws,fleet nodes update fedora-ws');
     expect(list.find(x => /mba-travel/.test(x.text()))!.find('.fix li').text()).toMatch(/Upgrade with brew upgrade fleet-agent/);
     expect(list.find(x => /laptop-ana/.test(x.text()))!.find('.fix li').text()).toMatch(/--tag v0\.9\.0/);
     expect(w().text()).not.toContain('old-laptop: Agent is outdated');
+  });
+
+  it('Update Agent on agent_update_failed and on agent_outdated of an Agent that can update itself; the problems are read again', async () => {
+    app = await mountApp({ path: '/problems', mock: { releaseDelay: 0 } });
+    await openAll();
+    const act = (t: string) => rowOf(t)!.find('[data-act=issue-agent-update]');
+    expect(act('build-runner-03: Agent update failed').text()).toBe('Update Agent');
+    expect(act('fedora-ws: Agent is outdated').text()).toBe('Update Agent');
+    expect(act('laptop-ana: Agent is outdated').exists(), 'cannot update itself').toBe(false);
+    expect(act('mba-travel: Agent is outdated').exists()).toBe(false);
+    const failed = rowOf('build-runner-03: Agent update failed')!;
+    expect(failed.find('.prob-expl').text()).toMatch(/fleet-agent --version/);
+    expect(failed.findAll('.facts-row dd').map(d => d.text())).toContain('agent_update_smoke_test');
+    const reads = app.mock.calls.filter(c => c.path === 'issues').length;
+    await act('build-runner-03: Agent update failed').trigger('click');
+    await app.settle();
+    expect(posts(`nodes/${app.mock.nodes.find(n => n.alias === 'build-runner-03')!.id}/agent-update`)).toHaveLength(1);
+    expect(toasts()).toMatch(/Update requested for build-runner-03/);
+    expect(app.mock.calls.filter(c => c.path === 'issues').length).toBeGreaterThan(reads);
+    expect(rowOf('build-runner-03: Agent update failed'), 'a requested update is no longer a failed one').toBeUndefined();
+    expect(rowOf('build-runner-03: Agent is outdated')).toBeDefined();
+  });
+
+  it('Update Agent refused: a toast with the Server\'s message; operate: locked and nothing is sent', async () => {
+    app = await mountApp({ path: '/problems', mock: { releaseDelay: 0, release: 'unavailable' } });
+    await openAll();
+    await rowOf('fedora-ws: Agent is outdated')!.find('[data-act=issue-agent-update]').trigger('click');
+    await app.settle();
+    expect(toasts()).toMatch(/Agent update was not requested/);
+    expect(toasts()).toMatch(/Agent release 0\.9\.0 is not published yet/);
+    app.unmount();
+    app = await mountApp({ path: '/problems', mock: { scope: 'operate' } });
+    await openAll();
+    const locked = rowOf('fedora-ws: Agent is outdated')!.findAll('.btn.is-locked').find(b => b.text() === 'Update Agent')!;
+    expect(locked.attributes('data-need')).toBe('admin');
+    await locked.trigger('click');
+    await app.settle();
+    expect(app.mock.calls.filter(c => c.method === 'POST' && /agent-update/.test(c.path))).toHaveLength(0);
   });
 
   it('agent=0 (a Server before phase 3): no agent_outdated issue', async () => {

@@ -6,10 +6,10 @@
  * through its `fetch` option (no global is patched).
  *
  * Mutations change the in-memory state. Creating an enrollment link simulates the machine enrolling a few seconds later,
- * and a disk refresh is answered by the simulated Agent after `diskDelay`.
+ * a disk refresh is answered by the simulated Agent after `diskDelay`, and an Agent update goes through its states every `updateDelay`.
  */
 import type {
-  AssignmentState, CatalogSelection, CliProxyStatus, CommitInfo, DiskVolume, Issue, NodeAgent, NodeAttempt, NodeDetail, NodeDisk, NodeListItem, NodeTarget,
+  AgentUpdate, AssignmentState, CatalogSelection, CliProxyStatus, CommitInfo, DiskVolume, Issue, NodeAgent, NodeAttempt, NodeDetail, NodeDisk, NodeListItem, NodeTarget,
   RolloutDetail, Scope, SelectionPolicy,
 } from '../types';
 import { ANCHOR, buildDataset, type DataAttempt, type DataCatalog, type DataCatalogModel, type DataLink, type DataNode, type DataRevision, type DataRollout, type DataTarget, type Dataset } from './dataset';
@@ -61,11 +61,15 @@ interface MNode extends DataNode {
   _diskTimer?: ReturnType<typeof setTimeout> | null;
   _agent: MockAgent | null;
   _drift: Array<{ target: string; files: string[]; detectedAt: string }>;
+  /** The latest Agent update (one row per Node, like the Server's AgentUpdates), or `null`. */
+  _update: AgentUpdate | null;
 }
 interface MockAgent {
   version: string;
   os: { name: string | null; version: string | null; kernel: string | null };
   arch: string; hostname: string; user: string; installMethod: string; serviceManager: string; stateDirectory: string; reportedAt: string;
+  /** The Agent announced the agent-update capability on its latest poll. */
+  selfUpdate: boolean;
 }
 interface MLink extends DataLink {
   nodeId?: string | null;
@@ -289,24 +293,38 @@ export function createMockServer(overrides: Partial<MockOptions> = {}): MockServ
     /* A revoked Node keeps its last report; it is outdated but gets no issue. */
     'old-laptop': ['macOS', '14.2', '23.2.0', 'x86_64', 'old-laptop', 'joan', '0.9.0-beta.2', 'homebrew', 'launchd', 21600],
   };
+  /* Agents that did not announce agent-update: they need one manual upgrade and `fleet-agent service install` before Fleet can update them. */
+  const NO_SELF_UPDATE = new Set(['mba-travel', 'laptop-ana', 'old-laptop']);
   const agentOfSpec = (a: AgentSpec, ago: number): MockAgent => ({
     version: a[6], os: { name: a[0], version: a[1], kernel: a[2] }, arch: a[3], hostname: a[4], user: a[5], installMethod: a[7], serviceManager: a[8], stateDirectory: STATE_DIR,
-    reportedAt: new Date(Date.now() - ago * 60e3).toISOString(),
+    reportedAt: new Date(Date.now() - ago * 60e3).toISOString(), selfUpdate: true,
   });
   nodes.forEach(n => {
     const a = !cfg.empty && AGENTS[n.alias];
     n._agent = a ? agentOfSpec(a, a[9]) : null;
+    if (n._agent && NO_SELF_UPDATE.has(n.alias)) n._agent.selfUpdate = false;
+    n._update = null;
     if (n._agent && cfg.xss && n.alias === 'homelab-nuc') {
       n._agent.hostname = XSS_AGENT.hostname; n._agent.user = XSS_AGENT.user; n._agent.os.name = XSS_AGENT.osName; n._agent.stateDirectory = XSS_AGENT.stateDirectory;
     }
   });
   const outdatedOf = (n: MNode): boolean => !!n._agent && semverLess(n._agent.version, LATEST);
-  const listAgent = (n: MNode): Json => (n._agent ? { version: n._agent.version, outdated: outdatedOf(n), os: { name: n._agent.os.name, version: n._agent.os.version }, arch: n._agent.arch, hostname: n._agent.hostname, selfUpdate: false } : null);
+  const listAgent = (n: MNode): Json => (n._agent ? {
+    version: n._agent.version, outdated: outdatedOf(n), os: { name: n._agent.os.name, version: n._agent.os.version }, arch: n._agent.arch, hostname: n._agent.hostname, selfUpdate: n._agent.selfUpdate,
+  } : null);
   const detailAgent = (n: MNode): NodeAgent | null => (n._agent ? {
     version: n._agent.version, latestVersion: LATEST, outdated: outdatedOf(n), os: { ...n._agent.os }, arch: n._agent.arch, hostname: n._agent.hostname, user: n._agent.user,
     installMethod: n._agent.installMethod as NodeAgent['installMethod'], serviceManager: n._agent.serviceManager as NodeAgent['serviceManager'], stateDirectory: n._agent.stateDirectory, reportedAt: n._agent.reportedAt,
-    selfUpdate: false,
+    selfUpdate: n._agent.selfUpdate,
   } : null);
+  /* Agent self-update (agent-self-update.md, "Server"). build-runner-03 tried an update to this version before it went offline; the new
+     binary failed its smoke test, so the Agent kept running the old one. */
+  const updateOut = (n: MNode): AgentUpdate | null => (n._update ? { ...n._update } : null);
+  nodes.forEach(n => {
+    if (cfg.empty || n.alias !== 'build-runner-03' || !n._agent) return;
+    const at = (minutes: number): string => new Date(Date.now() - minutes * 60e3).toISOString();
+    n._update = { fromVersion: n._agent.version, targetVersion: LATEST, state: 'failed', errorCode: 'agent_update_smoke_test', requestedBy: 'ana', requestedAt: at(240), updatedAt: at(226), finishedAt: at(226) };
+  });
   /* The action names the upgrade command for the install method, like OperatorIssues. */
   const upgradeAction = (n: MNode): string => n._agent!.installMethod === 'managed' ? 'Get the new fleet-agent the way it was first installed (for example `brew upgrade fleet-agent`), then run `fleet-agent service install` with it. The service switches to the new version and restarts.'
     : n._agent!.installMethod === 'homebrew' ? 'Upgrade with `brew upgrade fleet-agent`, then restart the service with `brew services restart fleet-agent`.'
@@ -317,7 +335,7 @@ export function createMockServer(overrides: Partial<MockOptions> = {}): MockServ
   const listItem = (n: MNode): NodeListItem => ({
     nodeId: n.id, name: n.alias, revoked: !!n.revokedAt, lastContactAt: n.lastContactAt, freshness: freshnessOfAbs(n),
     platform: n.platform, enrolledAt: n.enrolledAt, revokedAt: n.revokedAt, credentialNotAfter: credNotAfter(n), targets: counts(n), currentRevision: currentRevision(n),
-    disk: listDisk(n), ...(cfg.agent ? { agent: listAgent(n), agentUpdate: null } : {}),
+    disk: listDisk(n), ...(cfg.agent ? { agent: listAgent(n), agentUpdate: updateOut(n) } : {}),
   });
 
   /* Phase 2 attempt detail: diagnostic, path (relative to the Target base, never starting with "/"), step. Only a failed Attempt reported by an Agent that
@@ -365,7 +383,7 @@ export function createMockServer(overrides: Partial<MockOptions> = {}): MockServ
     return {
       nodeId: n.id, name: n.alias, platform: n.platform, enrolledAt: n.enrolledAt, lastContactAt: n.lastContactAt, freshness: listItem(n).freshness, revoked: !!n.revokedAt, revokedAt: n.revokedAt,
       credential: { credentialId: guid('cred:' + n.id), notBefore: n.credential.notBefore, notAfter: n.credential.notAfter, revokedAt: n.credential.revokedAt, revokedBy: n.revokedAt ? n.revokedBy : null, renewals: n.credential.renewals },
-      targets, summary: counts(n), disk: detailDisk(n), ...(cfg.agent ? { agent: detailAgent(n), agentUpdate: null } : {}),
+      targets, summary: counts(n), disk: detailDisk(n), ...(cfg.agent ? { agent: detailAgent(n), agentUpdate: updateOut(n) } : {}),
       ...(cfg.drift ? { drift: (n._drift || []).map(d => ({ target: d.target, files: d.files.slice(), detectedAt: d.detectedAt })) } : {}),
     };
   };
@@ -501,6 +519,7 @@ export function createMockServer(overrides: Partial<MockOptions> = {}): MockServ
   const cat = (code: string, source: string, title: string, explanation: string, fix: string[]): CatEntry => ({ code, source, title, explanation, fix });
   /* Agent codes come from the dataset; the others use the codes that the Server's ErrorCatalog and OperatorIssues define. */
   const catalogItems = (): CatEntry[] => [
+    ...AGENT_UPDATE_CATALOG,
     ...Object.entries(F.errorCatalog).map(([code, e]) => cat(code, 'agent', e.title, e.explanation, e.fix)),
     cat('assignment_superseded', 'agent', 'Assignment was replaced', 'A newer assignment replaced this one before it finished.', ['No action needed.']),
     cat('node_not_found', 'server', 'No Node matches', 'No Node in this Workspace has that ID or alias.', ['Run `fleet nodes list` to see the aliases.']),
@@ -526,9 +545,56 @@ export function createMockServer(overrides: Partial<MockOptions> = {}): MockServ
         'Cargo: reinstall from the release tag with `cargo install --locked --force --git https://github.com/jcarcaboso/fleet-manager --tag <tag> fleet fleet-agent`, then restart the service. See docs/technical-design/cli-installation.md.',
         'Binary: download and verify the release archive, replace the binary at the same path and restart the service. See docs/technical-design/cli-installation.md.',
         'docs/technical-design/client-updates.md describes staged updates and rollback. The issue clears when the Agent reports the new version, which it does shortly after it restarts.']),
+    cat('agent_update_failed', 'issue', "A Node's Agent update failed", "The last update of the Node's Agent failed, so it still runs an older version. The error code says which step failed.",
+      ['Run `fleet nodes show <node>` to see the error code and read its explanation with `fleet explain <code>`.', 'Fix the cause, then run `fleet nodes update <node>` again.']),
     cat('source_not_configured', 'issue', 'No repository is configured', 'The Server cannot publish new assignments from Git.', ['Set `Source:Remote`, then sync the repository.']),
     cat('source_sync_failed', 'issue', 'Repository sync failed', 'The last repository scan was rejected or failed. Existing assignments remain active.', ['Check repository access and fleet.yml validation in the Server logs, then sync the repository again.']),
     cat('source_not_scanned', 'issue', 'Repository has not been synced', 'No source scan has been recorded.', ['Sync the repository to validate configuration and publish assignments.']),
+  ];
+  /* The Agent update codes, as the Server's ErrorCatalog has them. */
+  const AGENT_UPDATE_CATALOG: CatEntry[] = [
+    cat('agent_update_unmanaged', 'agent', 'The Agent does not run from the managed layout', 'Only an Agent started from `<state-dir>/current/fleet-agent` can update itself. This one was started from a Homebrew, Cargo or archive path.',
+      ['On the Node, run `fleet-agent service install` with the installed executable. It copies the Agent into the state directory and restarts the service from there.', 'Then run `fleet nodes update <node>` again.']),
+    cat('agent_update_untrusted', 'agent', 'The release signature does not verify', 'The release manifest is not signed by a key this Agent trusts. Either the release was signed with an unknown key or the files were changed on the way.',
+      ["Check that the Server mirrors an official release: compare `fleet-agent-release.json` in the Server's release cache with the one on the GitHub release.", 'If the signing key was rotated, upgrade the Agent once by hand to a release that trusts the new key.']),
+    cat('agent_update_invalid_manifest', 'agent', 'The release manifest is invalid', 'The signed release manifest is malformed, too large or names a different version than the one requested.',
+      ["Check the release files in the Server's release cache, then run `fleet nodes update <node>` again."]),
+    cat('agent_update_downgrade', 'agent', 'The requested version is older than the Agent', 'The Agent only updates to a newer version than the one it runs. Downgrades and replays of older releases are refused; rollback is a local command.',
+      ['No action is needed if the Agent is newer than the Server. Upgrade the Server instead.', 'To go back to the previous version on purpose, run `fleet-agent update rollback` on the Node.']),
+    cat('agent_update_platform', 'agent', 'The release has no binary for this machine', 'The signed release lists no Agent executable for this operating system and architecture.',
+      ['Install the Agent on this Node by hand, from Cargo or a matching archive, then run `fleet-agent service install`.']),
+    cat('agent_update_download', 'agent', 'The Agent could not download the release', 'A request for the release manifest, signature or binary to the Server failed or timed out.',
+      ['Run `fleet nodes show <node>` to check that the Node is checking in, then run `fleet nodes update <node>` again.', 'Check the Server log for agent_release_unavailable.']),
+    cat('agent_update_too_large', 'agent', 'The release is larger than the Agent accepts', "The manifest or binary exceeds the Agent's limits: 64 KiB for the manifest and 64 MiB for the binary.",
+      ["Check the release files in the Server's release cache; an official release never exceeds these limits."]),
+    cat('agent_update_digest', 'agent', 'The downloaded binary does not match the release', 'The binary the Agent downloaded has a different size or SHA-256 digest than the signed manifest lists, so the Agent deleted it.',
+      ["Delete the release from the Server's release cache so the Server downloads it again, then run `fleet nodes update <node>`.", 'If it repeats, check for a proxy that changes downloads.']),
+    cat('agent_update_smoke_test', 'agent', 'The new binary did not start on this machine', 'The Agent ran `fleet-agent --version` with the new binary and it failed, timed out or printed another version. The service keeps running the old version.',
+      ['Check that the release supports this operating system version, then install it by hand and run `fleet-agent --version` to see the error.']),
+    cat('agent_update_install', 'agent', 'The Agent could not install the new version', 'Writing the new binary to `<state-dir>/versions/` or switching the `current` link failed, for example because the disk is full or a file has the wrong owner.',
+      ['Run `fleet nodes disk <node> --refresh` to check free space, and check the ownership of the Agent state directory.', 'Then run `fleet nodes update <node>` again.']),
+    cat('agent_update_crash_loop', 'agent', 'The new version kept restarting', 'The new Agent version started more than 3 times without completing a poll, so it switched back to the previous version.',
+      ['Run `fleet-agent service logs` on the Node to find why the new version stops, then upgrade by hand or wait for a fixed release.']),
+    cat('agent_update_no_contact', 'agent', 'The new version could not reach the Server', 'The new Agent version did not complete a poll within 10 minutes, so it switched back to the previous version.',
+      ['Run `fleet-agent service logs` on the Node to find the connection error, then run `fleet nodes update <node>` again.']),
+    cat('agent_update_rolled_back', 'agent', 'The update was rolled back by hand', 'Someone ran `fleet-agent update rollback` on the Node while the new version was still in its trial, so the previous version runs again.',
+      ['Run `fleet nodes update <node>` again when the reason for the rollback is fixed.']),
+    cat('agent_update_unsupported', 'server', 'The Agent cannot update itself', 'The Agent did not announce the agent-update capability on its latest poll. Agents up to 0.11 cannot update themselves.',
+      ['Upgrade the Agent on the Node once by hand and run `fleet-agent service install`. Later updates can be started from the dashboard.']),
+    cat('agent_update_current', 'server', 'The Agent is already up to date', "The Agent reported the Server's version or a newer one, so there is nothing to update.", ['No action is needed.']),
+    cat('agent_update_in_progress', 'server', 'An update is already running', 'The Agent is downloading or restarting into a new version. A new request is accepted when it finishes, or 30 minutes after its last progress.',
+      ['Run `fleet nodes show <node>` to follow the update.']),
+    cat('agent_update_not_cancellable', 'server', 'The update cannot be cancelled', 'Only an update the Agent has not started can be cancelled. The Agent rolls back by itself when a new version fails.',
+      ['Run `fleet nodes show <node>` to see the update state. To go back to the previous version, run `fleet-agent update rollback` on the Node.']),
+    cat('agent_update_not_requested', 'server', "No update matches the Agent's report", 'The Agent reported progress of an update the Server has not requested, for example one that was cancelled meanwhile.',
+      ['No action is needed. The Agent stops an update it cannot report.']),
+    cat('agent_release_unavailable', 'server', 'The Agent release is not available', 'The Server could not download the signed release of its own version, usually because the GitHub release is not published yet.',
+      ['Publish the release, or place `fleet-agent-release.json`, its `.sig` file and the `fleet-agent-*.tar.gz` archives in `<cache>/v<version>/` on the Server (Fleet:AgentReleases:CacheDirectory).',
+        'Check that the Server can reach Fleet:AgentReleases:BaseUrl, then try again after a minute.']),
+    cat('agent_release_invalid', 'server', 'The Agent release failed verification', 'The release manifest signature does not verify with a trusted key, or an archive does not match the signed digest. The Server keeps nothing it could not verify.',
+      ['Do not use this release. Compare the files with the official GitHub release and check Fleet:AgentReleases:PublicKeys.', 'Report the problem if the official release fails verification.']),
+    cat('agent_release_not_found', 'server', 'The Server serves another Agent version', "An Agent asked for a release that is not the Server's own version. The Server only serves its own version.",
+      ['Run `fleet nodes update <node>` again; requests made before a Server upgrade target the old version.']),
   ];
   /* Quotes a value for a POSIX shell command line unless it only has plain characters, like OperatorIssues.Quote. */
   const quote = (v: string): string => (/^[A-Za-z0-9_@%+=:,./-]+$/.test(v) ? v : "'" + String(v).replace(/'/g, "'\\''") + "'");
@@ -563,11 +629,24 @@ export function createMockServer(overrides: Partial<MockOptions> = {}): MockServ
           section: 'nodes', errorCode: null, nodeId: n.id, nodeName: n.alias, target: null, since: n._disk!.measuredAt, commands: [`fleet nodes disk ${alias}`, `fleet nodes disk ${alias} --refresh`],
         });
       }
-      if (outdatedOf(n) && cfg.agent) {
+      /* agent_update_failed replaces agent_outdated while the last update failed; an Agent that can update itself is told to. */
+      if (outdatedOf(n) && cfg.agent && n._update?.state === 'failed') {
+        const code = n._update.errorCode;
+        out.push({
+          id: `agent_update_failed:${n.id}`, code: 'agent_update_failed', severity: 'warning', title: `${n.alias}: Agent update failed`,
+          detail: `The update to ${LATEST} failed with ${code}; the Agent still runs version ${n._agent!.version}.`,
+          action: catalogItems().find(x => x.code === code)?.fix[0] ?? 'Fix the cause on the Node, then start the update again.',
+          section: 'nodes', errorCode: code, nodeId: n.id, nodeName: n.alias, target: null, since: n._update.finishedAt ?? n._agent!.reportedAt,
+          commands: [`fleet nodes show ${alias}`, `fleet explain ${code}`, `fleet nodes update ${alias}`],
+        });
+      } else if (outdatedOf(n) && cfg.agent) {
+        const self = n._agent!.selfUpdate;
         out.push({
           id: `agent_outdated:${n.id}`, code: 'agent_outdated', severity: 'warning', title: `${n.alias}: Agent is outdated`,
-          detail: `The Agent runs version ${n._agent!.version}; the latest version is ${LATEST}. Reported at ${stamp(n._agent!.reportedAt)}.`, action: upgradeAction(n),
-          section: 'nodes', errorCode: null, nodeId: n.id, nodeName: n.alias, target: null, since: n._agent!.reportedAt, commands: [`fleet nodes show ${alias}`],
+          detail: `The Agent runs version ${n._agent!.version}; the latest version is ${LATEST}. Reported at ${stamp(n._agent!.reportedAt)}.`,
+          action: self ? 'Update it with Update Agent in the dashboard or `fleet nodes update <node>`. The Agent downloads the signed release from the Server, restarts into it and rolls back if it fails.' : upgradeAction(n),
+          section: 'nodes', errorCode: null, nodeId: n.id, nodeName: n.alias, target: null, since: n._agent!.reportedAt,
+          commands: self ? [`fleet nodes show ${alias}`, `fleet nodes update ${alias}`] : [`fleet nodes show ${alias}`],
         });
       }
       for (const t of n.targets) {
@@ -653,6 +732,7 @@ export function createMockServer(overrides: Partial<MockOptions> = {}): MockServ
     invalid_password: 'The password must be 10 to 256 characters and differ from the current one.', invalid_account_name: 'The account name is not valid.',
     invalid_scope: 'The scope must be read, operate or admin.', account_exists: 'An account with that name already exists.',
     account_not_found: 'No account has that name.', last_admin: 'At least one admin account must remain.', cannot_delete_self: 'You cannot delete your own account.',
+    agent_update_not_cancellable: 'Only an update the Agent has not started can be cancelled.',
   };
   const err = (status: number, code: string, message?: string): Response => json({ code, message: message || MESSAGES[code] || code }, status);
   const seg = (value: string): string => decodeURIComponent(value); // one path segment, decoded once
@@ -719,13 +799,80 @@ export function createMockServer(overrides: Partial<MockOptions> = {}): MockServ
         revokedAt: null, revokedBy: null,
         credential: { id: '', certificateSha256: '', notBefore: now, notAfter: new Date(Date.now() + 7 * DAY).toISOString(), renewals: 0, revokedAt: null }, targets: [],
         groups: [], agentSource: null, os: null, hostname: null, user: null, agentVersion: null, installMethod: null, pollIntervalSeconds: 60, stateDir: null, lastPollLatencyMs: null, note: null, checkins: [],
-        _disk: null, _diskReq: null, _agent: null, _drift: [],
+        _disk: null, _diskReq: null, _agent: null, _drift: [], _update: null,
       } as unknown as MNode;
       n._agent = cfg.enrollLinkOnly ? null : agentOfSpec(mac ? AGENTS['mbp-joan']! : AGENTS['build-runner-01']!, 0);
       if (n._agent) { n._agent.hostname = link.alias; n._agent.version = LATEST; }
       nodes.unshift(n);
       link.nodeId = n.id;
     }, 9000);
+  };
+
+  /* Agent updates, in the Server's order: the Node (revoked, capability, version, an update in progress), then the release mirror, then the
+     request. A repeated request while still requested returns the same update. Requesting again replaces a finished update. */
+  const UPDATE_ACTIVE = ['requested', 'downloading', 'restarting'];
+  type Refusal = { status: number; code: string; message: string };
+  const updateRefusal = (n: MNode): Refusal | null => {
+    if (n.revokedAt) return { status: 409, code: 'node_revoked', message: 'A revoked Node cannot be updated.' };
+    if (!n._agent?.selfUpdate) return { status: 409, code: 'agent_update_unsupported', message: 'The Agent on this Node cannot update itself. Upgrade it once by hand and run `fleet-agent service install`.' };
+    if (!semverLess(n._agent.version, LATEST)) return { status: 409, code: 'agent_update_current', message: `The Agent already runs version ${n._agent.version}.` };
+    const u = n._update;
+    /* A request the Agent has not picked up is replaced (or returned again); one that stalled for 30 minutes counts as abandoned. */
+    if (u && (u.state === 'downloading' || u.state === 'restarting') && Date.parse(u.updatedAt) > Date.now() - 30 * 60e3) {
+      return { status: 409, code: 'agent_update_in_progress', message: `The Agent is already updating to ${u.targetVersion}.` };
+    }
+    return null;
+  };
+  /* The first request mirrors and verifies the release, which takes a while; a release that cannot be mirrored fails every request. */
+  let mirrored = false;
+  const mirror = async (): Promise<Refusal | null> => {
+    if (mirrored) return null;
+    if (cfg.releaseDelay) await new Promise(r => setTimeout(r, cfg.releaseDelay));
+    if (cfg.release === 'unavailable') return { status: 503, code: 'agent_release_unavailable', message: `Agent release ${LATEST} is not published yet (fleet-agent-release.json was not found). Publish the release, or place its files in the Server's release cache.` };
+    if (cfg.release === 'invalid') return { status: 502, code: 'agent_release_invalid', message: `The signature of Agent release ${LATEST} does not verify with a trusted key.` };
+    mirrored = true;
+    return null;
+  };
+  /* The Agent reports each step; a finished update is audited with the Node ID as the actor, like the Server. */
+  const report = (n: MNode, u: AgentUpdate, next: string, errorCode: string | null = null): void => {
+    const now = nowIso();
+    u.state = next;
+    u.errorCode = errorCode;
+    u.updatedAt = now;
+    n.lastContactAt = now;
+    if (!UPDATE_ACTIVE.includes(next)) {
+      u.finishedAt = now;
+      addAudit(`agent.update_${next}`, { actor: n.id, nodeId: n.id, subject: n.alias, detail: errorCode ?? u.targetVersion });
+    }
+  };
+  /* The simulated Agent picks the request up at its next poll (an offline machine never does), downloads and checks the release, then
+     restarts into it. The machines in `updateFail` fail the smoke test of the new binary and keep running the old version. */
+  const simulateUpdate = (n: MNode, u: AgentUpdate): void => {
+    if (freshnessOfAbs(n) !== 'fresh') return;
+    const step = (from: string, fn: () => void): void => later(() => { if (n._update === u && u.state === from) fn(); }, cfg.updateDelay);
+    step('requested', () => {
+      report(n, u, 'downloading');
+      step('downloading', () => {
+        if (cfg.updateFail.includes(n.alias)) return report(n, u, 'failed', 'agent_update_smoke_test');
+        report(n, u, 'restarting');
+        step('restarting', () => {
+          n._agent!.version = u.targetVersion;
+          n._agent!.reportedAt = nowIso();
+          report(n, u, 'succeeded');
+        });
+      });
+    });
+  };
+  const requestUpdate = (n: MNode): AgentUpdate => {
+    const cur = n._update;
+    if (cur && cur.state === 'requested' && cur.targetVersion === LATEST) return cur;
+    const now = nowIso();
+    const running = n._agent?.version ?? null;
+    const u: AgentUpdate = { fromVersion: running, targetVersion: LATEST, state: 'requested', errorCode: null, requestedBy: state.actor, requestedAt: now, updatedAt: now, finishedAt: null };
+    n._update = u;
+    addAudit('agent.update_requested', { nodeId: n.id, subject: n.alias, detail: `${running ?? 'unknown'} -> ${LATEST}` });
+    simulateUpdate(n, u);
+    return u;
   };
 
   const GUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
@@ -957,6 +1104,53 @@ export function createMockServer(overrides: Partial<MockOptions> = {}): MockServ
         timers.add(n._diskTimer);
       }
       return json({ refreshRequestedAt: n._diskReq }, 202);
+    }
+    if ((m = /^nodes\/([^/]+)\/agent-update(\/cancel)?$/.exec(path))) {
+      /* Scope admin, then the Node (404 node_not_found). Cancel: only a request the Agent has not picked up (409 agent_update_not_cancellable). */
+      const n = findNode(seg(m[1]!));
+      if (!n) return err(404, 'node_not_found');
+      if (m[2]) {
+        const u = n._update;
+        if (!u || u.state !== 'requested') return err(409, 'agent_update_not_cancellable');
+        const now = nowIso();
+        u.state = 'cancelled';
+        u.updatedAt = now;
+        u.finishedAt = now;
+        addAudit('agent.update_cancelled', { nodeId: n.id, subject: n.alias, detail: u.targetVersion });
+        return json({ ...u });
+      }
+      const refused = updateRefusal(n);
+      if (refused) return err(refused.status, refused.code, refused.message);
+      const failed = await mirror();
+      if (failed) return err(failed.status, failed.code, failed.message);
+      return json({ ...requestUpdate(n) }, 202);
+    }
+    if (path === 'agent-updates') {
+      /* Either nodes (1 to 500 IDs or aliases, none blank) or allOutdated: true. Every Node gets its own result, in the order asked (by alias for
+         allOutdated); a release that cannot be mirrored fails the whole request. */
+      const all = body.allOutdated === true;
+      const asked: Array<string | null> | null = body.nodes ?? null;
+      if (all === (!!asked && asked.length > 0) || (asked && asked.length > 500) || asked?.some(x => typeof x !== 'string' || !x.trim())) {
+        return err(400, 'invalid_request', 'Send either nodes (1 to 500 Node IDs or aliases) or allOutdated: true.');
+      }
+      const targets: Array<[string, MNode | null]> = all
+        ? nodes.filter(n => !n.revokedAt && outdatedOf(n)).sort((a, b) => (a.alias < b.alias ? -1 : a.alias > b.alias ? 1 : a.id.localeCompare(b.id))).map(n => [n.alias, n])
+        : [...new Set(asked as string[])].map(name => [name, findNode(name) ?? null]);
+      const items: Json[] = [];
+      const ready: Array<[string, MNode]> = [];
+      for (const [name, n] of targets) {
+        if (!n) { items.push({ node: name, nodeId: null, requested: false, code: 'node_not_found', message: 'Node was not found.', agentUpdate: null }); continue; }
+        const refused = updateRefusal(n);
+        if (refused) items.push({ node: name, nodeId: n.id, requested: false, code: refused.code, message: refused.message, agentUpdate: null });
+        else ready.push([name, n]);
+      }
+      if (ready.length) {
+        const failed = await mirror();
+        if (failed) return err(failed.status, failed.code, failed.message);
+      }
+      for (const [name, n] of ready) items.push({ node: name, nodeId: n.id, requested: true, code: null, message: null, agentUpdate: { ...requestUpdate(n) } });
+      const order = new Map(targets.map(([name], i) => [name, i]));
+      return json({ targetVersion: LATEST, items: items.sort((a, b) => order.get(a.node)! - order.get(b.node)!) });
     }
     if (path === 'nodes/rename') {
       /* RenameNodeAliasAsOperatorAsync: both aliases are validated first (invalid_node_alias), then the Node is looked up by its exact

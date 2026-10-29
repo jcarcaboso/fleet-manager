@@ -116,8 +116,8 @@ export interface NodeListAgent {
   os: { name: string | null; version: string | null };
   arch: string | null;
   hostname: string | null;
-  /** The Agent announced on its latest poll that it can update itself. */
-  selfUpdate: boolean;
+  /** Whether the Agent announced on its latest poll that it can update itself. Absent on a Server before Agent self-update. */
+  selfUpdate?: boolean;
 }
 export interface NodeAgent {
   version: string;
@@ -131,15 +131,19 @@ export interface NodeAgent {
   serviceManager: ServiceManager | null;
   stateDirectory: string | null;
   reportedAt: IsoTime;
-  /** The Agent announced on its latest poll that it can update itself. */
-  selfUpdate: boolean;
+  /** Whether the Agent announced on its latest poll that it can update itself. Absent on a Server before Agent self-update. */
+  selfUpdate?: boolean;
 }
 
-/** The last Agent update of a Node (`agentUpdate`), null before the first request. */
+/** `requested`, `downloading` and `restarting` are active; the others are finished. A newer Server may send another state. */
+export type AgentUpdateState = 'requested' | 'downloading' | 'restarting' | 'succeeded' | 'failed' | 'cancelled' | (string & {});
+/** The latest update of a Node's Agent (`GET nodes` items and `GET nodes/{node}`). `null` when the Node never had one. */
 export interface AgentUpdate {
+  /** The version the Agent reported when the update was requested, or `null` without a report. */
   fromVersion: string | null;
   targetVersion: string;
-  state: 'requested' | 'downloading' | 'restarting' | 'succeeded' | 'failed' | 'cancelled';
+  state: AgentUpdateState;
+  /** Set for a failed update: the Agent's error code, explained by the error catalog. */
   errorCode: string | null;
   requestedBy: string;
   requestedAt: IsoTime;
@@ -162,6 +166,7 @@ export interface NodeListItem {
   currentRevision: string | null;
   disk?: NodeListDisk | null;
   agent?: NodeListAgent | null;
+  /** Absent on a Server before Agent self-update. */
   agentUpdate?: AgentUpdate | null;
 }
 
@@ -243,8 +248,9 @@ export interface NodeDetail {
   summary: StateCounts;
   disk?: NodeDisk | null;
   agent?: NodeAgent | null;
-  agentUpdate?: AgentUpdate | null;
   drift?: DriftEvent[];
+  /** Absent on a Server before Agent self-update. */
+  agentUpdate?: AgentUpdate | null;
 }
 
 /** An item of `GET nodes/{node}/attempts` (newest first). `path` and `step` are absent before phase 2. */
@@ -299,6 +305,25 @@ export interface RemoveNodeResponse {
 }
 export interface DiskRefreshResponse {
   refreshRequestedAt: IsoTime;
+}
+/** `POST agent-updates` (admin): either `nodes` (1 to 500 Node IDs or aliases) or `allOutdated: true`, never both. */
+export interface AgentUpdatesRequest {
+  nodes?: string[];
+  allOutdated?: boolean;
+}
+/** One Node's result: the requested update, or why it was not requested (`code` and `message` as in an error body). */
+export interface AgentUpdateResult {
+  /** The alias or ID as sent; the alias for `allOutdated`. */
+  node: string;
+  nodeId: Uuid | null;
+  requested: boolean;
+  code: string | null;
+  message: string | null;
+  agentUpdate: AgentUpdate | null;
+}
+export interface AgentUpdatesResponse {
+  targetVersion: string;
+  items: AgentUpdateResult[];
 }
 
 /* ------------------------------------------------------------------ issues and the error catalog */

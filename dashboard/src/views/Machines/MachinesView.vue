@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue';
+import { computed, nextTick, onBeforeUnmount, onMounted, ref, shallowRef, watch } from 'vue';
 import { useRoute, useRouter } from 'vue-router';
 import type { CheckinsResponse, CliProxyStatus, DesiredRevisionItem, EnrollmentLink, Issue, IssuesResponse, NodeListItem, SourceStatus } from '@/api/types';
 import EmptyState from '@/components/EmptyState.vue';
@@ -12,8 +12,9 @@ import { useLoad } from '@/composables/useLoad';
 import { useFleet } from '@/context';
 import { soft } from '@/lib/errors';
 import { enc, num, slug } from '@/lib/format';
-import { errorCount, failuresFromIssues, fromList, health, issuesByNode, type Health, type NodeView } from '@/lib/model';
+import { errorCount, failuresFromIssues, fromList, health, issuesByNode, updateActive, type Health, type NodeView } from '@/lib/model';
 import { useRepositorySync } from '../Repository/useRepositorySync';
+import AgentUpdates from './AgentUpdates.vue';
 import { GROUPS, SORTS, comparator, matches, sections, sortByName, type GroupKey } from './gallery';
 import { useGalleryPrefs } from './galleryPrefs';
 import MachineCard from './MachineCard.vue';
@@ -25,6 +26,7 @@ import { createStripScheduler } from './stripScheduler';
  * pages (ported from view-gallery.js).
  * API: GET nodes (with disk and agent), GET issues, GET errors, GET source/status, GET desired-revisions?order=newest&limit=1,
  * GET cliproxy/status, GET enrollment-links, and GET nodes/{id}/checkins?hours=24 for the strip of each card that is on screen.
+ * POST agent-updates updates outdated Agents; while any Agent is updating, GET nodes is read again every `UPDATE_POLL_MS`.
  */
 const { api, catalog, summary, shell, shared, wizard, enrollmentBus: bus } = useFleet();
 const prefs = useGalleryPrefs();
@@ -55,7 +57,11 @@ const strips = createStripScheduler({
 });
 onBeforeUnmount(() => strips.dispose());
 
-const { data, error, loading, run, reload } = useLoad<Gallery>(async token => {
+/** While Agents update, the gallery reads only the machines again, at most for `UPDATE_WAIT_MS`, then everything once they are done. */
+const UPDATE_POLL_MS = 10_000;
+const UPDATE_WAIT_MS = 600_000;
+
+const { data, error, loading, run, reload, view } = useLoad<Gallery>(async token => {
   strips.reset();
   const [nodes, issues, source, revs, proxy, links] = await Promise.all([
     api.all<NodeListItem>('nodes', { maxPages: 5, signal: token.signal }),
@@ -80,6 +86,27 @@ const { data, error, loading, run, reload } = useLoad<Gallery>(async token => {
 watch(data, () => strips.restart(), { flush: 'post' });
 
 const quietReload = (): Promise<unknown> => run({ quiet: true });
+
+/* Machines read by the update poll, by ID. They replace the loaded ones until the next full load, which keeps the strips as they are. */
+const polled = shallowRef(new Map<string, NodeView>());
+watch(data, () => { polled.value = new Map(); });
+const allNodes = computed(() => (data.value?.nodes ?? []).map(n => polled.value.get(n.id) ?? n));
+let updatePoll: { stop(): void } | null = null;
+function followUpdates(): void {
+  if (updatePoll || !allNodes.value.some(n => !n.revoked && updateActive(n.update))) return;
+  updatePoll = view.poll(token => api.all<NodeListItem>('nodes', { maxPages: 5, signal: token.signal }), {
+    intervalMs: UPDATE_POLL_MS, timeoutMs: UPDATE_WAIT_MS, immediate: false,
+    done: r => {
+      const next = new Map(r.items.map(x => [x.nodeId, fromList(x)] as const));
+      polled.value = next;
+      if ([...next.values()].some(n => !n.revoked && updateActive(n.update))) return false;
+      void quietReload(); // health, issues and the navigation badge follow the results
+      return true;
+    },
+    onStop: () => { updatePoll = null; },
+  });
+}
+watch(() => allNodes.value.filter(n => !n.revoked && updateActive(n.update)).length, () => followUpdates());
 const { sync } = useRepositorySync(quietReload);
 /* A link was created or revoked, or a wizard that made one closed: the gallery and its Enrollment tile are stale. */
 watch(() => bus.version, () => { void quietReload(); });
@@ -89,15 +116,15 @@ watch(() => bus.created, () => { prefs.search = ''; });
 const byIssues = computed(() => issuesByNode(data.value?.issues ?? []));
 const healths = computed(() => {
   const map = new Map<string, Health>();
-  for (const n of data.value?.nodes ?? []) map.set(n.id, health(n, failuresFromIssues(byIssues.value.get(n.id)), code => catalog.title(code)));
+  for (const n of allNodes.value) map.set(n.id, health(n, failuresFromIssues(byIssues.value.get(n.id)), code => catalog.title(code)));
   return map;
 });
 const healthOf = (n: NodeView): Health => healths.value.get(n.id) ?? health(n);
 
 const query = computed(() => prefs.search.trim().toLowerCase());
-const live = computed(() => (data.value?.nodes ?? []).filter(n => !n.revoked));
+const live = computed(() => allNodes.value.filter(n => !n.revoked));
 const shownLive = computed(() => live.value.filter(n => matches(n, query.value, healthOf)).sort(comparator(prefs.sort, healthOf)));
-const shownRetired = computed(() => (data.value?.nodes ?? []).filter(n => n.revoked && matches(n, query.value, healthOf)).sort(sortByName));
+const shownRetired = computed(() => allNodes.value.filter(n => n.revoked && matches(n, query.value, healthOf)).sort(sortByName));
 const groups = computed(() => sections(shownLive.value, prefs.groupBy, prefs.sort, healthOf, data.value?.rev ?? null));
 
 /* Searching, grouping and sorting repaint the list: every card reports its position again, which also retries failed strips. */
@@ -132,6 +159,7 @@ const onRetiredToggle = (e: Event): void => { prefs.retiredOpen = (e.target as H
           <label class="sel"><span>Sort</span><select id="sort" v-model="prefs.sort"><option v-for="[k, l] in SORTS" :key="k" :value="k">{{ l }}</option></select><Icon name="chevD" class="sel-chev" /></label>
         </div>
       </template>
+      <AgentUpdates :nodes="live" @requested="quietReload()" />
       <div id="gallery-body">
         <EmptyState v-if="!data.nodes.length" icon="server" title="No machines yet" text="Create an enrollment link, then run the Agent on a machine to add it to Fleet." h="h1">
           <ScopeButton level="admin" cls="btn-primary" data-act="add" @click="wizard.show()"><Icon name="plus" />Add machine</ScopeButton>

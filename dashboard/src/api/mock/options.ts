@@ -43,6 +43,14 @@ export interface MockOptions {
   hang: string | null;
   /** How long a refreshed Agent takes to answer `POST nodes/{node}/disk-usage/refresh` (default 7000; `?diskdelay=1000`). */
   diskDelay: number;
+  /** How long the simulated Agent takes for each step of an update: picking up the request, downloading, restarting (default 4000; `?updatedelay=1000`). */
+  updateDelay: number;
+  /** Machines whose simulated Agent fails an update with `agent_update_smoke_test` (default `build-runner-03`; `?updatefail=fedora-ws,…`). */
+  updateFail: string[];
+  /** The Agent release the Server mirrors on the first update request: `ok`, or `unavailable` (503) / `invalid` (502) (`?release=unavailable`). */
+  release: 'ok' | 'unavailable' | 'invalid';
+  /** How long mirroring the release takes on the first update request (default 1500; `?releasedelay=0`). */
+  releaseDelay: number;
   /** Links created by the wizard expire after this many seconds, whatever was requested (`?expiry=8`). */
   expiry: number;
   /** `false`: no revision has commit metadata, like a Server before phase 4 (`?commit=0`). Otherwise only the oldest has `commit: null`. */
@@ -72,7 +80,8 @@ export const DEFAULT_ORIGIN = 'https://dashboard.mock.invalid';
 export function defaultMockOptions(): MockOptions {
   return {
     scope: 'admin', actor: 'joan', signedOut: false, mustChangePassword: false, empty: false, fail: null, forbid: false, slow: 0, pageSize: 100, diag: true, xss: false, agent: true,
-    enroll: true, enrollLinkOnly: false, weirdAlias: false, delay: {}, lag: {}, hang: null, diskDelay: 7000, expiry: 0, commit: true, rollout: true, drift: true,
+    enroll: true, enrollLinkOnly: false, weirdAlias: false, delay: {}, lag: {}, hang: null, diskDelay: 7000,
+    updateDelay: 4000, updateFail: ['build-runner-03'], release: 'ok', releaseDelay: 1500, expiry: 0, commit: true, rollout: true, drift: true,
     states: false, platform: 'macos', offline: false, cookie: true, csrfCookie: true, origin: DEFAULT_ORIGIN, dashboardOrigin: '',
   };
 }
@@ -94,6 +103,9 @@ export function parseMockOptions(search: string): MockOptions {
     enroll: p.get('enroll') !== '0', enrollLinkOnly: p.get('enroll') === 'link', weirdAlias: p.has('weirdalias'),
     delay: pairs(p.get('delay')), lag: pairs(p.get('lag')), hang: p.get('hang'),
     diskDelay: +(p.get('diskdelay') || 7000), expiry: +(p.get('expiry') || 0),
+    updateDelay: +(p.get('updatedelay') || 4000), updateFail: p.has('updatefail') ? (p.get('updatefail') ?? '').split(',').filter(Boolean) : base.updateFail,
+    release: p.get('release') === 'unavailable' || p.get('release') === 'invalid' ? (p.get('release') as 'unavailable' | 'invalid') : 'ok',
+    releaseDelay: p.has('releasedelay') ? +(p.get('releasedelay') || 0) : base.releaseDelay,
     commit: p.get('commit') !== '0', rollout: !p.has('norollout'), drift: p.get('drift') !== '0', states: p.has('states'),
     platform: p.get('platform') === 'linux' ? 'linux' : 'macos',
     offline: p.has('offline'), cookie: p.get('cookie') !== '0', csrfCookie: p.get('csrfcookie') !== '0',
