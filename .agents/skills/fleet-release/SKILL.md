@@ -51,6 +51,16 @@ private key yourself; the
 [release key guide](../../../clients/bins/fleet-agent/release-keys/README.md)
 tells the user how.
 
+The same public keys are compiled into the Agent and embedded in the Server
+image (`Fleet:AgentReleases:PublicKeys` overrides them). From 0.12.0, Operators
+update Agents from the Server: the Server mirrors the signed release of its own
+version from the GitHub release, and Agents verify it with their embedded keys.
+So the key committed before the source is prepared is what every later update of
+that release's Agents trusts. A release prepared without a committed key builds a
+Server and Agents that refuse every self-update; say so in its notes. Never
+replace a committed key in a patch release without the rotation steps of the
+key guide.
+
 ## Prepare the source
 
 1. Fetch `origin/master` and tags; inspect GitHub releases and registry tags.
@@ -69,7 +79,11 @@ tells the user how.
    operations guide, and `deploy/homelab/{README.md,compose.yaml,setup.py,.env.example}`.
    Leave Homebrew formulas
    to the release workflow; never invent archive checksums.
-4. Run the checks in `CONTRIBUTING.md`. Merge through a PR after CI passes.
+4. Run the checks in `CONTRIBUTING.md`. When the release changes the Agent
+   updater, the Server's release mirror, the Agent routes or the service
+   definition, also run `scripts/smoke-agent-update.sh`: it updates a real Agent
+   through a real Server under `systemd --user`, including a crash-loop rollback,
+   with a throwaway key. Merge through a PR after CI passes.
    Register every PR with T3 Code when its PR-linking tools are available.
 5. Select the exact tested `master` commit as `SHA`. Use a clean checkout or a
    disposable detached worktree at that commit for release builds. All image,
@@ -222,6 +236,11 @@ labels. A local build alone is not a published image. Publish both images before
 the tag: a Server without its dashboard image (or the other way round) leaves
 `docker compose up` unable to start the stack.
 
+Between the image push and the tag workflow's GitHub release, a Server of the new
+version answers Agent update requests with `agent_release_unavailable`, because
+the release it mirrors does not exist yet. That is expected; it clears without a
+restart about a minute after the release is published.
+
 ## Tag, wait, and verify
 
 Only after both remote images are verified:
@@ -244,7 +263,15 @@ Verify the release assets, their checksums and `BUILD.json` provenance, the
 manifest signature (`openssl pkeyutl -verify -rawin -pubin -inkey KEY.pem -in
 fleet-agent-release.json -sigfile fleet-agent-release.json.sig`) and that its
 digests match the binaries in the archives, both
-formula versions, and the published Docker digests of both images. Pull updated `master` only
+formula versions, and the published Docker digests of both images.
+When the previous release can update itself (0.12.0 or later), also check a
+self-update on a disposable stack running the published Server image: enroll the
+previous release's Agent, run `fleet-agent service install` in a container with a
+`systemd --user` manager, run `fleet nodes update <alias>`, and confirm that
+`fleet nodes show` reports `agentUpdate.state` `succeeded` and the new version.
+The Server mirrors the real release here, so this is the only check that the
+published key, manifest and archives work together. Report it as not verified
+when it was skipped. Pull updated `master` only
 when the local worktree is clean. Report the tag, source SHA, both image references
 and digests, GitHub release, and any unfinished verification separately.
 

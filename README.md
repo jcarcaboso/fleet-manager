@@ -247,6 +247,25 @@ The Node keeps its internal identity and credentials.
 
 ## Roll out updates
 
+Upgrade the Server first. From 0.12.0, Agents installed with
+`fleet-agent service install` update themselves when an Operator asks: use
+**Update Agent** in the Machine panel of a machine's page, **Update outdated
+Agents** on the machines list,
+or the CLI:
+
+```sh
+fleet nodes update homelab-mini        # one Node first
+fleet nodes show homelab-mini          # agentUpdate.state: requested … succeeded
+fleet nodes update --all-outdated      # then the rest
+```
+
+The Server mirrors its own signed release from GitHub, and each Agent verifies
+the signature with the release key compiled into it before it switches
+versions. A new version that does not reach the Server rolls back by itself.
+The [Agent guide](deploy/agent/README.md#updates-from-the-server) explains the
+steps.
+
+Agents up to 0.11 cannot update themselves. Upgrade them once by hand.
 Preserve the Agent state directory across upgrades. Update one Node first,
 confirm the new version and successful contact and sync in the dashboard, then
 continue in stages:
@@ -262,10 +281,8 @@ previous one; `fleet-agent update rollback` returns to it. For 0.11.0 and
 earlier, which run as a Homebrew service, use `brew services restart
 jcarcaboso/fleet/fleet-agent` after the upgrade instead.
 
-Updates started from the dashboard are planned in the
-[self-update plan](docs/plans/agent-self-update.md). Read the
-[client update runbook](docs/technical-design/client-updates.md) before a larger
-rollout. The macOS binaries are not signed or notarized, and
+Read the [client update runbook](docs/technical-design/client-updates.md)
+before a larger rollout. The macOS binaries are not signed or notarized, and
 login-startup behavior still needs validation on the target Macs.
 
 ## Develop and inspect the design

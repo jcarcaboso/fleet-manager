@@ -196,13 +196,41 @@ The same commands manage the service on Linux and macOS:
 | `fleet-agent service status` | The service manager's status |
 | `fleet-agent service logs [--follow]` | The last 200 log lines (`journalctl` on Linux, the log file on macOS) |
 | `fleet-agent service uninstall [--purge-binaries]` | Stop and remove the definition; with `--purge-binaries` also the installed versions |
-| `fleet-agent update status` | This executable's version and the installed versions (read-only) |
+| `fleet-agent update status` | This executable's version, the installed versions and the last update (read-only) |
 | `fleet-agent update rollback` | Switch the service to the other installed version and restart it |
 
 Uninstall never removes the identity, credentials or other Agent state.
 
-To upgrade, get the new `fleet-agent` the way you first installed it (for
-example `brew upgrade fleet-agent`, or a new release archive), then run
+### Updates from the Server
+
+From 0.12.0, an Operator updates the Agent without logging in to the machine:
+**Update Agent** in the dashboard, or `fleet nodes update <node>` (one Node,
+several, or `--all-outdated`). The Agent always updates to the Server's own
+version. On its next poll it downloads the release from the Server, then:
+
+1. checks the Ed25519 signature of the release manifest against the release
+   keys compiled into it, and that the version is newer than its own;
+2. streams its platform's binary into `versions/<version>/` and checks its size
+   and SHA-256 against the manifest (at most 64 MiB);
+3. runs `<new> --version`, records a trial in `update.json`, switches `current`
+   and exits with code 75 so the service manager starts the new version;
+4. the new version counts its starts. After its first successful poll it
+   reports success and keeps only itself and the previous version. After more
+   than three starts, or ten minutes without a successful poll, it switches
+   `current` back and exits, and the restored version reports the failure.
+
+Only an Agent started from `<state-dir>/current/fleet-agent` can update itself,
+so run `fleet-agent service install` once. Agents up to 0.11 cannot update
+themselves: upgrade them by hand once (below). Neither the Server nor GitHub can
+make the Agent run a binary that the release key did not sign. A new version
+that crashes before it records its start keeps restarting without rolling back;
+run `fleet-agent update rollback` on the machine to recover it.
+`fleet-agent update status` shows the update in `lastUpdate`.
+
+### Manual upgrades
+
+To upgrade by hand, get the new `fleet-agent` the way you first installed it
+(for example `brew upgrade fleet-agent`, or a new release archive), then run
 `fleet-agent service install` with the new executable. If the new version
 misbehaves, `fleet-agent update rollback` returns to the previous one.
 
