@@ -27,6 +27,11 @@ public sealed record DriftRequest([property: JsonRequired] string? Target, [prop
 public sealed record RepairFailureRequest([property: JsonRequired] string? Target, [property: JsonRequired] Guid? AssignmentId,
     [property: JsonRequired] string? ErrorCode, [property: JsonRequired] string? Diagnostic, string? Path = null, string? Step = null);
 public sealed record RepairFailuresRequest([property: JsonRequired] List<RepairFailureRequest?>? Failures);
+// All four properties are required (a missing one is a 400); errorCode may be null except for state failed. Unknown members are rejected.
+public sealed record AgentUpdateReportRequest([property: JsonRequired] Guid? UpdateId, [property: JsonRequired] string? Version,
+    [property: JsonRequired] string? State, [property: JsonRequired] string? ErrorCode);
+// Either nodes (Node IDs or aliases) or allOutdated: true.
+public sealed record AgentUpdatesRequest(List<string?>? Nodes, bool? AllOutdated);
 public sealed record IssueStateRequest([property: JsonRequired] string? Id, [property: JsonRequired] string? Action,
     [property: JsonNumberHandling(JsonNumberHandling.Strict)] int? Hours);
 public sealed record ReportRequest(Guid AttemptId, ConvergenceState State, string? ErrorCode = null);

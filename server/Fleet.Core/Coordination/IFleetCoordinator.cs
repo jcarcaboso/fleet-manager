@@ -63,6 +63,16 @@ public interface IFleetCoordinator
         DateTimeOffset contactedAt,
         CancellationToken cancellationToken = default);
 
+    /// <summary>
+    /// A poll that also records whether the Agent can update itself. With <see cref="AgentCapabilities.AgentUpdate"/>, the result
+    /// carries the version of a requested update.
+    /// </summary>
+    Task<PollResult> PollAsync(
+        NodeAuthentication authentication,
+        DateTimeOffset contactedAt,
+        AgentCapabilities capabilities,
+        CancellationToken cancellationToken = default);
+
     Task<PollResult> PollTargetAsync(
         NodeAuthentication authentication,
         string targetName,
@@ -109,6 +119,39 @@ public interface IFleetCoordinator
     Task<DiskRefreshRequested> RequestDiskUsageRefreshAsync(
         NodeId nodeId,
         string requestedBy,
+        CancellationToken cancellationToken = default);
+
+    /// <summary>
+    /// Requests that the Node's Agent update itself to <paramref name="targetVersion"/>, replacing a finished or abandoned update.
+    /// Repeating a pending request for the same version returns it unchanged. Throws node_not_found, node_revoked,
+    /// agent_update_unsupported (the Agent did not announce the capability), agent_update_current (it already runs that version
+    /// or a newer one) or agent_update_in_progress. With <paramref name="checkOnly"/>, nothing is written.
+    /// </summary>
+    Task<AgentUpdateStatus> RequestAgentUpdateAsync(
+        NodeId nodeId,
+        SemanticVersion targetVersion,
+        string requestedBy,
+        bool checkOnly = false,
+        CancellationToken cancellationToken = default);
+
+    /// <summary>Cancels an update the Agent has not picked up. Throws node_not_found or agent_update_not_cancellable.</summary>
+    Task<AgentUpdateStatus> CancelAgentUpdateAsync(
+        NodeId nodeId,
+        string cancelledBy,
+        CancellationToken cancellationToken = default);
+
+    /// <summary>
+    /// Records an Agent's report about its update. Returns false, and changes nothing, when the Node has no update to that version
+    /// in a state the report can follow. The report is validated with <see cref="AgentUpdateRules"/>.
+    /// </summary>
+    Task<bool> RecordAgentUpdateReportAsync(
+        NodeAuthentication authentication,
+        AgentUpdateReport report,
+        CancellationToken cancellationToken = default);
+
+    /// <summary>Nodes that are not revoked and reported an Agent older than <paramref name="latest"/>, by alias (at most 500).</summary>
+    Task<IReadOnlyList<NodeAliasResult>> GetOutdatedNodesAsync(
+        SemanticVersion latest,
         CancellationToken cancellationToken = default);
 
     /// <summary>

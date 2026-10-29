@@ -32,6 +32,8 @@ public sealed record RetryRequest(string? Target);
 public sealed record RemoveNodeRequest(string Alias);
 public sealed record LinkRequest(string Alias, int ExpiresInSeconds = 900);
 public sealed record SelectionRequest(string BaseUrl, long Version, CliProxySelectionPolicy? Policy);
+/// <summary>One Node's result of <c>POST agent-updates</c>: the requested update, or why it was not requested.</summary>
+public sealed record AgentUpdateResult(string Node, Guid? NodeId, bool Requested, string? Code, string? Message, AgentUpdateStatus? AgentUpdate);
 
 /// <summary>Public origin and enrollment CA used to build enrollment links. Empty when Fleet:PublicUrl is not set.</summary>
 public sealed class EnrollmentLinkSettings
@@ -112,6 +114,64 @@ public static partial class OperatorApi
             CancellationToken ct) =>
             Results.Json(await coordinator.RequestDiskUsageRefreshAsync(await ResolveNodeAsync(http, node, coordinator, false, ct), Actor(http), ct),
                 statusCode: StatusCodes.Status202Accepted)).Scope(OperatorScope.Operate);
+        // Agent self-update. The Server checks the Node first, then mirrors and verifies its own release, then records the request;
+        // the Agent picks it up on its next poll. Mirroring can take minutes on the first request of a release.
+        api.MapPost("/nodes/{node}/agent-update", async (string node, HttpContext http, IFleetCoordinator coordinator,
+            AgentReleaseMirror mirror, LatestAgentVersion latest, CancellationToken ct) =>
+        {
+            var nodeId = await ResolveNodeAsync(http, node, coordinator, false, ct);
+            await coordinator.RequestAgentUpdateAsync(nodeId, latest.Value, Actor(http), checkOnly: true, ct);
+            await mirror.EnsureAsync(latest.Value, ct);
+            return Results.Json(await coordinator.RequestAgentUpdateAsync(nodeId, latest.Value, Actor(http), cancellationToken: ct),
+                statusCode: StatusCodes.Status202Accepted);
+        }).Scope(OperatorScope.Admin).WithRequestTimeout(AgentReleaseTimeout);
+        api.MapPost("/nodes/{node}/agent-update/cancel", async (string node, HttpContext http, IFleetCoordinator coordinator,
+            CancellationToken ct) =>
+            await coordinator.CancelAgentUpdateAsync(await ResolveNodeAsync(http, node, coordinator, false, ct), Actor(http), ct))
+            .Scope(OperatorScope.Admin);
+        // Several Nodes at once: each gets its own result. A release that cannot be mirrored fails the whole request.
+        api.MapPost("/agent-updates", async (AgentUpdatesRequest request, HttpContext http, IFleetCoordinator coordinator,
+            AgentReleaseMirror mirror, LatestAgentVersion latest, CancellationToken ct) =>
+        {
+            var all = request.AllOutdated == true;
+            if (all == request.Nodes is { Count: > 0 } || request.Nodes is { Count: > MaximumUpdateNodes } ||
+                request.Nodes?.Any(string.IsNullOrWhiteSpace) == true)
+                throw new OperatorApiException(400, "invalid_request",
+                    $"Send either nodes (1 to {MaximumUpdateNodes} Node IDs or aliases) or allOutdated: true.");
+            var targets = new List<(string Node, NodeId? Id)>();
+            if (all)
+                foreach (var outdated in await coordinator.GetOutdatedNodesAsync(latest.Value, ct)) targets.Add((outdated.Alias, outdated.NodeId));
+            else
+                foreach (var name in request.Nodes!.Distinct(StringComparer.Ordinal))
+                {
+                    try { targets.Add((name!, await coordinator.ResolveNodeAsync(name!, false, ct))); }
+                    catch (CoordinationException error) when (error.Code == "node_not_found") { targets.Add((name!, null)); }
+                }
+            var results = new List<AgentUpdateResult>();
+            var ready = new List<(string Node, NodeId Id)>();
+            foreach (var (name, id) in targets)
+            {
+                if (id is not { } nodeId) { results.Add(new(name, null, false, "node_not_found", "Node was not found.", null)); continue; }
+                try
+                {
+                    await coordinator.RequestAgentUpdateAsync(nodeId, latest.Value, Actor(http), checkOnly: true, ct);
+                    ready.Add((name, nodeId));
+                }
+                catch (CoordinationException error) { results.Add(new(name, nodeId.Value, false, error.Code, error.Message, null)); }
+            }
+            if (ready.Count > 0) await mirror.EnsureAsync(latest.Value, ct);
+            foreach (var (name, nodeId) in ready)
+            {
+                try
+                {
+                    results.Add(new(name, nodeId.Value, true, null, null,
+                        await coordinator.RequestAgentUpdateAsync(nodeId, latest.Value, Actor(http), cancellationToken: ct)));
+                }
+                catch (CoordinationException error) { results.Add(new(name, nodeId.Value, false, error.Code, error.Message, null)); }
+            }
+            var order = targets.Select((x, index) => (x.Node, index)).ToDictionary(x => x.Node, x => x.index, StringComparer.Ordinal);
+            return new { targetVersion = latest.Value.Text, items = results.OrderBy(x => order[x.Node]).ToList() };
+        }).Scope(OperatorScope.Admin).WithRequestTimeout(AgentReleaseTimeout);
         api.MapPost("/nodes/rename", async (OperatorRenameAliasRequest request, HttpContext http,
             IFleetCoordinator coordinator, CancellationToken ct) =>
             await coordinator.RenameNodeAliasAsOperatorAsync(new(request.CurrentAlias, request.Alias, Actor(http)), ct))
@@ -246,6 +306,10 @@ public static partial class OperatorApi
             Results.Ok(await sync.SyncNowAsync(true, ct))).Scope(OperatorScope.Operate);
         return api;
     }
+
+    private const int MaximumUpdateNodes = 500;
+    // Mirroring the release on the first request downloads every archive; the mirror has its own time limit.
+    private static readonly TimeSpan AgentReleaseTimeout = TimeSpan.FromMinutes(10);
 
     private static RouteHandlerBuilder Scope(this RouteHandlerBuilder builder, OperatorScope scope) =>
         builder.WithMetadata(new RequiredScope(scope));

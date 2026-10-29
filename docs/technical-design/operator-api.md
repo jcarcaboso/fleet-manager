@@ -717,3 +717,96 @@ Operators can acknowledge or snooze an issue.
 `stateBy` (the Operator), `stateAt`, and `snoozedUntil`. Absent values are
 `null`. Issues keep the same order. `fleet doctor` counts only `open` issues
 in its summary and exit code, unless it is run with `--all`.
+
+## Agent self-update
+
+An Operator updates the Agent on one Node, several Nodes or every outdated Node
+to the Server's own version. The Server mirrors the signed release and serves
+it over the Node connection; the Agent verifies it with the release keys
+compiled into it. The [self-update plan](../plans/agent-self-update.md) has the
+design and the [client update guide](client-updates.md) the operation.
+
+### Capability and poll
+
+- Every poll request carries `X-Fleet-Agent-Capabilities: disk-usage,agent-update`.
+  The Server records on each poll whether `agent-update` was present
+  (`agent.selfUpdate`), and only then may it add
+  `"agentUpdate": { "version": "0.12.0", "updateId": "<uuid>" }` to the poll
+  response. The object is sent while an update to the Server's own version is
+  `requested`. Each request gets a new `updateId`.
+  Agents without the capability never receive it, and a new Agent accepts the
+  response with or without it. `agentUpdate` has no other members; a new one
+  needs a new capability.
+- The Agent finishes the cycle, then reports `downloading`. Only a 204 starts
+  the download; a 409 means the request was cancelled meanwhile. When the
+  report gets no answer the Agent tries the same request again after its next
+  three polls, even if the poll no longer carries it. A failure it could not
+  report is kept in `update.json` and sent later.
+
+### Agent routes (Node mTLS)
+
+| Route | Behavior |
+|---|---|
+| `GET /agent/v1/agent-releases/{version}/manifest` | The signed manifest bytes (`application/json`), at most 64 KiB. |
+| `GET /agent/v1/agent-releases/{version}/signature` | The 64-byte Ed25519 signature (`application/octet-stream`). |
+| `GET /agent/v1/agent-releases/{version}/binaries/{os}-{arch}` | The executable for `linux-amd64`, `macos-arm64` or `macos-amd64`, streamed. |
+| `POST /agent/v1/agent-update/report` | `{ "updateId", "version", "state", "errorCode" }`; 204 when recorded, 409 `agent_update_not_requested` without a matching update. |
+
+- Only the Server's version is served; another version is 404
+  `agent_release_not_found`, an unknown platform 404. A release the Server
+  cannot mirror is 503 `agent_release_unavailable`, one that fails
+  verification 502 `agent_release_invalid`.
+- The report has all four members. `updateId` is the one from the poll; a
+  report about an earlier request, even of the same version, is a 409.
+  `state` is `downloading`, `restarting`,
+  `succeeded` or `failed`; `errorCode` is a lowercase code of at most 64
+  characters for `failed` and `null` otherwise, else 400 `invalid_request`.
+  Allowed moves: `requested` to `downloading`, `succeeded` (the Agent already
+  runs the version) or `failed`; `downloading` to `restarting`, `succeeded` or
+  `failed`; `restarting` to `succeeded` or `failed`. Repeating the current
+  state is a 204. The report shares the per-Node limit of attempt detail.
+- Failure codes the Agent sends: `agent_update_unmanaged`,
+  `agent_update_untrusted`, `agent_update_invalid_manifest`,
+  `agent_update_downgrade`, `agent_update_platform`, `agent_update_download`,
+  `agent_update_too_large`, `agent_update_digest`, `agent_update_smoke_test`,
+  `agent_update_install`, `agent_update_crash_loop`, `agent_update_no_contact`
+  and `agent_update_rolled_back`. `GET errors` explains each.
+
+### Operator API
+
+All three routes need scope `admin` and exist under `/operator/v1` and
+`/dashboard/api`.
+
+- `POST nodes/{node}/agent-update` checks the Node, mirrors and verifies the
+  release (minutes the first time), records the request, and returns 202 with
+  the update. Repeating it while `requested` returns the same update. Errors:
+  404 `node_not_found`; 409 `node_revoked`, `agent_update_unsupported` (the
+  Agent did not announce the capability), `agent_update_current` (it reported
+  the Server's version or newer) or `agent_update_in_progress` (downloading or
+  restarting, for up to 30 minutes after its last progress); 503
+  `agent_release_unavailable`; 502 `agent_release_invalid`.
+- `POST agent-updates` with `{ "nodes": [...] }` (1 to 500 IDs or aliases) or
+  `{ "allOutdated": true }` (Nodes that are not revoked and reported an older
+  Agent) returns 200
+  `{ "targetVersion", "items": [{ "node", "nodeId", "requested", "code", "message", "agentUpdate" }] }`.
+  A Node that was not requested has `requested: false` and the error `code`
+  and `message` of the single route. A release that cannot be mirrored fails
+  the whole request with 503 or 502. Anything else is 400 `invalid_request`.
+- `POST nodes/{node}/agent-update/cancel` cancels a `requested` update and
+  returns it with state `cancelled`; otherwise 409
+  `agent_update_not_cancellable`.
+- `GET nodes` items and `GET nodes/{node}` gain `agentUpdate`, `null` before
+  the first request:
+  `{ "fromVersion", "targetVersion", "state", "errorCode", "requestedBy", "requestedAt", "updatedAt", "finishedAt" }`.
+  `state` is `requested`, `downloading`, `restarting`, `succeeded`, `failed`
+  or `cancelled`. `fromVersion` is the version the Agent reported when the
+  update was requested. Requesting again replaces a finished update. The
+  `agent` object gains `selfUpdate`.
+- `GET issues` adds `agent_update_failed` (warning) for a Node whose last
+  update failed and that still runs an older Agent, instead of
+  `agent_outdated`. Its `errorCode` is the Agent's code and its `action` the
+  first fix of that code. Both issues list `fleet nodes update <alias>` in
+  `commands` when the Agent can update itself.
+- Requests, cancellations and results are audited as
+  `agent.update_requested`, `agent.update_cancelled`, `agent.update_succeeded`
+  and `agent.update_failed`, with the versions or the error code as detail.

@@ -9,7 +9,7 @@ use std::{
     process::Command,
 };
 
-use crate::managed;
+use crate::{managed, updater};
 
 #[cfg(any(test, target_os = "macos"))]
 const LABEL: &str = "dev.fleet.agent";
@@ -279,10 +279,11 @@ fn prepare_install(state_dir: &Path, installed: &[Manager], home: &Path) -> Resu
     Ok(())
 }
 
-/// `update rollback`: switches `current` to the other installed version and
-/// restarts the service if this user has one.
+/// `update rollback`: switches `current` to the version a trial replaced, or
+/// else the previous installed version, and restarts the service if this
+/// user has one.
 pub fn rollback(state_dir: &Path) -> Result<()> {
-    let target = managed::previous_version(state_dir)?
+    let target = updater::rollback_target(state_dir)?
         .context("no other Agent version is installed to roll back to")?;
     let replaced = managed::activate(state_dir, &target)?;
     println!(

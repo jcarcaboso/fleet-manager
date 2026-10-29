@@ -8,6 +8,12 @@
 !server/Fleet.Core/**
 !server/Fleet.Server/
 !server/Fleet.Server/**
+!clients/
+!clients/bins/
+!clients/bins/fleet-agent/
+!clients/bins/fleet-agent/release-keys/
+!clients/bins/fleet-agent/release-keys/*.pem
+!clients/bins/fleet-agent/release-keys/README.md
 **/bin/
 **/obj/
 **/*.key

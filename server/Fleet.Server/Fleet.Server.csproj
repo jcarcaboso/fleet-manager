@@ -1,6 +1,8 @@
 <Project Sdk="Microsoft.NET.Sdk.Web">
   <ItemGroup>
     <EmbeddedResource Include="Dashboard/Assets/enroll.*" />
+    <!-- The public keys that sign Agent releases, the same files the Agent embeds. -->
+    <EmbeddedResource Include="../../clients/bins/fleet-agent/release-keys/*.pem" LogicalName="AgentReleaseKeys/%(Filename)%(Extension)" />
     <ProjectReference Include="../Fleet.Core/Fleet.Core.csproj" />
     <PackageReference Include="Microsoft.EntityFrameworkCore.Design" Version="10.0.10" PrivateAssets="all" />
     <PackageReference Include="Microsoft.EntityFrameworkCore" Version="10.0.10" />

@@ -504,19 +504,24 @@ public sealed partial class PostgresFleetCoordinator(
     }
 
     public Task<PollResult> PollAsync(NodeAuthentication authentication, DateTimeOffset contactedAt, CancellationToken cancellationToken = default) =>
-        PollInternal(authentication, contactedAt, null, cancellationToken);
+        PollInternal(authentication, contactedAt, null, null, cancellationToken);
 
     public Task<PollResult> PollTargetAsync(NodeAuthentication authentication, string targetName, DateTimeOffset contactedAt,
-        CancellationToken cancellationToken = default) => PollInternal(authentication, contactedAt, Required(targetName, 100, "target_name"), cancellationToken);
+        CancellationToken cancellationToken = default) =>
+        PollInternal(authentication, contactedAt, Required(targetName, 100, "target_name"), null, cancellationToken);
 
-    private async Task<PollResult> PollInternal(NodeAuthentication authentication, DateTimeOffset contactedAt, string? targetName, CancellationToken cancellationToken)
+    // Capabilities are recorded only when the caller passes them (the poll route always does).
+    private async Task<PollResult> PollInternal(NodeAuthentication authentication, DateTimeOffset contactedAt, string? targetName,
+        AgentCapabilities? capabilities, CancellationToken cancellationToken)
     {
         if (contactedAt > clock.GetUtcNow() + TimeSpan.FromMinutes(5))
             throw Error("invalid_contact_time", "Node contact time is too far in the future.");
-        var node = await Authenticate(authentication, contactedAt, true, cancellationToken);
+        var selfUpdate = capabilities?.HasFlag(AgentCapabilities.AgentUpdate);
+        var node = await Authenticate(authentication, contactedAt, true, cancellationToken, selfUpdate);
         var result = await FindPollAssignment(authentication, targetName, cancellationToken) with
         {
-            DiskUsageRequested = node.DiskUsageRefreshRequestedAt is not null
+            DiskUsageRequested = node.DiskUsageRefreshRequestedAt is not null,
+            AgentUpdate = selfUpdate == true ? await RequestedAgentUpdate(authentication.NodeId.Value, cancellationToken) : null
         };
         // After the Assignment is found and never part of it: the check-in is telemetry and cannot fail or hold up the poll.
         await RecordCheckin(authentication.NodeId.Value, contactedAt, cancellationToken);
@@ -791,7 +796,9 @@ public sealed partial class PostgresFleetCoordinator(
     }
 
     // Returns the Node row it loaded anyway, so poll reads the pending disk refresh request without another query.
-    private async Task<NodeRow> Authenticate(NodeAuthentication authentication, DateTimeOffset contact, bool updateContact, CancellationToken cancellationToken)
+    // With selfUpdate, the contact update also records whether the Agent announced the agent-update capability.
+    private async Task<NodeRow> Authenticate(NodeAuthentication authentication, DateTimeOffset contact, bool updateContact, CancellationToken cancellationToken,
+        bool? selfUpdate = null)
     {
         await EnsureWorkspace(cancellationToken);
         var now = clock.GetUtcNow();
@@ -806,7 +813,10 @@ public sealed partial class PostgresFleetCoordinator(
         if (updateContact)
         {
             var nodeId = authentication.NodeId.Value;
-            await db.Database.ExecuteSqlInterpolatedAsync($"UPDATE nodes SET \"LastContactAt\" = GREATEST(COALESCE(\"LastContactAt\", {contact}), {contact}) WHERE \"Id\" = {nodeId}", cancellationToken);
+            if (selfUpdate is { } capable)
+                await db.Database.ExecuteSqlInterpolatedAsync($"UPDATE nodes SET \"LastContactAt\" = GREATEST(COALESCE(\"LastContactAt\", {contact}), {contact}), \"AgentSelfUpdate\" = {capable} WHERE \"Id\" = {nodeId}", cancellationToken);
+            else
+                await db.Database.ExecuteSqlInterpolatedAsync($"UPDATE nodes SET \"LastContactAt\" = GREATEST(COALESCE(\"LastContactAt\", {contact}), {contact}) WHERE \"Id\" = {nodeId}", cancellationToken);
         }
         return valid;
     }

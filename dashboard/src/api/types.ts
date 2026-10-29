@@ -116,6 +116,8 @@ export interface NodeListAgent {
   os: { name: string | null; version: string | null };
   arch: string | null;
   hostname: string | null;
+  /** The Agent announced on its latest poll that it can update itself. */
+  selfUpdate: boolean;
 }
 export interface NodeAgent {
   version: string;
@@ -129,6 +131,20 @@ export interface NodeAgent {
   serviceManager: ServiceManager | null;
   stateDirectory: string | null;
   reportedAt: IsoTime;
+  /** The Agent announced on its latest poll that it can update itself. */
+  selfUpdate: boolean;
+}
+
+/** The last Agent update of a Node (`agentUpdate`), null before the first request. */
+export interface AgentUpdate {
+  fromVersion: string | null;
+  targetVersion: string;
+  state: 'requested' | 'downloading' | 'restarting' | 'succeeded' | 'failed' | 'cancelled';
+  errorCode: string | null;
+  requestedBy: string;
+  requestedAt: IsoTime;
+  updatedAt: IsoTime;
+  finishedAt: IsoTime | null;
 }
 
 /** An item of `GET nodes`. `disk` and `agent` are absent on a Server before disk usage / phase 3. */
@@ -146,6 +162,7 @@ export interface NodeListItem {
   currentRevision: string | null;
   disk?: NodeListDisk | null;
   agent?: NodeListAgent | null;
+  agentUpdate?: AgentUpdate | null;
 }
 
 export interface NodeCredential {
@@ -226,6 +243,7 @@ export interface NodeDetail {
   summary: StateCounts;
   disk?: NodeDisk | null;
   agent?: NodeAgent | null;
+  agentUpdate?: AgentUpdate | null;
   drift?: DriftEvent[];
 }
 

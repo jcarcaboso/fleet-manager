@@ -39,6 +39,51 @@ namespace Fleet.Server.Persistence.Migrations
                     b.ToTable("cliproxy_selections", (string)null);
                 });
 
+            modelBuilder.Entity("Fleet.Server.Persistence.AgentUpdateRow", b =>
+                {
+                    b.Property<Guid>("NodeId")
+                        .HasColumnType("uuid");
+
+                    b.Property<string>("ErrorCode")
+                        .HasMaxLength(64)
+                        .HasColumnType("character varying(64)");
+
+                    b.Property<DateTimeOffset?>("FinishedAt")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.Property<string>("FromVersion")
+                        .HasMaxLength(128)
+                        .HasColumnType("character varying(128)");
+
+                    b.Property<DateTimeOffset>("RequestedAt")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.Property<string>("RequestedBy")
+                        .IsRequired()
+                        .HasMaxLength(200)
+                        .HasColumnType("character varying(200)");
+
+                    b.Property<string>("State")
+                        .IsRequired()
+                        .HasMaxLength(16)
+                        .HasColumnType("character varying(16)");
+
+                    b.Property<string>("TargetVersion")
+                        .IsRequired()
+                        .HasMaxLength(64)
+                        .HasColumnType("character varying(64)");
+
+                    b.Property<Guid>("UpdateId")
+                        .HasColumnType("uuid");
+
+                    b.Property<DateTimeOffset>("UpdatedAt")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.HasKey("NodeId");
+
+                    b.ToTable("agent_updates", (string)null);
+                });
+
             modelBuilder.Entity("Fleet.Server.Persistence.AssignmentAiClientRow", b =>
                 {
                     b.Property<Guid>("AssignmentId")
@@ -563,6 +608,9 @@ namespace Fleet.Server.Persistence.Migrations
                         .ValueGeneratedOnAdd()
                         .HasColumnType("uuid");
 
+                    b.Property<bool>("AgentSelfUpdate")
+                        .HasColumnType("boolean");
+
                     b.Property<DateTimeOffset?>("DiskUsageRefreshRequestedAt")
                         .HasColumnType("timestamp with time zone");
 
@@ -856,6 +904,15 @@ namespace Fleet.Server.Persistence.Migrations
                         .WithMany()
                         .HasForeignKey("BundleDigest")
                         .OnDelete(DeleteBehavior.Restrict)
+                        .IsRequired();
+                });
+
+            modelBuilder.Entity("Fleet.Server.Persistence.AgentUpdateRow", b =>
+                {
+                    b.HasOne("Fleet.Server.Persistence.NodeRow", null)
+                        .WithMany()
+                        .HasForeignKey("NodeId")
+                        .OnDelete(DeleteBehavior.Cascade)
                         .IsRequired();
                 });
 

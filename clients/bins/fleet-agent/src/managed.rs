@@ -12,6 +12,7 @@
 //! the active one and the one it replaced, for `update rollback`.
 
 use std::{
+    cmp::Ordering,
     fs::{self, File, OpenOptions},
     io::{ErrorKind, Read, Write},
     os::unix::fs::{OpenOptionsExt, PermissionsExt},
@@ -21,6 +22,8 @@ use std::{
 use anyhow::{Context, Result, bail};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
+
+use crate::updater::compare_versions;
 
 pub const VERSIONS: &str = "versions";
 pub const CURRENT: &str = "current";
@@ -84,7 +87,7 @@ fn digest(path: &Path) -> Result<[u8; 32]> {
     Ok(hasher.finalize().into())
 }
 
-fn sync_directory(path: &Path) -> Result<()> {
+pub fn sync_directory(path: &Path) -> Result<()> {
     File::open(path)
         .and_then(|directory| directory.sync_all())
         .with_context(|| format!("sync {}", path.display()))
@@ -101,6 +104,32 @@ fn directory(path: &Path) -> Result<()> {
                 .with_context(|| format!("protect {}", path.display()))
         }
         Err(error) => Err(error).with_context(|| format!("inspect {}", path.display())),
+    }
+}
+
+/// Creates `versions/<version>/` (mode 0700) for an executable that is about
+/// to be staged there, and returns it.
+pub fn prepare_version(state_dir: &Path, version: &str) -> Result<PathBuf> {
+    check_version(version)?;
+    let versions = state_dir.join(VERSIONS);
+    let folder = versions.join(version);
+    directory(&versions)?;
+    directory(&folder)?;
+    Ok(folder)
+}
+
+/// Removes one installed version that is not active.
+pub fn remove_version(state_dir: &Path, version: &str) -> Result<()> {
+    check_version(version)?;
+    if active_version(state_dir)?.as_deref() == Some(version) {
+        bail!("version {version} is active");
+    }
+    let folder = state_dir.join(VERSIONS).join(version);
+    match fs::remove_dir_all(&folder) {
+        Err(error) if error.kind() != ErrorKind::NotFound => {
+            Err(error).with_context(|| format!("remove {}", folder.display()))
+        }
+        _ => Ok(()),
     }
 }
 
@@ -256,13 +285,23 @@ pub fn prune(state_dir: &Path, keep: &[&str]) -> Result<()> {
     Ok(())
 }
 
-/// The installed version that is not active: the one `update rollback`
-/// switches to.
+/// The installed version that is not active and the one `update rollback`
+/// switches to: the newest version older than the active one, or else the
+/// newest other one. Versions compare by semver precedence, not by name.
 pub fn previous_version(state_dir: &Path) -> Result<Option<String>> {
     let active = active_version(state_dir)?;
-    Ok(installed_versions(state_dir)?
+    let mut others = installed_versions(state_dir)?
         .into_iter()
-        .rfind(|version| Some(version) != active.as_ref()))
+        .filter(|version| Some(version) != active.as_ref())
+        .collect::<Vec<_>>();
+    others.sort_by(|left, right| compare_versions(left, right).unwrap_or_else(|| left.cmp(right)));
+    let older = active.as_deref().and_then(|active| {
+        others
+            .iter()
+            .rfind(|version| compare_versions(version, active) == Some(Ordering::Less))
+            .cloned()
+    });
+    Ok(older.or_else(|| others.pop()))
 }
 
 /// Installs `source` as `version`, makes it active, and keeps only it and the
