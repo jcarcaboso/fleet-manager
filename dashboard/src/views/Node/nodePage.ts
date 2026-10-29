@@ -8,16 +8,21 @@
  *   Switching tabs keeps the page, so a mutation started on one tab still follows the user on another.
  * - Every load goes through a lane (`useLoad` for the machine, one lane per tab group): only the newest counts and the older request is aborted.
  * - The disk refresh is a POST followed by a bounded poll with an independent deadline. Leaving the page aborts both.
+ * - An Agent update is followed the same way: while it is requested, downloading or restarting (after Update Agent, or when the page opens
+ *   on one), the machine is read every `UPDATE_POLL_MS` until it finishes and the Agent reports the new version, or `UPDATE_WAIT_MS` passes.
  */
-import { computed, inject, reactive, ref, type ComputedRef, type InjectionKey } from 'vue';
+import { computed, inject, reactive, ref, watch, type ComputedRef, type InjectionKey } from 'vue';
 import { useRouter } from 'vue-router';
-import type { AuditEvent, CheckinBucket, CheckinsResponse, DiskRefreshResponse, ErrorBody, Issue, IssuesResponse, IssueStateKey, NodeAttempt, NodeDetail, Page } from '@/api/types';
+import type { AgentUpdate, AuditEvent, CheckinBucket, CheckinsResponse, DiskRefreshResponse, ErrorBody, Issue, IssuesResponse, IssueStateKey, NodeAttempt, NodeDetail, Page } from '@/api/types';
 import { useLoad } from '@/composables/useLoad';
 import { useView } from '@/composables/useView';
 import { useFleet } from '@/context';
-import { isSilent, soft } from '@/lib/errors';
+import { isSilent, serverMessage, soft } from '@/lib/errors';
 import { enc, ms, now } from '@/lib/format';
-import { diskDetail, errorCount, fromDetail, health as modelHealth, osText, patchIssue, SNOOZE, type DiskView, type Health, type IssueLevel, type NodeDetailView } from '@/lib/model';
+import {
+  agentUpdateOf, canUpdateAgent, diskDetail, errorCount, fromDetail, health as modelHealth, osText, patchIssue, SNOOZE, updatePending, type DiskView, type Health, type IssueLevel,
+  type NodeDetailView,
+} from '@/lib/model';
 import { targetLabel } from '@/lib/targets';
 import { nodeRoute, type NodeTab } from '@/router';
 import { activityEvents, failuresOf, problemsOf, type ActivityEvent, type ProblemEntry } from './nodeModel';
@@ -28,6 +33,10 @@ export const DISK_POLL_MS = 5000;
 export const DISK_WAIT_MS = 150_000;
 /** The deadline allows the last read, due at `DISK_WAIT_MS`, a moment to answer. */
 export const DISK_GRACE_MS = 1000;
+
+/** While an Agent update is active the machine is read this often, for at most `UPDATE_WAIT_MS` (the Agent rolls back by itself after 10 minutes without a poll). */
+export const UPDATE_POLL_MS = 5000;
+export const UPDATE_WAIT_MS = 600_000;
 
 /** How old the loaded machine may be before a tab change reads it again (the old dashboard's `cacheAt` rule). */
 export const STALE_MS = 15_000;
@@ -44,6 +53,11 @@ export interface FormNote {
   err: boolean;
   /** Neither an error nor a success ("That is already the alias."): no `is-ok` / `is-err` class. */
   neutral?: boolean;
+}
+/** Update Agent and Cancel: the request in flight, and why the last one was refused. */
+export interface UpdateRun {
+  busy: 'request' | 'cancel' | null;
+  error: { text: string; tone: 'warning' | 'critical' } | null;
 }
 export interface NodeDialog {
   kind: 'revoke' | 'remove';
@@ -379,6 +393,92 @@ export function createNodePage(getAlias: () => string, getTab: () => NodeTab) {
     });
   }
 
+  /* ---------------------------------------------------------------- Agent update */
+  const update = reactive<UpdateRun>({ busy: null, error: null });
+  let updatePoll: { stop(): void } | null = null;
+  const patchUpdate = (u: AgentUpdate | null): void => patchLoaded(d => ({ ...d, node: { ...d.node, update: agentUpdateOf(u) } }));
+  /** The Server's explanation of a refusal (it says why the release is unavailable, for example), or the dashboard's own message. */
+  const refusal = (e: unknown): UpdateRun['error'] => {
+    const status = (e as ApiLikeError).status;
+    return { text: serverMessage(e, 'The update was not requested.'), tone: status === 403 || status === 409 ? 'warning' : 'critical' };
+  };
+
+  /**
+   * Follows an active update until the Agent finishes it and reports the new version, which comes with telemetry after the success.
+   * Started after Update Agent and whenever the loaded machine has a pending update (`updatePending`).
+   */
+  function followUpdate(): void {
+    const n = node.value;
+    if (!n || updatePoll || !updatePending(n)) return;
+    const id = n.id;
+    updatePoll = view.poll<NodeDetail>(token => api.get<NodeDetail>(`nodes/${enc(id)}`, undefined, { signal: token.signal }), {
+      intervalMs: UPDATE_POLL_MS, timeoutMs: UPDATE_WAIT_MS, immediate: false,
+      done: d => {
+        const next = fromDetail(d);
+        patchLoaded(l => (l.node.id === id ? { ...l, node: { ...l.node, agent: next.agent, update: next.update, lastContactAt: next.lastContactAt, freshness: next.freshness } } : l));
+        if (updatePending(next)) return false;
+        /* Finished: read the machine and its issues again, so health, the Problems count and agent_update_failed follow the result. */
+        void reload();
+        return true;
+      },
+      onError: e => ((e as { code?: string } | null)?.code === 'node_not_found' ? 'stop' : undefined),
+      onStop: () => { updatePoll = null; },
+    });
+  }
+  watch(() => node.value?.update?.state, () => followUpdate());
+
+  async function updateAgent(): Promise<void> {
+    const n = node.value;
+    if (!n || update.busy || !canUpdateAgent(n)) return;
+    const visit = view.visit();
+    update.busy = 'request';
+    update.error = null;
+    let res: AgentUpdate | null = null;
+    try {
+      /* Not tied to the page: the first request of a release can take minutes while the Server mirrors it, and it is sent either way. */
+      res = await api.post<AgentUpdate>(`nodes/${enc(n.id)}/agent-update`);
+    } catch (e) {
+      update.busy = null;
+      if (isSilent(e)) return;
+      const why = refusal(e);
+      if (visit.isCurrent()) update.error = why;
+      if ((e as ApiLikeError).status !== 403) toasts.push('Agent update was not requested', { tone: why!.tone, text: why!.text, sticky: true });
+      /* The Agent may have changed meanwhile (updated, started an update, or the machine was revoked). */
+      if (visit.isCurrent() && (e as ApiLikeError).status === 409) await reload();
+      return;
+    }
+    update.busy = null;
+    toasts.push(`Update requested for ${n.alias}`, { text: `The Agent installs ${res?.targetVersion ?? 'the new version'} after its next check-in.` });
+    if (!visit.isCurrent()) return;
+    patchUpdate(res);
+    followUpdate();
+  }
+
+  async function cancelUpdate(): Promise<void> {
+    const n = node.value;
+    if (!n || update.busy || n.update?.state !== 'requested') return;
+    const visit = view.visit();
+    update.busy = 'cancel';
+    update.error = null;
+    let res: AgentUpdate | null = null;
+    try {
+      res = await api.post<AgentUpdate>(`nodes/${enc(n.id)}/agent-update/cancel`);
+    } catch (e) {
+      update.busy = null;
+      if (isSilent(e)) return;
+      const why = refusal(e);
+      if (visit.isCurrent()) update.error = why;
+      if ((e as ApiLikeError).status !== 403) toasts.push('The update was not cancelled', { tone: why!.tone, text: why!.text, sticky: true });
+      if (visit.isCurrent() && (e as ApiLikeError).status === 409) await reload();
+      return;
+    }
+    update.busy = null;
+    toasts.push(`Update cancelled for ${n.alias}`, { text: 'The Agent keeps its current version.' });
+    if (!visit.isCurrent()) return;
+    updatePoll?.stop();
+    patchUpdate(res);
+  }
+
   /* ---------------------------------------------------------------- rename, revoke, remove */
   const note = renameNotes.get(alias);
   renameNotes.delete(alias);
@@ -484,7 +584,7 @@ export function createNodePage(getAlias: () => string, getTab: () => NodeTab) {
 
   return {
     alias, core, loaded, node, issues, issuesOk, missing, failures, problems, openProblems, health, worst, os,
-    hours, tab, activity, retrying, issueBusy, disk, diskBusy,
+    hours, tab, activity, retrying, issueBusy, disk, diskBusy, update, updateAgent, cancelUpdate,
     renameMsg, renameInvalid, renaming, dialog, canAdmin: computed(() => session.can('admin')),
     loadTab, showTab, reload, setRange, loadMoreActivity, retry, changeIssue, refreshDisk, rename, openDialog, closeDialog, dismissDialog, confirmRevoke, confirmRemove,
   };

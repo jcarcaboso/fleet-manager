@@ -5,7 +5,7 @@
 import type { DesiredRevisionItem } from '@/api/types';
 import { listText, ms, platformLabel, plural, shortSha } from '@/lib/format';
 import type { IconName } from '@/lib/icons';
-import { DISK_WARN, agentOutdated, commit, diskHot, diskOf, isAttention, osText, type Health, type NodeView } from '@/lib/model';
+import { DISK_WARN, agentOutdated, commit, diskHot, diskOf, isAttention, osText, updateBadge, type Health, type NodeView } from '@/lib/model';
 
 export type GroupKey = 'status' | 'platform' | 'os';
 export type SortKey = 'attention' | 'disk' | 'name' | 'seen' | 'outdated';
@@ -51,7 +51,7 @@ export function searchText(n: NodeView, healthOf: HealthOf): string {
   const a = n.agent;
   return [
     n.alias, n.platform, platformLabel(n.platform), n.currentRevision, healthOf(n).label,
-    ...(a ? [a.hostname, osText(n), a.os.name, a.os.version, a.arch, a.version, a.version && `agent ${a.version}`, agentOutdated(n) && 'outdated update available'] : []),
+    ...(a ? [a.hostname, osText(n), a.os.name, a.os.version, a.arch, a.version, a.version && `agent ${a.version}`, agentOutdated(n) && 'outdated update available', updateBadge(n)?.label] : []),
   ].filter(Boolean).join(' ').toLowerCase();
 }
 /** Every word of the (trimmed, lower-cased) query must appear. */
@@ -89,7 +89,7 @@ export function sections(nodes: NodeView[], groupBy: GroupKey, sort: SortKey, he
   const rest = nodes.filter(n => !lifted.includes(n));
   const subject = commit(newest?.commit)?.subject;
   return [
-    { key: 'outdated', title: 'Agent update available', sub: 'These Agents are older than the Server. Upgrade them on the machine; Fleet never does it for you. Their health is still shown on each card.', nodes: lifted },
+    { key: 'outdated', title: 'Agent update available', sub: 'These Agents are older than the Server. Use Update outdated Agents for those that can update themselves, and upgrade the others on the machine. Their health is still shown on each card.', nodes: lifted },
     { key: 'attention', title: 'Needs attention', sub: 'Fix these first. The most serious problems are at the top. A disk that is 85% full or more is listed here too.', nodes: rest.filter(n => needsAttention(n, healthOf)) },
     { key: 'updating', title: 'Updating', sub: 'Receiving new assignments right now. No action needed.', nodes: rest.filter(n => !needsAttention(n, healthOf) && healthOf(n).key === 'updating') },
     {

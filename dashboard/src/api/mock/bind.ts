@@ -7,15 +7,16 @@
  *
  * The shapes below are the records of `server/Fleet.Server/Transport/OperatorApi.cs` and `Dashboard/DashboardEndpoints.cs`
  * (`RetryRequest`, `RemoveNodeRequest`, `LinkRequest`, `SelectionRequest`, `CliProxySelectionPolicy`, `LoginRequest` and the account requests) and
- * `WireModels.cs` (`OperatorRenameAliasRequest`, `IssueStateRequest`). Routes without a body parameter (`revoke`, `disk-usage/refresh`,
- * `logout`, `source/rescan`, `cliproxy/refresh`, `accounts/{name}/delete`) ignore whatever is posted, like the Server.
+ * `WireModels.cs` (`OperatorRenameAliasRequest`, `IssueStateRequest`, `AgentUpdatesRequest`). Routes without a body parameter (`revoke`,
+ * `disk-usage/refresh`, `agent-update`, `agent-update/cancel`, `logout`, `source/rescan`, `cliproxy/refresh`, `accounts/{name}/delete`) ignore
+ * whatever is posted, like the Server.
  */
 
 /* eslint-disable @typescript-eslint/no-explicit-any */
 type Json = any;
 
 /** `string` and the collections accept `null` (nullable reference types); `int` is an Int32, `long` an Int64 (JSON numbers only, no strings). */
-export type Kind = 'string' | 'int' | 'int?' | 'long' | 'bool' | 'strings' | 'boolMap' | Shape;
+export type Kind = 'string' | 'int' | 'int?' | 'long' | 'bool' | 'bool?' | 'strings' | 'boolMap' | Shape;
 
 export interface Shape {
   /** C# member name in camelCase -> type. */
@@ -40,6 +41,7 @@ export const SHAPES = {
   issueState: { fields: { id: 'string', action: 'string', hours: 'int?' }, required: ['id', 'action'] },
   link: { fields: { alias: 'string', expiresInSeconds: 'int' } },
   selection: { fields: { baseUrl: 'string', version: 'long', policy: POLICY } },
+  agentUpdates: { fields: { nodes: 'strings', allOutdated: 'bool?' } },
 } satisfies Record<string, Shape>;
 
 const GUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
@@ -55,6 +57,7 @@ export function shapeFor(path: string): Shape | null {
   if (path === 'issues/state') return SHAPES.issueState;
   if (path === 'enrollment-links') return SHAPES.link;
   if (path === 'cliproxy/selection') return SHAPES.selection;
+  if (path === 'agent-updates') return SHAPES.agentUpdates;
   const m = /^nodes\/([^/]+)\/(retry|remove)$/.exec(path);
   if (m) {
     /* remove is `{id:guid}`: any other segment is not this route. */
@@ -78,6 +81,7 @@ function valueFits(kind: Kind, v: unknown): boolean {
     case 'int?': return v === null || valueFits('int', v);
     case 'long': return typeof v === 'number' && Number.isSafeInteger(v);
     case 'bool': return typeof v === 'boolean';
+    case 'bool?': return v === null || typeof v === 'boolean';
     case 'strings': return v === null || (Array.isArray(v) && v.every(x => x === null || typeof x === 'string'));
     case 'boolMap': return v === null || (isObject(v) && Object.values(v).every(x => typeof x === 'boolean'));
   }

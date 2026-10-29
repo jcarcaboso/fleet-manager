@@ -32,6 +32,12 @@ export const MESSAGES: Readonly<Record<string, string>> = {
   revision_not_found: 'That revision no longer exists.',
   rollout_not_found: 'That rollout no longer exists.',
   rate_limited: 'Too many requests. Wait a moment and try again.',
+  agent_update_unsupported: 'This Agent cannot update itself. Upgrade it once by hand and run fleet-agent service install.',
+  agent_update_current: 'The Agent is already up to date.',
+  agent_update_in_progress: 'The Agent is already updating. Wait until it finishes.',
+  agent_update_not_cancellable: 'The Agent already started the update, so it can no longer be cancelled.',
+  agent_release_unavailable: 'The Server could not get the Agent release. It may not be published yet.',
+  agent_release_invalid: 'The Agent release failed verification. The Server did not keep it.',
   pinned_model_excluded:
     'A pinned default model cannot be excluded. Keep it selected, change the pinned default, or turn off the Claude restriction for other clients.',
 };

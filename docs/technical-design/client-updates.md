@@ -31,8 +31,11 @@ commands. The [Agent guide](../../deploy/agent/README.md) covers service command
    uninstall under a real `systemd --user` in a container. The macOS launchd
    branch still needs a Mac.
 3. Update one Node first. Preserve its private Agent state directory.
-4. Get the new executable (`brew upgrade fleet-agent`, a release archive or
-   Cargo) and run `fleet-agent service install` with it. The command copies it
+4. For Agents from 0.12.0 that run from `fleet-agent service install`, run
+   `fleet nodes update <node>` and follow `agentUpdate` in `fleet nodes show`
+   (see Agent self-update below). Otherwise get the new executable
+   (`brew upgrade fleet-agent`, a release archive or Cargo) and run
+   `fleet-agent service install` with it. The command copies it
    to `<state-dir>/versions/<version>/`, switches the `current` link the service
    runs, and restarts the service. Verify the version and successful
    contact/sync. Agents up to 0.11.0 have no managed copy: stop the service,
@@ -49,12 +52,65 @@ installation, rebuild with the chosen `--tag` plus `--locked --force`, then
 restart the Agent service. If installation moves the executable to a different
 path, reinstall the service definition so it references that path.
 
-Agent self-update is not implemented yet; the
-[self-update plan](../plans/agent-self-update.md) describes it. The updater will
-use the signed release manifest below, validate platform and Server
-compatibility, stage the executable, restart through the service manager, and
-provide rollback. A checksum next to an archive detects corruption but does not
-replace release signing.
+From 0.12.0, Agents installed with `fleet-agent service install` can also be
+updated from the Server, described next. A checksum next to an archive detects
+corruption but does not replace release signing.
+
+## Agent self-update
+
+An Operator starts an update; nothing updates on its own. The target is always
+the Server's own version, so upgrade the Server first.
+
+1. **Request.** Update Agent in the dashboard, or `fleet nodes update <node>`
+   (also several Nodes, or `--all-outdated`). The Server refuses revoked Nodes,
+   Agents that already run its version and Agents that did not announce the
+   `agent-update` capability (0.11 and earlier).
+2. **Mirror.** On the first request for its version, the Server downloads
+   `fleet-agent-release.json`, its signature and the three archives from
+   `Fleet:AgentReleases:BaseUrl` (default: this repository's GitHub releases),
+   verifies the signature with the trusted keys before it downloads any archive,
+   extracts each `fleet-agent`, checks its digest and size against the manifest,
+   and keeps only the verified files in `Fleet:AgentReleases:CacheDirectory`
+   (default `/var/lib/fleet/agent-releases`, a tmpfs in the homelab Compose file,
+   so a restart empties it and the next request mirrors again). It follows no
+   redirect except GitHub's release-asset redirect. Until the GitHub release
+   exists, which is the normal state between pushing the images and pushing the
+   tag, requests fail with `agent_release_unavailable`.
+3. **Update.** The Agent picks up the request on its next poll, downloads the
+   manifest, signature and its binary from the Server, verifies them with the
+   keys compiled into it, runs `<new> --version`, switches `current` and exits
+   with code 75. The service manager starts the new version. The new version
+   reports success after its first successful poll; after more than three starts
+   or ten minutes without one it switches back, and the previous version
+   reports the failure. The [Agent guide](../../deploy/agent/README.md#updates-from-the-server)
+   has the details.
+4. **Follow.** `fleet nodes show <node>` and the dashboard show `agentUpdate`
+   (`requested`, `downloading`, `restarting`, then `succeeded` or `failed` with
+   an error code). A failed update raises `agent_update_failed`; `fleet explain
+   <code>` says what to do. `fleet nodes update --cancel <node>` withdraws a
+   request the Agent has not picked up.
+
+Server settings, under `Fleet:AgentReleases`:
+
+| Setting | Default | Meaning |
+|---|---|---|
+| `BaseUrl` | `https://github.com/jcarcaboso/fleet-manager/releases/download` | Releases are read from `{BaseUrl}/v{version}/{file}`. HTTPS only. |
+| `CacheDirectory` | `/var/lib/fleet/agent-releases` | Verified releases, one `v{version}` directory each. |
+| `PublicKeys` | the keys in `clients/bins/fleet-agent/release-keys/`, embedded in the Server | At most two PEM Ed25519 public keys. Set them only to test with another key. |
+| `DownloadTimeoutSeconds` | `300` | Time limit of one mirror run. |
+
+For a Server without internet access, place the release files
+(`fleet-agent-release.json`, `fleet-agent-release.json.sig` and the three
+`fleet-agent-*.tar.gz` archives) in `<CacheDirectory>/v<version>/`, on a
+persistent volume, before the first request. The Server verifies them exactly
+like downloaded files and keeps the archives.
+
+A Server or Agent built without a committed public key refuses every update
+(`agent_release_unavailable` on the Server, `agent_update_untrusted` on the
+Agent), so self-update starts working with the first release that embeds the
+key. `scripts/smoke-agent-update.sh` runs a complete update and a crash-loop
+rollback under `systemd --user` with a throwaway key; run it when a release
+changes the updater, the Server mirror or the service definition.
 
 ## Release signing
 

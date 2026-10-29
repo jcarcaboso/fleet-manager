@@ -318,9 +318,9 @@ describe('issues and the catalog (diskProblems, agentProblems)', () => {
     expect(p.find('.prob-expl').text()).toMatch(/lower than the Server/);
     expect(p.find('.prob-expl').text()).toMatch(/runs version 0\.9\.0-rc\.2; the latest version is 0\.9\.0/);
     const steps = p.findAll('.fix li');
-    expect(steps[0]!.text()).toMatch(/release archive/);
+    expect(steps[0]!.text()).toMatch(/Update Agent in the dashboard/);
     expect(steps).toHaveLength(7);
-    expect(p.findAll('.cmd code').map(c => c.text()).join()).toBe('fleet nodes show fedora-ws');
+    expect(p.findAll('.cmd code').map(c => c.text()).join()).toBe('fleet nodes show fedora-ws,fleet nodes update fedora-ws');
     expect(t.find('nav.tabs').text()).toMatch(/Problems\s*\d/);
     const outdated = (): ReturnType<NodeTest['find']> => t!.findAll('article.prob').find(x => /Agent is outdated/.test(x.find('h3').text()))!;
     await t.go('/machines/mba-travel/problems');

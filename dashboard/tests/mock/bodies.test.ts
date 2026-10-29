@@ -18,7 +18,7 @@ const MALFORMED = 'The request is malformed or a parameter is invalid.';
 const NODE_ID = '4965d79a-f516-4f50-a145-74d7f516224b';
 
 function server(options = {}) {
-  const mock = watchMock(createMockServer(options));
+  const mock = watchMock(createMockServer({ releaseDelay: 0, ...options }));
   const call = async (path: string, body?: unknown, raw?: string): Promise<{ status: number; body: any }> => {
     const r = await mock.fetch('https://mock.fleet.invalid/dashboard/api/' + path, {
       method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Fleet-CSRF': mock.state.csrf },
@@ -61,6 +61,7 @@ const ROUTES: Route[] = [
     }),
     without: [['baseUrl', 400, 'invalid_selection'], ['policy', 400, 'invalid_selection']],
   },
+  { name: 'agent-updates', path: () => 'agent-updates', good: () => ({ allOutdated: true }), without: [['allOutdated', 400, 'invalid_request']] },
 ];
 
 describe.each(ROUTES)('POST $name binds its body like the Server', route => {
@@ -132,6 +133,10 @@ describe('types', () => {
     ['cliproxy/selection', { baseUrl: 'u', version: 1, policy: { enabledFamilies: [1] } }],
     ['cliproxy/selection', { baseUrl: 'u', version: 1, policy: { modelOverrides: { a: 'on' } } }],
     ['cliproxy/selection', { baseUrl: 'u', version: 1, policy: { includeNew: true, surprise: 1 } }],
+    ['agent-updates', { allOutdated: 'yes' }],
+    ['agent-updates', { allOutdated: 1 }],
+    ['agent-updates', { nodes: 'fedora-ws' }],
+    ['agent-updates', { nodes: [1] }],
   ])('POST %s with %j is refused', async (path, body) => {
     const { call } = server();
     refused(await call(path, body));
@@ -143,6 +148,9 @@ describe('types', () => {
     expect((await call('issues/state', { id: 'x', action: 'acknowledge', hours: null })).body.code).toBe('issue_not_found');
     expect((await call('nodes/rename', { currentAlias: null, alias: null })).body.code).toBe('invalid_node_alias');
     expect((await call('cliproxy/selection', { baseUrl: 'u', version: 0, policy: null })).body.code).toBe('invalid_selection');
+    expect((await call('agent-updates', { nodes: null, allOutdated: null })).body.code).toBe('invalid_request');
+    expect((await call('agent-updates', { nodes: null, allOutdated: null })).body.message).not.toBe(MALFORMED);
+    expect((await call('agent-updates', { nodes: ['fedora-ws', null] })).body.code).toBe('invalid_request');
     expect(takeMalformed()).toHaveLength(0);
   });
 });
@@ -163,7 +171,7 @@ describe('the binding happens before the Origin, CSRF and scope checks, and afte
 
 describe('routes without a body parameter ignore what is posted', () => {
   it.each([
-    ['nodes/NODE/revoke'], ['nodes/NODE/disk-usage/refresh'], ['enrollment-links/00000000-0000-4000-8000-000000000000/revoke'], ['source/rescan'], ['cliproxy/refresh'],
+    ['nodes/NODE/revoke'], ['nodes/NODE/disk-usage/refresh'], ['nodes/NODE/agent-update'], ['nodes/NODE/agent-update/cancel'], ['enrollment-links/00000000-0000-4000-8000-000000000000/revoke'], ['source/rescan'], ['cliproxy/refresh'],
   ])('POST %s', async path => {
     const { call, nodeId } = server();
     const r = await call(path.replace('NODE', nodeId('studio-mini')), { anything: 'goes', 'x-y': [1] });
@@ -176,8 +184,8 @@ describe('routes without a body parameter ignore what is posted', () => {
 
 describe('shapes', () => {
   it('shapeFor names the routes that read a body and nothing else', () => {
-    for (const p of ['login', 'nodes/rename', 'issues/state', 'enrollment-links', 'cliproxy/selection', `nodes/${NODE_ID}/retry`, 'nodes/studio-mini/retry', `nodes/${NODE_ID}/remove`]) expect(shapeFor(p), p).not.toBeNull();
-    for (const p of ['logout', 'source/rescan', 'cliproxy/refresh', `nodes/${NODE_ID}/revoke`, 'nodes/x/disk-usage/refresh', 'nodes/studio-mini/remove', 'nodes/%E0%A4%A/remove', 'nodes']) expect(shapeFor(p), p).toBeNull();
+    for (const p of ['login', 'nodes/rename', 'issues/state', 'enrollment-links', 'cliproxy/selection', 'agent-updates', `nodes/${NODE_ID}/retry`, 'nodes/studio-mini/retry', `nodes/${NODE_ID}/remove`]) expect(shapeFor(p), p).not.toBeNull();
+    for (const p of ['logout', 'source/rescan', 'cliproxy/refresh', `nodes/${NODE_ID}/revoke`, 'nodes/x/disk-usage/refresh', 'nodes/x/agent-update', 'nodes/x/agent-update/cancel', 'nodes/studio-mini/remove', 'nodes/%E0%A4%A/remove', 'nodes']) expect(shapeFor(p), p).toBeNull();
   });
   it('bindBody returns the members under their canonical names', () => {
     expect(bindBody(shapeFor('nodes/rename')!, { CURRENTALIAS: 'a', Alias: 'b' })).toEqual({ currentAlias: 'a', alias: 'b' });

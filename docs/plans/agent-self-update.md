@@ -1,7 +1,9 @@
 # Agent self-update and service command plan
 
-Status: SU-1 (release signing) and SU-2 (managed layout and service command)
-are implemented. SU-3 to SU-6 remain.
+Status: SU-1 to SU-6 are implemented and unreleased. Self-update works with the
+first release that commits a release public key in
+`clients/bins/fleet-agent/release-keys/`; until then Servers and Agents refuse
+every update. See [Implementation notes](#implementation-notes).
 
 ## Goal
 
@@ -82,7 +84,7 @@ path at each start.
 | Command | Behavior |
 |---|---|
 | `update status` | Active and previous versions, and the last update result. Read-only. |
-| `update rollback` | Points `current` at the previous version and restarts the service. |
+| `update rollback` | Points `current` at the previous version (the one a trial replaced) and restarts the service. |
 
 Migration from `brew services`: `service install` detects the Homebrew
 definition, runs `brew services stop fleet-agent`, says so, and installs the
@@ -283,6 +285,74 @@ README install section, release notes and the release skill.
 | Leaked signing key | Two trusted keys allow rotation in one release; Nodes that never receive the new release keep trusting the old key. Store the key only in a protected environment. |
 | Oversized or slow download | Size limits from the signed manifest, absolute caps and timeouts. |
 | Same-user attacker replaces `current` | Out of scope, as for every other state file. |
+
+## Implementation notes
+
+What the implementation added to or decided beyond the design above. The
+[Operator API](../technical-design/operator-api.md#agent-self-update) documents
+the wire contract.
+
+- **Capability record.** The Server stores on each poll whether the Agent sent
+  `agent-update` (`nodes.AgentSelfUpdate`, shown as `agent.selfUpdate`), so a
+  request can be refused before the Agent sees it. The poll writes it with the
+  contact time, in the same statement.
+- **Request order.** The Operator routes check the Node, then mirror the release,
+  then record the request, so a release that cannot be mirrored never leaves a
+  request behind. A request for a version other than the Server's (left from
+  before a Server upgrade) is not sent to Agents; a new request replaces it.
+- **Pickup.** The Agent reports `downloading` first and starts only on a 204; a
+  409 means the request was cancelled after the poll. An Agent that already runs
+  the requested version reports `succeeded` from `requested`.
+- **Abandoned updates.** `agent_updates` also has `UpdatedAt`. An update that
+  has been `downloading` or `restarting` for 30 minutes without progress can be
+  replaced by a new request; before that the request is `agent_update_in_progress`.
+- **Failure codes.** The Agent reports `agent_update_unmanaged`, `_untrusted`,
+  `_invalid_manifest`, `_downgrade`, `_platform`, `_download`, `_too_large`,
+  `_digest`, `_smoke_test`, `_install`, `_crash_loop`, `_no_contact` and
+  `_rolled_back` (switched back by hand with `update rollback` during the trial).
+  The error catalog explains each, and a Server test checks that the catalog
+  covers every code in `updater.rs`.
+- **`update.json`** also holds `updateId`, `since` (when `current` was
+  switched, for the ten-minute limit), `errorCode` and `reported` (the result
+  was delivered). `update status` shows it as `lastUpdate`.
+- **Update IDs.** Each request gets a new `updateId`, sent in the poll and
+  required in every report, so a late result about an earlier request of the
+  same version cannot end a new one. The check before mirroring reads without
+  tracking, and the write after it locks the update row again.
+- **Lost reports.** When the start report gets no answer, the Agent tries the
+  same request again after up to three polls, even if the poll no longer
+  carries it (the Server may have recorded the start). A failure it could not
+  report is written to `update.json` and delivered later. A result the Server
+  refuses with a 4xx is not repeated.
+- **Rollback target.** `update rollback` switches to the version a trial
+  replaced; outside a trial to the newest version older than the active one,
+  compared by semver.
+- **Keys.** A build script embeds every `release-keys/*.pem` (none, one or two)
+  in the Agent; the Server embeds the same files as resources, and
+  `Fleet:AgentReleases:PublicKeys` overrides them for tests. .NET has no Ed25519
+  API, so the Server verifies with a small RFC 8032 implementation, tested with
+  the RFC vector and OpenSSL signatures.
+- **Mirror.** The Server keeps only the verified binaries of archives it
+  downloaded, and keeps archives an Operator placed. A failed mirror run is
+  remembered for a minute, and its downloads are deleted. `DownloadTimeoutSeconds`
+  (300) bounds one run. Archives are read by a small bounded tar reader instead
+  of `TarReader`, which allocates what a PAX or GNU long-name header claims
+  before reading it: at most 64 KiB per metadata header and 128 MiB unpacked.
+- **Dashboard.** The machine page has no Agent tab, so **Update Agent** and the
+  update state are in the Machine panel on Overview. **Update outdated Agents**
+  on the machines list asks for confirmation, lets the Operator untick machines
+  and sends the ticked Node IDs (`{"nodes": [...]}`; never `allOutdated`, which
+  would also replace abandoned updates the dialog did not offer) and shows a
+  result per machine. An update the Server would replace (a request for an
+  older Server version, or no progress for 30 minutes) can be requested again,
+  and the dashboard keeps reading a machine after `succeeded` until its
+  telemetry reports the new version. The Problems pages offer the action for
+  `agent_update_failed`, and for `agent_outdated` when the issue's commands
+  include `fleet nodes update`.
+- **End-to-end test.** `scripts/smoke-agent-update.sh` builds a Server and two
+  Agent versions with a throwaway key, signs the release with
+  `scripts/sign-agent-release.py`, and checks a crash-loop rollback and a
+  successful update under `systemd --user`.
 
 ## Effort
 

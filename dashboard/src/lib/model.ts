@@ -4,10 +4,10 @@
  * from before a phase does not send has a safe fallback.
  */
 import type {
-  AssignmentState, CommitInfo, DesiredRevisionDetail, DriftEvent, Freshness, InstallMethod, Issue, IssueStateKey, NodeAgent, NodeCredential, NodeDetail,
+  AgentUpdate, AssignmentState, CommitInfo, DesiredRevisionDetail, DriftEvent, Freshness, InstallMethod, Issue, IssueStateKey, NodeAgent, NodeCredential, NodeDetail,
   NodeDisk, NodeListAgent, NodeListDisk, NodeListItem, NodeTarget, RolloutDetail, ScanOutcome, ServiceManager, StateCounts,
 } from '@/api/types';
-import { DAY, listText, ms, now, plural, rel, shortSha, span, valid } from './format';
+import { DAY, listText, MIN, ms, now, plural, rel, shortSha, span, valid } from './format';
 import type { GlyphKind, GlyphLevel, StatusMeta } from './status';
 import { countTotal, emptyCounts, targetShort, type TargetLike } from './targets';
 
@@ -38,6 +38,18 @@ export interface AgentView {
   serviceManager: string | null;
   stateDirectory: string | null;
   reportedAt: string | null;
+  /** Whether the Agent can update itself; `null` when the Server does not say (a Server before Agent self-update). */
+  selfUpdate: boolean | null;
+}
+export interface AgentUpdateView {
+  fromVersion: string | null;
+  targetVersion: string | null;
+  state: string;
+  errorCode: string | null;
+  requestedBy: string | null;
+  requestedAt: string | null;
+  updatedAt: string | null;
+  finishedAt: string | null;
 }
 export interface NodeView {
   id: string;
@@ -54,6 +66,8 @@ export interface NodeView {
   /** The fullest volume (`GET nodes`), or `null`. */
   disk: DiskVolumeView | null;
   agent: AgentView | null;
+  /** The latest Agent update, or `null` (never updated, or a Server before Agent self-update). */
+  update: AgentUpdateView | null;
 }
 export interface NodeDetailView extends Omit<NodeView, 'disk'> {
   credential: NodeCredential | null;
@@ -129,6 +143,15 @@ export function agentInfo(input: NodeAgent | NodeListAgent | null | undefined): 
     os: { name: text(os.name), version: text(os.version), kernel: text(os.kernel) },
     arch: text(raw.arch), hostname: text(raw.hostname), user: text(raw.user), installMethod: text(raw.installMethod), serviceManager: text(raw.serviceManager),
     stateDirectory: text(raw.stateDirectory), reportedAt: raw.reportedAt || null,
+    selfUpdate: typeof raw.selfUpdate === 'boolean' ? raw.selfUpdate : null,
+  };
+}
+/** `agentUpdate` of `GET nodes` / `GET nodes/{node}`, or `null`. */
+export function agentUpdateOf(raw: AgentUpdate | null | undefined): AgentUpdateView | null {
+  if (!raw || typeof raw !== 'object' || !text(raw.state)) return null;
+  return {
+    fromVersion: text(raw.fromVersion), targetVersion: text(raw.targetVersion), state: raw.state, errorCode: text(raw.errorCode), requestedBy: text(raw.requestedBy),
+    requestedAt: raw.requestedAt || null, updatedAt: raw.updatedAt || null, finishedAt: raw.finishedAt || null,
   };
 }
 /** "Fedora Linux 44", "macOS", or `null` when the Agent reported neither. */
@@ -136,13 +159,63 @@ export const osText = (n: Pick<NodeView, 'agent'>): string | null => (n.agent ? 
 /** An outdated Agent on a revoked machine is not worth a nudge: nothing can be upgraded through Fleet any more. */
 export const agentOutdated = (n: Pick<NodeView, 'agent' | 'revoked'>): boolean => !!n.agent && n.agent.outdated && !n.revoked;
 
+/* ------------------------------------------------------------------ Agent self-update */
+
+/** Requested, downloading and restarting: the Server or the Agent is still working on it. */
+export const UPDATE_ACTIVE: readonly string[] = ['requested', 'downloading', 'restarting'];
+export const updateActive = (u: Pick<AgentUpdateView, 'state'> | null | undefined): boolean => !!u && UPDATE_ACTIVE.includes(u.state);
+/** The Server's `AgentUpdateRules.AbandonedAfter`: a download or restart without progress for this long can be replaced. */
+export const UPDATE_ABANDONED = 30 * MIN;
+/**
+ * An active update the Server would replace on a new request, like `RequestAgentUpdateAsync`: a request for another version than the
+ * Server's (it was upgraded since, and the Agent is no longer sent the old one), or a download or restart without progress for 30 minutes.
+ */
+export function updateStranded(n: Pick<NodeView, 'agent' | 'update'>): boolean {
+  const u = n.update;
+  if (!u || !updateActive(u)) return false;
+  if (u.state === 'requested') return !!n.agent?.latestVersion && !!u.targetVersion && u.targetVersion !== n.agent.latestVersion;
+  return now() - (ms(u.updatedAt) ?? now()) > UPDATE_ABANDONED;
+}
+/**
+ * A succeeded update whose new version the Agent has not reported yet: success follows the first poll, telemetry comes separately. Only
+ * for 10 minutes after it finished, so an Agent that never reports does not keep the page waiting.
+ */
+export const updateSettling = (n: Pick<NodeView, 'agent' | 'update'>): boolean =>
+  n.update?.state === 'succeeded' && !!n.agent && !!n.update.targetVersion && n.agent.version !== n.update.targetVersion
+  && now() - (ms(n.update.finishedAt) ?? 0) <= 10 * MIN;
+/** The dashboard follows the update until the Agent finishes it and reports the new version; a stranded one can be requested again. */
+export const updatePending = (n: Pick<NodeView, 'agent' | 'update'>): boolean => (updateActive(n.update) && !updateStranded(n)) || updateSettling(n);
+/** Whether to offer Update Agent: an outdated Agent that can update itself, on a live machine, with no update pending. */
+export const canUpdateAgent = (n: Pick<NodeView, 'agent' | 'revoked' | 'update'>): boolean => agentOutdated(n) && n.agent!.selfUpdate === true && !updatePending(n);
+/** An outdated Agent that cannot update itself: it needs one manual upgrade and `fleet-agent service install` first. */
+export const needsManualUpgrade = (n: Pick<NodeView, 'agent' | 'revoked'>): boolean => agentOutdated(n) && n.agent!.selfUpdate === false;
+export const UPDATE_STATE: Record<string, StatusMeta> = {
+  requested: { level: 'info', kind: 'clock', label: 'Update requested' },
+  downloading: { level: 'info', kind: 'sync', label: 'Downloading' },
+  restarting: { level: 'info', kind: 'sync', label: 'Restarting' },
+  succeeded: { level: 'good', kind: 'check', label: 'Updated' },
+  failed: { level: 'critical', kind: 'x', label: 'Update failed' },
+  cancelled: { level: 'neutral', kind: 'minus', label: 'Cancelled' },
+};
+export const updateMeta = (state: string): StatusMeta => UPDATE_STATE[state] ?? { level: 'neutral', kind: 'minus', label: state.replace(/_/g, ' ') };
+/**
+ * The badge of a machine's Agent in the list: "Updating" while an update is active, "Update failed" while the last update failed and the
+ * Agent is still outdated; `null` otherwise (a revoked machine has none).
+ */
+export function updateBadge(n: Pick<NodeView, 'agent' | 'revoked' | 'update'>): (StatusMeta & { key: 'updating' | 'failed' }) | null {
+  if (n.revoked || !n.update) return null;
+  if (updateActive(n.update)) return { key: 'updating', level: 'info', kind: 'sync', label: 'Updating' };
+  if (n.update.state === 'failed' && agentOutdated(n)) return { key: 'failed', level: 'critical', kind: 'x', label: 'Update failed' };
+  return null;
+}
+
 /** GET nodes item to view model. */
 export function fromList(raw: NodeListItem): NodeView {
   return {
     id: raw.nodeId, alias: raw.name, platform: raw.platform || null, revoked: !!raw.revoked, revokedAt: raw.revokedAt || null,
     lastContactAt: raw.lastContactAt || null, freshness: raw.freshness, enrolledAt: raw.enrolledAt || null,
     notAfter: raw.credentialNotAfter || null, counts: { ...emptyCounts(), ...(raw.targets || {}) }, currentRevision: raw.currentRevision || null,
-    disk: diskVolume(raw.disk), agent: agentInfo(raw.agent),
+    disk: diskVolume(raw.disk), agent: agentInfo(raw.agent), update: agentUpdateOf(raw.agentUpdate),
   };
 }
 /** Drift events of a Node (`GET nodes/{node}`.drift), newest first. A Server before phase 4 sends none. */
@@ -164,7 +237,7 @@ export function fromDetail(raw: NodeDetail): NodeDetailView {
     lastContactAt: raw.lastContactAt || null, freshness: raw.freshness, enrolledAt: raw.enrolledAt || null,
     notAfter: raw.credential?.notAfter || null, credential: raw.credential || null, targets,
     counts: { ...emptyCounts(), ...(raw.summary || {}) }, currentRevision: newest?.sourceRevision || null, currentAcceptedAt: newest?.acceptedAt || null,
-    disk: diskDetail(raw.disk), agent: agentInfo(raw.agent), drift: drift(raw.drift),
+    disk: diskDetail(raw.disk), agent: agentInfo(raw.agent), update: agentUpdateOf(raw.agentUpdate), drift: drift(raw.drift),
   };
 }
 

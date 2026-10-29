@@ -272,7 +272,8 @@ const { data, error, loading, refreshing, run, reload } = useLoad(async token =>
   });
   ```
 - `superseded()` / `SupersededError` (`lib/errors`): thrown by `token.check()`; silent, so a view that rethrows it is ignored by
-  `useLoad` and by `toasts.fail`. `soft(e)` turns any non-silent failure into `null` for reads that may fail without failing the page.
+  `useLoad` and by `toasts.fail`. `soft(e)` turns any non-silent failure into `null` for reads that may fail without failing the page. `serverMessage(e)` is the Server's own
+  `message` of a refusal (why the Agent release is unavailable), else the dashboard's.
 - Tests for this: `tests/composables/lanes.test.ts`, `useLoad.test.ts`, and `tests/app/stale.test.ts` (a probe view inside the real app).
 
 ### Components (`src/components`)
@@ -311,7 +312,7 @@ a `style="…"` string in a template. Tooltips: any element with `data-tip="valu
   `hasDetail`, `NO_DETAIL`, `tstate`, `attemptVerb`, `STATES`, `stateParts`, `emptyCounts`, `addCounts`, `countTotal`.
 - `model.ts`: view models `fromList`, `fromDetail`; `health(n, failures, catalog.title)`, `isAttention`, `seenText`; disk (`diskVolume`,
   `diskDetail`, `diskLevel`, `diskOf`, `diskHot`, `DISK_WARN`, `DISK_CRIT`); Agent (`agentInfo`, `osText`, `agentOutdated`, `upgradePlan`,
-  `fixSteps`, `SEMVER`); certificates (`certText`, `certFlag`); issues (`issueLevel`, `issueKind`, `issueBadge`, `sortIssues`,
+  `fixSteps`, `SEMVER`); Agent self-update (`agentUpdateOf`, `updateActive`, `canUpdateAgent`, `needsManualUpgrade`, `updateMeta`, `updateBadge`); certificates (`certText`, `certFlag`); issues (`issueLevel`, `issueKind`, `issueBadge`, `sortIssues`,
   `issuesByNode`, `failuresFromIssues`, `issueSection`, `issueState`, `isOpen`, `errorCount`, `SNOOZE`, `patchIssue`); revisions and rollouts
   (`commit`, `revTitle`, `revisionDetail`, `rolloutDetail`, `nodeRank`, `drift`, `recentDrift`); `scanOutcome`.
 - `audit.ts`: `auditLabel`, `auditIcon`, `actorName`, `actorRole`. `charts.ts`: geometry and text for the check-in charts.
@@ -366,7 +367,8 @@ app.unmount();                                                                 /
 It is a `fetch` replacement that the client takes through its `fetch` option; no global is patched. It follows the Server: the
 Origin check (400 `invalid_origin`), then the CSRF token (400 `invalid_csrf`), then scope (403 `insufficient_scope`), then validation
 and lookups in the Server's order, with the same codes, `order=newest` and `(order, offset)` cursors, audit events on mutations, a
-simulated Agent that enrolls a few seconds after a link is created and answers disk refreshes after `diskdelay`. Its own tests are
+simulated Agent that enrolls a few seconds after a link is created, answers disk refreshes after `diskdelay` and goes through Agent updates
+(requested, downloading, restarting, succeeded or failed) every `updatedelay`. Its own tests are
 `tests/mock/contract.test.ts` (ports of the old `fixtureContract` and `fixturePhase4`, plus a shape comparison with every
 `contracts/operator/*.json`) and `tests/mock/bodies.test.ts` (request bodies and the CSRF token).
 
@@ -378,9 +380,9 @@ Origin, CSRF and scope checks, because ASP.NET binds the arguments first). A mem
 default and the route's own check answers (`alias` missing on `nodes/rename` is `invalid_node_alias`, `expiresInSeconds` missing is 900).
 Member names match without regard to case. The shapes are `login {name, password}`, `account/password {currentPassword, newPassword}`,
 `accounts {name, password, scope}`, `accounts/{name}/scope {scope}`, `accounts/{name}/password {password}`, `nodes/rename {currentAlias, alias}`,
-`nodes/{id}/retry {target}`, `nodes/{id}/remove {alias}`, `issues/state {id, action, hours?}`, `enrollment-links {alias, expiresInSeconds}`
-and `cliproxy/selection {baseUrl, version, policy {includeNew, disabledFamilies, modelOverrides, enabledFamilies,
-skipClaudeModelsForOtherClients}}`; the routes without a body parameter (`revoke`, `disk-usage/refresh`, `logout`, `source/rescan`,
+`nodes/{id}/retry {target}`, `nodes/{id}/remove {alias}`, `issues/state {id, action, hours?}`, `enrollment-links {alias, expiresInSeconds}`,
+`agent-updates {nodes, allOutdated}` and `cliproxy/selection {baseUrl, version, policy {includeNew, disabledFamilies, modelOverrides, enabledFamilies,
+skipClaudeModelsForOtherClients}}`; the routes without a body parameter (`revoke`, `disk-usage/refresh`, `agent-update`, `agent-update/cancel`, `logout`, `source/rescan`,
 `cliproxy/refresh`, `accounts/{name}/delete`) ignore what is posted, like the Server. When a route changes in `OperatorApi.cs` / `WireModels.cs`, change `SHAPES`.
 A refused call has `call.malformed === true`.
 
@@ -413,6 +415,10 @@ In `dev:mock` the switches are query parameters of the page you open (read once 
 | `xss=1` | `xss` | Hostile strings in diagnostics, paths, volume labels, Agent report, commit subject and author, Skill name, drift path and Operator name. Views must show them as text. |
 | `agent=0` | `agent: false` | No `agent` property and no `agent_outdated` issue (a Server before phase 3). |
 | `diskdelay=<ms>` | `diskDelay` | How long a refreshed Agent takes to answer `POST nodes/{node}/disk-usage/refresh` (default 7000). Old Agents and offline machines never answer. |
+| `updatedelay=<ms>` | `updateDelay` | How long the simulated Agent takes for each step of an update (default 4000). Offline machines never pick a request up, so it stays cancellable. |
+| `updatefail=<alias>[,…]` | `updateFail` | Machines whose update fails the smoke test (`agent_update_smoke_test`); default `build-runner-03`, which also starts with such a failed update. |
+| `release=unavailable\|invalid` | `release` | The Agent release cannot be mirrored: update requests answer 503 `agent_release_unavailable` or 502 `agent_release_invalid`. |
+| `releasedelay=<ms>` | `releaseDelay` | How long mirroring the release takes on the first update request (default 1500), to show the pending state. |
 | `enroll=0` / `enroll=link` | `enroll: false` / `enrollLinkOnly` | The simulated enrollment never happens / the link is consumed and the Node exists but never checks in. |
 | `expiry=<s>` | `expiry` | Links created by the wizard expire after this many seconds. |
 | `platform=linux` | `platform` | Platform of machines enrolled through the wizard (default `macos`). |
@@ -489,6 +495,7 @@ which is how "a locked control sends no request" is checked. Time-dependent beha
 |---|---|
 | `session.spec.ts` | sign in (token never stored), wrong token, empty field, sign out, a 401 while a page is open returns to it after signing in, `?redirect=` only to this app, the "same site" message, an unreachable Server |
 | `machines.spec.ts` | cards, search, group by status/platform/OS, sort, disk meters, lazily loaded check-in strips |
+| `agent-update.spec.ts` | Update Agent from the Machine panel to the new version, Cancel, a failed update (machine, Problems tab, card), a release that is not published, Agents that cannot update themselves, Update outdated Agents with per-machine results and unticked machines, scopes |
 | `machine-page.spec.ts` | the six tabs, retry a failed Target, disk refresh answered and unanswered, rename (and its errors), revoke, remove with alias confirmation |
 | `problems.spec.ts` | tabs and counts, acknowledge, snooze, reopen, retry, the navigation badge |
 | `deployments.spec.ts` | rollout, machine filters, revision page (diff, per-machine progress), compare with the previous revision, load older, attempts, short-SHA address |

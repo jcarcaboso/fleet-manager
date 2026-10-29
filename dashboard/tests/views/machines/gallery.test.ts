@@ -165,7 +165,10 @@ describe('cards', () => {
     (document.querySelector('.retired') as HTMLDetailsElement).open = true;
     await flushPromises();
     expect(cardOf('old-laptop')!.querySelector('.chip--update')).toBeNull();
-    expect($$('.chip--update')).toHaveLength(4);
+    expect($$('.chip--update'), 'build-runner-03 shows its failed update instead').toHaveLength(3);
+    const failed = cardOf('build-runner-03')!;
+    expect(failed.querySelector('.chip--update-failed')!.textContent).toBe('Update to 0.9.0 failed');
+    expect(failed.querySelector('.agent-badge.is-failed')!.getAttribute('data-tip')).toBe('Agent 0.9.0-rc.1|Update to 0.9.0 failed');
     expect(o.querySelector('.agent-badge')!.getAttribute('data-tip')).toBe('Agent 0.9.0-rc.2|Update available');
   });
 

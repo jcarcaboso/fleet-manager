@@ -12,6 +12,16 @@ afterEach(() => { t?.unmount(); t = undefined; vi.useRealTimers(); });
 const fact = (label: string) => t!.findAll('.facts > div').find(d => d.find('dt').text() === label);
 const cmds = () => t!.findAll('#agent-upgrade .cmd').map(c => c.find('button').attributes('data-copy'));
 const upgrade = () => t!.text('#agent-upgrade');
+/** Makes a machine's Agent one that cannot update itself, so its callout shows the manual steps. Call it before the page of that machine loads. */
+const manualOnly = (alias: string) => { t!.app.mock.nodes.find(n => n.alias === alias)!._agent!.selfUpdate = false; };
+/** Opens a machine whose Agent cannot update itself (from another page, so the change is in place before it loads). */
+async function openManual(alias: string): Promise<NodeTest> {
+  const page = t = await openNode('/machines/design-imac');
+  manualOnly(alias);
+  await page.go(`/machines/${alias}`);
+  await page.ready(alias);
+  return page;
+}
 
 describe('the Machine panel (agentNode)', () => {
   it('shows the header line, the Agent fact and every field the Agent reported', async () => {
@@ -61,7 +71,7 @@ describe('the Machine panel (agentNode)', () => {
 
 describe('the upgrade callout (agentUpgrade)', () => {
   it('binary on systemd: both versions, the archive text, the restart command and a safe release link', async () => {
-    t = await openNode('/machines/fedora-ws');
+    t = await openManual('fedora-ws');
     expect(upgrade()).toMatch(/Update available: Agent 0\.9\.0-rc\.2 → 0\.9\.0/);
     expect(upgrade()).toMatch(/This Agent was installed from a release archive\./);
     expect(upgrade()).toMatch(/Upgrade it on fedora-ws\. Its identity and state stay in place\./);
@@ -99,7 +109,7 @@ describe('the upgrade callout (agentUpgrade)', () => {
   });
 
   it('binary without a service manager: text only, no restart command', async () => {
-    t = await openNode('/machines/build-runner-03');
+    t = await openManual('build-runner-03');
     expect(t.find('#agent-upgrade').attributes('data-method')).toBe('binary');
     expect(kv(t, 'Hostname')).toBe('runner-03');
     expect(cmds()).toHaveLength(0);
@@ -120,6 +130,7 @@ describe('the upgrade callout (agentUpgrade)', () => {
     ['fedora-ws', 'binary'],
   ])('commands are built only from validated pieces: a latest version that is not plain semver never reaches a command or a link (%s)', async (alias, method) => {
     t = await openNode('/machines/design-imac');
+    manualOnly(alias);
     const hostile = '0.9.0"; rm -rf ~ #';
     const real = t.app.ctx.api.get.bind(t.app.ctx.api) as (...a: unknown[]) => Promise<unknown>;
     vi.spyOn(t.app.ctx.api, 'get').mockImplementation(((path: string, ...rest: unknown[]) => real(path, ...rest).then(r => {

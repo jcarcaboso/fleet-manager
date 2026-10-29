@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { computed, ref } from 'vue';
-import type { Issue, IssuesResponse } from '@/api/types';
+import type { AgentUpdate, Issue, IssuesResponse } from '@/api/types';
 import ChipsFilter from '@/components/ChipsFilter.vue';
 import CopyBox from '@/components/CopyBox.vue';
 import EmptyState from '@/components/EmptyState.vue';
@@ -19,6 +19,7 @@ import StatusPill from '@/components/StatusPill.vue';
 import StepsList from '@/components/StepsList.vue';
 import { useLoad } from '@/composables/useLoad';
 import { useFleet } from '@/context';
+import { isSilent, serverMessage } from '@/lib/errors';
 import { enc, fmtFull, num, plural, rel } from '@/lib/format';
 import type { GlyphKind } from '@/lib/status';
 import { targetLabel } from '@/lib/targets';
@@ -32,8 +33,8 @@ import { useIssueState } from './useIssueState';
 
 /**
  * Problems: every open, acknowledged or snoozed issue with its catalog explanation, the steps to fix it and the commands to run.
- * API: GET issues, GET errors, POST nodes/{node}/retry, POST source/rescan, POST issues/state. The page shows one state at a time
- * (Open first); the navigation badge counts open errors only.
+ * API: GET issues, GET errors, POST nodes/{node}/retry, POST nodes/{node}/agent-update, POST source/rescan, POST issues/state. The page
+ * shows one state at a time (Open first); the navigation badge counts open errors only.
  */
 const { api, catalog, summary, shell, shared, session, toasts, openState } = useFleet();
 
@@ -41,6 +42,7 @@ const items = ref<Issue[]>([]);
 const stateTab = ref<string>('open');
 const filter = ref<string>('all');
 const retrying = ref(new Set<string>());
+const updating = ref(new Set<string>());
 
 const load = useLoad(async token => {
   const [issues] = await Promise.all([api.get<IssuesResponse>('issues', undefined, { signal: token.signal }), catalog.load()]);
@@ -150,6 +152,31 @@ const facts = (i: Issue): Array<{ k: string; v: string; sub: string; mono: boole
 const specific = (p: Decorated): string => (p.cat?.explanation && p.i.detail && p.i.detail !== p.cat.explanation ? p.i.detail : '');
 const retryable = (i: Issue): boolean => i.code === 'assignment_failed' && !!i.nodeId && !!i.target;
 
+/**
+ * Update Agent: a failed update, or an outdated Agent that can update itself. This page reads no machines, so it goes by what the Server
+ * put in the issue: it lists `fleet nodes update` only for an Agent that announced it can update itself.
+ */
+const updatable = (i: Issue): boolean => !!i.nodeId
+  && (i.code === 'agent_update_failed' || (i.code === 'agent_outdated' && (i.commands || []).some(c => c.startsWith('fleet nodes update '))));
+
+async function updateAgent(i: Issue): Promise<void> {
+  if (updating.value.has(i.id) || !i.nodeId) return;
+  const visit = load.view.visit();
+  updating.value = new Set(updating.value).add(i.id);
+  try {
+    /* The first request of a release can take minutes while the Server fetches it; it is sent even if the user leaves. */
+    const u = await api.post<AgentUpdate>(`nodes/${enc(i.nodeId)}/agent-update`);
+    toasts.push(`Update requested for ${i.nodeName}`, { text: `The Agent installs ${u?.targetVersion ?? 'the new version'} after its next check-in.` });
+  } catch (e) {
+    const status = (e as { status?: number }).status;
+    if (!isSilent(e)) toasts.push('Agent update was not requested', { tone: status === 403 || status === 409 ? 'warning' : 'critical', text: serverMessage(e), sticky: true });
+  }
+  const next = new Set(updating.value);
+  next.delete(i.id);
+  updating.value = next;
+  if (visit.isCurrent()) await quietReload();
+}
+
 async function retry(i: Issue): Promise<void> {
   if (retrying.value.has(i.id) || !i.nodeId) return;
   const visit = load.view.visit();
@@ -229,6 +256,10 @@ async function retry(i: Issue): Promise<void> {
                 </section>
               </div>
               <footer class="prob-actions">
+                <ScopeButton
+                  v-if="updatable(p.i)" level="admin" cls="btn-sm btn-primary" data-act="issue-agent-update" :data-id="p.i.id" :disabled="updating.has(p.i.id)"
+                  :aria-busy="updating.has(p.i.id) ? 'true' : undefined" @click="updateAgent(p.i)"
+                ><Icon name="sync" :class="{ spin: updating.has(p.i.id) }" />{{ updating.has(p.i.id) ? 'Requesting…' : 'Update Agent' }}</ScopeButton>
                 <ScopeButton v-if="retryable(p.i)" level="operate" cls="btn-sm btn-primary" data-act="issue-retry" :data-id="p.i.id" :disabled="retrying.has(p.i.id)" @click="retry(p.i)"><Icon name="retry" :class="{ spin: retrying.has(p.i.id) }" />{{ retrying.has(p.i.id) ? 'Requesting…' : 'Retry now' }}</ScopeButton>
                 <IssueActions :issue="p.i" :busy="busy.has(p.i.id)" @state="change" />
                 <RouterLink v-if="p.i.nodeName" class="btn btn-sm btn-ghost" :to="nodeRoute(p.i.nodeName, 'problems')">Open {{ p.i.nodeName }}<Icon name="chevR" /></RouterLink>
