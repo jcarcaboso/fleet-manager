@@ -521,7 +521,7 @@ public sealed partial class PostgresFleetCoordinator(
         var result = await FindPollAssignment(authentication, targetName, cancellationToken) with
         {
             DiskUsageRequested = node.DiskUsageRefreshRequestedAt is not null,
-            AgentUpdateVersion = selfUpdate == true ? await RequestedAgentUpdate(authentication.NodeId.Value, cancellationToken) : null
+            AgentUpdate = selfUpdate == true ? await RequestedAgentUpdate(authentication.NodeId.Value, cancellationToken) : null
         };
         // After the Assignment is found and never part of it: the check-in is telemetry and cannot fail or hold up the poll.
         await RecordCheckin(authentication.NodeId.Value, contactedAt, cancellationToken);

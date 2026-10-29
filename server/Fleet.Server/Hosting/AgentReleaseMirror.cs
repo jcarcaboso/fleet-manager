@@ -1,6 +1,5 @@
 using System.Collections.Concurrent;
 using System.ComponentModel.DataAnnotations;
-using System.Formats.Tar;
 using System.IO.Compression;
 using System.Net;
 using System.Security.Cryptography;
@@ -61,6 +60,10 @@ public sealed partial class AgentReleaseMirror(IHttpClientFactory clients, IOpti
     /// <summary>The Agent refuses larger executables, and the release script refuses to sign them.</summary>
     public const long MaximumBinaryBytes = 64 * 1024 * 1024;
     private const long MaximumArchiveBytes = 96 * 1024 * 1024;
+    /// <summary>The most an archive may unpack to: the binary and the small files beside it.</summary>
+    private const long MaximumUnpackedBytes = 128 * 1024 * 1024;
+    /// <summary>The largest PAX or GNU long-name header accepted.</summary>
+    private const int MaximumTarMetadataBytes = 64 * 1024;
     private static readonly TimeSpan FailureMemory = TimeSpan.FromMinutes(1);
     private static readonly HashSet<string> Platforms = new(StringComparer.Ordinal) { "linux-amd64", "linux-arm64", "macos-amd64", "macos-arm64" };
 
@@ -180,9 +183,9 @@ public sealed partial class AgentReleaseMirror(IHttpClientFactory clients, IOpti
             }
             return new(version, manifest, signature, binaries);
         }
-        catch (OperatorApiException error) when (error.Code == InvalidCode)
+        catch
         {
-            // Never keep what failed verification, so a corrected release can be fetched again.
+            // Never keep a download that was not verified, so a corrected release can be fetched again.
             foreach (var path in downloaded) File.Delete(path);
             throw;
         }
@@ -218,54 +221,173 @@ public sealed partial class AgentReleaseMirror(IHttpClientFactory clients, IOpti
         return file.Length == entry.Size && Convert.ToHexStringLower(await SHA256.HashDataAsync(file, ct)) == entry.Sha256;
     }
 
-    /// <summary>Extracts the <c>fleet-agent</c> member of a release archive to <paramref name="destination"/> if it matches the manifest.</summary>
+    /// <summary>
+    /// Extracts the <c>fleet-agent</c> member of a release archive to <paramref name="destination"/> if it matches the manifest. The
+    /// archive is read here rather than by <c>TarReader</c>, which allocates as much as a PAX or GNU long-name header claims before
+    /// reading it: every length is bounded before anything is read, and so is the decompressed size of the whole archive.
+    /// </summary>
     private static async Task ExtractAsync(string archive, string destination, ManifestEntry entry, CancellationToken ct)
     {
+        var name = Path.GetFileName(archive);
         var temporary = destination + ".partial";
         try
         {
-            await using (var input = File.OpenRead(archive))
-            await using (var gzip = new GZipStream(input, CompressionMode.Decompress))
-            await using (var tar = new TarReader(gzip))
+            await using var input = File.OpenRead(archive);
+            await using var gzip = new GZipStream(input, CompressionMode.Decompress);
+            var tar = new TarBlocks(gzip, MaximumUnpackedBytes, name);
+            var header = new byte[TarBlocks.BlockSize];
+            string? longName = null, paxPath = null;
+            long? paxSize = null;
+            // An archive may end without its two zero blocks; a header cut short is invalid.
+            while (await tar.ReadHeaderAsync(header, ct) && header.AsSpan().ContainsAnyExcept((byte)0))
             {
-                TarEntry? member;
-                while ((member = await tar.GetNextEntryAsync(cancellationToken: ct)) is not null)
+                var type = (char)header[156];
+                var size = TarBlocks.Size(header, name);
+                if (type is 'x' or 'g' or 'L' or 'K')
                 {
-                    if (member.Name is not ("fleet-agent" or "./fleet-agent")) continue;
-                    if (member.EntryType is not (TarEntryType.RegularFile or TarEntryType.V7RegularFile) || member.DataStream is null)
-                        throw Invalid($"fleet-agent in {Path.GetFileName(archive)} is not a regular file.");
-                    if (member.Length != entry.Size)
-                        throw Invalid($"fleet-agent in {Path.GetFileName(archive)} is {member.Length} bytes; the manifest says {entry.Size}.");
-                    await using (var output = CreatePrivate(temporary))
-                    using (var hash = IncrementalHash.CreateHash(HashAlgorithmName.SHA256))
-                    {
-                        var buffer = new byte[81920];
-                        int read;
-                        long total = 0;
-                        while ((read = await member.DataStream.ReadAsync(buffer, ct)) > 0)
-                        {
-                            total += read;
-                            if (total > entry.Size) throw Invalid($"fleet-agent in {Path.GetFileName(archive)} is larger than the manifest says.");
-                            hash.AppendData(buffer, 0, read);
-                            await output.WriteAsync(buffer.AsMemory(0, read), ct);
-                        }
-                        if (Convert.ToHexStringLower(hash.GetHashAndReset()) != entry.Sha256)
-                            throw Invalid($"fleet-agent in {Path.GetFileName(archive)} does not match the signed digest.");
-                        await output.FlushAsync(ct);
-                    }
-                    File.Move(temporary, destination, true);
-                    return;
+                    if (size > MaximumTarMetadataBytes) throw Invalid($"{name} has a tar metadata header larger than {MaximumTarMetadataBytes} bytes.");
+                    var metadata = await tar.ReadAsync((int)size, ct);
+                    if (type == 'x') (paxPath, paxSize) = TarBlocks.Pax(metadata, name);
+                    else if (type == 'L') longName = System.Text.Encoding.UTF8.GetString(metadata).TrimEnd('\0');
+                    continue;
                 }
+                var member = paxPath ?? longName ?? TarBlocks.Name(header);
+                size = paxSize ?? size;
+                (longName, paxPath, paxSize) = (null, null, null);
+                if (member is not ("fleet-agent" or "./fleet-agent"))
+                {
+                    await tar.SkipAsync(size, ct);
+                    continue;
+                }
+                if (type is not ('0' or '\0')) throw Invalid($"fleet-agent in {name} is not a regular file.");
+                if (size != entry.Size) throw Invalid($"fleet-agent in {name} is {size} bytes; the manifest says {entry.Size}.");
+                await using (var output = CreatePrivate(temporary))
+                using (var hash = IncrementalHash.CreateHash(HashAlgorithmName.SHA256))
+                {
+                    await tar.CopyAsync(size, chunk =>
+                    {
+                        hash.AppendData(chunk.Span);
+                        return output.WriteAsync(chunk, ct);
+                    }, ct);
+                    if (Convert.ToHexStringLower(hash.GetHashAndReset()) != entry.Sha256)
+                        throw Invalid($"fleet-agent in {name} does not match the signed digest.");
+                    await output.FlushAsync(ct);
+                }
+                File.Move(temporary, destination, true);
+                return;
             }
-            throw Invalid($"{Path.GetFileName(archive)} has no fleet-agent executable.");
+            throw Invalid($"{name} has no fleet-agent executable.");
         }
-        catch (Exception error) when (error is InvalidDataException or FormatException)
+        catch (Exception error) when (error is InvalidDataException or FormatException or EndOfStreamException)
         {
-            throw Invalid($"{Path.GetFileName(archive)} is not a valid gzip-compressed tar archive.");
+            throw Invalid($"{name} is not a valid gzip-compressed tar archive.");
         }
         finally
         {
             File.Delete(temporary);
+        }
+    }
+
+    /// <summary>The 512-byte blocks of a tar stream, with a bound on everything read from it.</summary>
+    private sealed class TarBlocks(Stream stream, long limit, string name)
+    {
+        public const int BlockSize = 512;
+        private readonly byte[] buffer = new byte[81920];
+        private long total;
+
+        /// <summary>False at the end of the stream; a header cut short throws <see cref="EndOfStreamException"/>.</summary>
+        public async Task<bool> ReadHeaderAsync(byte[] header, CancellationToken ct)
+        {
+            var read = await stream.ReadAtLeastAsync(header, BlockSize, throwOnEndOfStream: false, ct);
+            if (read == 0) return false;
+            if (read < BlockSize) throw new EndOfStreamException();
+            Count(BlockSize);
+            return true;
+        }
+
+        public async Task<byte[]> ReadAsync(int size, CancellationToken ct)
+        {
+            var data = new byte[size + Padding(size)];
+            await ReadExactlyAsync(data, ct);
+            return data[..size];
+        }
+
+        public Task SkipAsync(long size, CancellationToken ct) => CopyAsync(size, _ => ValueTask.CompletedTask, ct);
+
+        /// <summary>Passes the next <paramref name="size"/> bytes to <paramref name="sink"/>, then skips the padding to the next block.</summary>
+        public async Task CopyAsync(long size, Func<ReadOnlyMemory<byte>, ValueTask> sink, CancellationToken ct)
+        {
+            for (var left = size + Padding(size); left > 0;)
+            {
+                var chunk = buffer.AsMemory(0, (int)Math.Min(buffer.Length, left));
+                await ReadExactlyAsync(chunk, ct);
+                var data = Math.Max(0, Math.Min(chunk.Length, left - Padding(size)));
+                if (data > 0) await sink(chunk[..(int)data]);
+                left -= chunk.Length;
+            }
+        }
+
+        private async Task ReadExactlyAsync(Memory<byte> data, CancellationToken ct)
+        {
+            Count(data.Length);
+            await stream.ReadExactlyAsync(data, ct);
+        }
+
+        private void Count(long bytes)
+        {
+            total += bytes;
+            if (total > limit) throw Invalid($"{name} unpacks to more than {limit} bytes.");
+        }
+
+        private static long Padding(long size) => (BlockSize - size % BlockSize) % BlockSize;
+
+        /// <summary>The octal size field. Base-256 sizes are only needed beyond 8 GiB and are refused.</summary>
+        public static long Size(byte[] header, string name)
+        {
+            var field = header.AsSpan(124, 12);
+            if ((field[0] & 0x80) != 0) throw Invalid($"{name} has a tar entry larger than the Server accepts.");
+            long size = 0;
+            foreach (var digit in field.Trim((byte)' ').TrimEnd((byte)0).Trim((byte)' '))
+            {
+                if (digit is < (byte)'0' or > (byte)'7') throw new FormatException();
+                size = size * 8 + (digit - '0');
+            }
+            return size;
+        }
+
+        /// <summary>The name, with the POSIX ustar prefix (<c>prefix/name</c>); GNU headers use those bytes for other fields.</summary>
+        public static string Name(byte[] header)
+        {
+            static string Field(ReadOnlySpan<byte> field) =>
+                System.Text.Encoding.UTF8.GetString(field.IndexOf((byte)0) is var end and >= 0 ? field[..end] : field);
+            var memberName = Field(header.AsSpan(0, 100));
+            var prefix = header.AsSpan(257, 6).SequenceEqual("ustar\0"u8) ? Field(header.AsSpan(345, 155)) : "";
+            return prefix.Length > 0 ? prefix + "/" + memberName : memberName;
+        }
+
+        /// <summary>The <c>path</c> and <c>size</c> records of a PAX extended header (<c>"%d %s=%s\n"</c> each).</summary>
+        public static (string? Path, long? Size) Pax(byte[] data, string name)
+        {
+            string? path = null;
+            long? size = null;
+            for (var at = 0; at < data.Length;)
+            {
+                var space = Array.IndexOf(data, (byte)' ', at);
+                if (space < 0 || !int.TryParse(data.AsSpan(at, space - at), System.Globalization.NumberStyles.None, null, out var length) ||
+                    length <= space - at || at + length > data.Length || data[at + length - 1] != (byte)'\n')
+                    throw Invalid($"{name} has an invalid PAX extended header.");
+                var record = System.Text.Encoding.UTF8.GetString(data, space + 1, at + length - space - 2);
+                var equals = record.IndexOf('=');
+                if (equals < 0) throw Invalid($"{name} has an invalid PAX extended header.");
+                var (key, value) = (record[..equals], record[(equals + 1)..]);
+                if (key == "path") path = value;
+                else if (key == "size")
+                    size = long.TryParse(value, System.Globalization.NumberStyles.None, null, out var parsed) && parsed <= MaximumUnpackedBytes
+                        ? parsed
+                        : throw Invalid($"{name} has an invalid PAX size.");
+                at += length;
+            }
+            return (path, size);
         }
     }
 

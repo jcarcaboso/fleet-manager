@@ -479,12 +479,13 @@ impl Api {
     /// cancelled.
     pub async fn agent_update_report(
         &self,
-        version: &str,
+        update: &AgentUpdate,
         state: AgentUpdateState,
         error_code: Option<&str>,
     ) -> Result<bool, ProtocolError> {
         let body = serde_json::to_vec(&AgentUpdateReport {
-            version,
+            update_id: update.update_id,
+            version: &update.version,
             state,
             error_code,
         })
@@ -639,9 +640,12 @@ pub struct PollResponse {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
-#[serde(deny_unknown_fields)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct AgentUpdate {
     pub version: String,
+    /// Identifies this request; every report about it repeats it, so a late
+    /// report about an earlier request of the same version changes nothing.
+    pub update_id: Uuid,
 }
 
 /// States an Agent reports while it updates itself.
@@ -659,6 +663,7 @@ pub enum AgentUpdateState {
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 struct AgentUpdateReport<'a> {
+    update_id: Uuid,
     version: &'a str,
     state: AgentUpdateState,
     error_code: Option<&'a str>,
@@ -947,18 +952,27 @@ mod tests {
     fn poll_response_parses_an_agent_update_request_and_nothing_else_new() {
         let without: PollResponse = serde_json::from_str(POLL).unwrap();
         assert_eq!(without.agent_update, None);
-        let with: PollResponse =
-            serde_json::from_str(&POLL.replace('}', r#","agentUpdate":{"version":"0.12.0"}}"#))
-                .unwrap();
+        const ID: &str = "7d3c2a91-5b8e-4f60-9a1d-2e4b6c8f0a13";
+        let with: PollResponse = serde_json::from_str(&POLL.replace(
+            '}',
+            &format!(r#","agentUpdate":{{"version":"0.12.0","updateId":"{ID}"}}}}"#),
+        ))
+        .unwrap();
         assert_eq!(
             with.agent_update,
             Some(AgentUpdate {
-                version: "0.12.0".to_owned()
+                version: "0.12.0".to_owned(),
+                update_id: ID.parse().unwrap(),
             })
         );
         // The request object itself is closed, so a future field needs a new capability.
-        let extended = POLL.replace('}', r#","agentUpdate":{"version":"0.12.0","url":"x"}}"#);
+        let extended = POLL.replace(
+            '}',
+            &format!(r#","agentUpdate":{{"version":"0.12.0","updateId":"{ID}","url":"x"}}}}"#),
+        );
         assert!(serde_json::from_str::<PollResponse>(&extended).is_err());
+        let without_id = POLL.replace('}', r#","agentUpdate":{"version":"0.12.0"}}"#);
+        assert!(serde_json::from_str::<PollResponse>(&without_id).is_err());
     }
 
     #[tokio::test]
@@ -966,16 +980,20 @@ mod tests {
         let server =
             crate::detail::testing::MockServer::start(vec![(204, ""), (409, ""), (500, "")]);
         let client = Api::for_loopback_test(&server.url());
+        let update = AgentUpdate {
+            version: "0.12.0".to_owned(),
+            update_id: Uuid::nil(),
+        };
         assert!(
             client
-                .agent_update_report("0.12.0", AgentUpdateState::Downloading, None)
+                .agent_update_report(&update, AgentUpdateState::Downloading, None)
                 .await
                 .unwrap()
         );
         assert!(
             !client
                 .agent_update_report(
-                    "0.12.0",
+                    &update,
                     AgentUpdateState::Failed,
                     Some("agent_update_digest")
                 )
@@ -984,7 +1002,7 @@ mod tests {
         );
         assert!(matches!(
             client
-                .agent_update_report("0.12.0", AgentUpdateState::Succeeded, None)
+                .agent_update_report(&update, AgentUpdateState::Succeeded, None)
                 .await,
             Err(ProtocolError::Http(StatusCode::INTERNAL_SERVER_ERROR))
         ));
@@ -999,11 +1017,11 @@ mod tests {
             .collect::<Vec<_>>();
         assert_eq!(
             bodies[0],
-            serde_json::json!({"version":"0.12.0","state":"downloading","errorCode":null})
+            serde_json::json!({"updateId":Uuid::nil(),"version":"0.12.0","state":"downloading","errorCode":null})
         );
         assert_eq!(
             bodies[1],
-            serde_json::json!({"version":"0.12.0","state":"failed","errorCode":"agent_update_digest"})
+            serde_json::json!({"updateId":Uuid::nil(),"version":"0.12.0","state":"failed","errorCode":"agent_update_digest"})
         );
     }
 

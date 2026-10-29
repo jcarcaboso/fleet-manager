@@ -12,6 +12,7 @@
 //! the active one and the one it replaced, for `update rollback`.
 
 use std::{
+    cmp::Ordering,
     fs::{self, File, OpenOptions},
     io::{ErrorKind, Read, Write},
     os::unix::fs::{OpenOptionsExt, PermissionsExt},
@@ -21,6 +22,8 @@ use std::{
 use anyhow::{Context, Result, bail};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
+
+use crate::updater::compare_versions;
 
 pub const VERSIONS: &str = "versions";
 pub const CURRENT: &str = "current";
@@ -282,13 +285,23 @@ pub fn prune(state_dir: &Path, keep: &[&str]) -> Result<()> {
     Ok(())
 }
 
-/// The installed version that is not active: the one `update rollback`
-/// switches to.
+/// The installed version that is not active and the one `update rollback`
+/// switches to: the newest version older than the active one, or else the
+/// newest other one. Versions compare by semver precedence, not by name.
 pub fn previous_version(state_dir: &Path) -> Result<Option<String>> {
     let active = active_version(state_dir)?;
-    Ok(installed_versions(state_dir)?
+    let mut others = installed_versions(state_dir)?
         .into_iter()
-        .rfind(|version| Some(version) != active.as_ref()))
+        .filter(|version| Some(version) != active.as_ref())
+        .collect::<Vec<_>>();
+    others.sort_by(|left, right| compare_versions(left, right).unwrap_or_else(|| left.cmp(right)));
+    let older = active.as_deref().and_then(|active| {
+        others
+            .iter()
+            .rfind(|version| compare_versions(version, active) == Some(Ordering::Less))
+            .cloned()
+    });
+    Ok(older.or_else(|| others.pop()))
 }
 
 /// Installs `source` as `version`, makes it active, and keeps only it and the

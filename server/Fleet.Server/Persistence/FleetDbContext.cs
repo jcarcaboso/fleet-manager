@@ -358,6 +358,8 @@ public sealed class NodeRepairFailureRow
 public sealed class AgentUpdateRow
 {
     public Guid NodeId { get; set; }
+    // New for each request, so the Agent's reports about an earlier request of the same version cannot change a later one.
+    public Guid UpdateId { get; set; }
     public string? FromVersion { get; set; }
     public required string TargetVersion { get; set; }
     public required string State { get; set; }

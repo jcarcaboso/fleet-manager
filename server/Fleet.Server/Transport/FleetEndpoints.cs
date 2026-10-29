@@ -51,8 +51,8 @@ public static class FleetEndpoints
                 ["nextPollSeconds"] = options.Value.PollIntervalSeconds
             };
             if (result.DiskUsageRequested && capabilities.HasFlag(AgentCapabilities.DiskUsage)) response["diskUsageRequested"] = true;
-            if (result.AgentUpdateVersion is { } version && capabilities.HasFlag(AgentCapabilities.AgentUpdate))
-                response["agentUpdate"] = new { version };
+            if (result.AgentUpdate is { } update && capabilities.HasFlag(AgentCapabilities.AgentUpdate))
+                response["agentUpdate"] = new { version = update.Version, updateId = update.UpdateId };
             return Results.Ok(response);
         });
         agents.MapGet("/bundles/{digest}", async (string digest, HttpContext context, IFleetCoordinator coordinator, CancellationToken ct) =>
@@ -154,7 +154,8 @@ public static class FleetEndpoints
         // The Agent reports the progress of a requested update. A report without a matching update changes nothing and gets a 409.
         agents.MapPost("/agent-update/report", async (AgentUpdateReportRequest request, HttpContext context, IFleetCoordinator coordinator,
             CancellationToken ct) =>
-            await coordinator.RecordAgentUpdateReportAsync(Node(context), new(request.Version!, request.State!, request.ErrorCode), ct)
+            await coordinator.RecordAgentUpdateReportAsync(Node(context),
+                new(request.UpdateId ?? Guid.Empty, request.Version!, request.State!, request.ErrorCode), ct)
                 ? Results.NoContent()
                 : Results.Json(new { code = "agent_update_not_requested" }, statusCode: StatusCodes.Status409Conflict)).LimitPerNode();
         agents.MapPost("/credentials/renew", async (RenewalRequest request, HttpContext context, IFleetCoordinator coordinator,

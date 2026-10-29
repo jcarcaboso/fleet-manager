@@ -82,7 +82,7 @@ public sealed class AgentUpdateTests(OperatorApiFixture fixture, AgentUpdateTest
     }
 
     private Release MakeRelease(string version = Latest, string? signingKey = null, Func<string, byte[], byte[]>? archived = null,
-        Func<JsonObject, JsonObject>? manifest = null)
+        Func<JsonObject, JsonObject>? manifest = null, Func<string, byte[], byte[]>? packed = null)
     {
         var release = new Release();
         var entries = new JsonArray();
@@ -98,7 +98,8 @@ public sealed class AgentUpdateTests(OperatorApiFixture fixture, AgentUpdateTest
                 ["sha256"] = Convert.ToHexStringLower(SHA256.HashData(binary)),
                 ["size"] = binary.Length
             });
-            release.Files[$"fleet-agent-{platform}.tar.gz"] = Archive(archived?.Invoke(platform, binary) ?? binary);
+            var archive = Archive(archived?.Invoke(platform, binary) ?? binary, platform);
+            release.Files[$"fleet-agent-{platform}.tar.gz"] = packed?.Invoke(platform, archive) ?? archive;
         }
         var document = new JsonObject { ["schema"] = 1, ["name"] = "fleet-agent", ["version"] = version, ["gitCommit"] = new string('a', 40), ["binaries"] = entries };
         var bytes = Encoding.UTF8.GetBytes((manifest?.Invoke(document) ?? document).ToJsonString(new JsonSerializerOptions { WriteIndented = true }) + "\n");
@@ -107,20 +108,62 @@ public sealed class AgentUpdateTests(OperatorApiFixture fixture, AgentUpdateTest
         return release;
     }
 
-    private static byte[] Archive(byte[] binary)
+    /// <summary>
+    /// A release archive in the tar format GNU tar (Linux), bsdtar (PAX, macOS) or a plain ustar writer produces, with a long name
+    /// before fleet-agent: a PAX path record, a GNU long-name entry or a ustar prefix.
+    /// </summary>
+    private static byte[] Archive(byte[] binary, string platform)
     {
+        var format = platform switch { "linux-amd64" => TarEntryFormat.Gnu, "macos-arm64" => TarEntryFormat.Pax, _ => TarEntryFormat.Ustar };
         using var output = new MemoryStream();
         using (var gzip = new GZipStream(output, CompressionLevel.Fastest, leaveOpen: true))
-        using (var tar = new TarWriter(gzip, TarEntryFormat.Ustar))
+        using (var tar = new TarWriter(gzip, format))
         {
-            foreach (var (name, content) in new[] { ("fleet-agent", binary), ("BUILD.json", "{}"u8.ToArray()), ("LICENSE", "MIT"u8.ToArray()) })
-                tar.WriteEntry(new UstarTarEntry(TarEntryType.RegularFile, name)
+            var files = new[]
+            {
+                (new string('d', 60) + "/" + new string('f', 60), "long"u8.ToArray()), ("fleet-agent", binary), ("BUILD.json", "{}"u8.ToArray()),
+                ("LICENSE", "MIT"u8.ToArray())
+            };
+            foreach (var (name, content) in files)
+            {
+                TarEntry entry = format switch
                 {
-                    DataStream = new MemoryStream(content),
-                    Mode = UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.UserExecute
-                });
+                    TarEntryFormat.Gnu => new GnuTarEntry(TarEntryType.RegularFile, name),
+                    TarEntryFormat.Pax => new PaxTarEntry(TarEntryType.RegularFile, name),
+                    _ => new UstarTarEntry(TarEntryType.RegularFile, name)
+                };
+                entry.DataStream = new MemoryStream(content);
+                entry.Mode = UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.UserExecute;
+                tar.WriteEntry(entry);
+            }
         }
         return output.ToArray();
+    }
+
+    private static byte[] Gzip(byte[] tar)
+    {
+        using var output = new MemoryStream();
+        using (var gzip = new GZipStream(output, CompressionLevel.Fastest, leaveOpen: true)) gzip.Write(tar);
+        return output.ToArray();
+    }
+
+    private static byte[] Gunzip(byte[] archive)
+    {
+        using var input = new GZipStream(new MemoryStream(archive), CompressionMode.Decompress);
+        using var output = new MemoryStream();
+        input.CopyTo(output);
+        return output.ToArray();
+    }
+
+    /// <summary>One tar header block of <paramref name="type"/> whose size field claims <paramref name="size"/> bytes.</summary>
+    private static byte[] TarHeader(string name, char type, long size)
+    {
+        var header = new byte[512];
+        Encoding.ASCII.GetBytes(name).CopyTo(header, 0);
+        Encoding.ASCII.GetBytes(Convert.ToString(size, 8).PadLeft(11, '0') + "\0").CopyTo(header, 124);
+        header[156] = (byte)type;
+        "ustar\000"u8.ToArray().CopyTo(header, 257);
+        return header;
     }
 
     /// <summary>Plays GitHub: answers release downloads from <see cref="Release"/> files and records each request.</summary>
@@ -183,8 +226,12 @@ public sealed class AgentUpdateTests(OperatorApiFixture fixture, AgentUpdateTest
             return JsonNode.Parse(text)!.AsObject();
         }
 
-        public async Task<int> ReportAsync(EnrolledNode node, string state, string? errorCode = null, string version = Latest) =>
-            (await NodeAsync("/agent/v1/agent-update/report", node.Certificate, new { version, state, errorCode }, "POST")).Status;
+        public async Task<int> ReportAsync(EnrolledNode node, Guid updateId, string state, string? errorCode = null, string version = Latest) =>
+            (await NodeAsync("/agent/v1/agent-update/report", node.Certificate, new { updateId, version, state, errorCode }, "POST")).Status;
+
+        /// <summary>The <c>updateId</c> of the update the next poll asks for.</summary>
+        public async Task<Guid> UpdateIdAsync(EnrolledNode node) =>
+            Guid.Parse((await PollAsync(node, Both))["agentUpdate"]!["updateId"]!.GetValue<string>());
 
         public async Task<JsonNode> DetailAsync(string alias) =>
             await OperatorApiFixture.ReadAsync(await Reader.GetAsync($"/operator/v1/nodes/{alias}"));
@@ -291,6 +338,9 @@ public sealed class AgentUpdateTests(OperatorApiFixture fixture, AgentUpdateTest
 
         var poll = await host.PollAsync(node, Both);
         Assert.Equal(Latest, poll["agentUpdate"]!["version"]!.GetValue<string>());
+        Assert.Equal(["updateId", "version"], poll["agentUpdate"]!.AsObject().Select(x => x.Key).Order().ToArray());
+        var id = Guid.Parse(poll["agentUpdate"]!["updateId"]!.GetValue<string>());
+        Assert.Equal(id, await host.UpdateIdAsync(node));
         Assert.Equal(["agentUpdate", "assignment", "nextPollSeconds", "nodeId", "workspaceId"], poll.Select(x => x.Key).Order().ToArray());
 
         // The Agent downloads exactly the signed bytes.
@@ -315,18 +365,19 @@ public sealed class AgentUpdateTests(OperatorApiFixture fixture, AgentUpdateTest
             Assert.True((await anonymous.GetAsync($"/agent/v1/agent-releases/{Latest}/manifest")).StatusCode is HttpStatusCode.Unauthorized or HttpStatusCode.Forbidden);
 
         // Picked up: the poll field disappears and the request can no longer be cancelled.
-        Assert.Equal(204, await host.ReportAsync(node, "downloading"));
-        Assert.Equal(204, await host.ReportAsync(node, "downloading"));
+        Assert.Equal(409, await host.ReportAsync(node, Guid.NewGuid(), "downloading"));
+        Assert.Equal(204, await host.ReportAsync(node, id, "downloading"));
+        Assert.Equal(204, await host.ReportAsync(node, id, "downloading"));
         Assert.False((await host.PollAsync(node, Both)).ContainsKey("agentUpdate"));
         await ExpectAsync(await host.Admin.PostAsync("/operator/v1/nodes/update-happy/agent-update/cancel", null), HttpStatusCode.Conflict,
             "agent_update_not_cancellable");
         await ExpectAsync(await host.Admin.PostAsync("/operator/v1/nodes/update-happy/agent-update", null), HttpStatusCode.Conflict,
             "agent_update_in_progress");
-        Assert.Equal(204, await host.ReportAsync(node, "restarting"));
-        Assert.Equal(409, await host.ReportAsync(node, "downloading"));
-        Assert.Equal(409, await host.ReportAsync(node, "succeeded", version: "0.13.0"));
-        Assert.Equal(204, await host.ReportAsync(node, "succeeded"));
-        Assert.Equal(409, await host.ReportAsync(node, "failed", "agent_update_crash_loop"));
+        Assert.Equal(204, await host.ReportAsync(node, id, "restarting"));
+        Assert.Equal(409, await host.ReportAsync(node, id, "downloading"));
+        Assert.Equal(409, await host.ReportAsync(node, id, "succeeded", version: "0.13.0"));
+        Assert.Equal(204, await host.ReportAsync(node, id, "succeeded"));
+        Assert.Equal(409, await host.ReportAsync(node, id, "failed", "agent_update_crash_loop"));
 
         var done = (await host.DetailAsync("update-happy"))["agentUpdate"]!;
         Assert.Equal("succeeded", done["state"]!.GetValue<string>());
@@ -401,6 +452,7 @@ public sealed class AgentUpdateTests(OperatorApiFixture fixture, AgentUpdateTest
         await ExpectAsync(await host.Admin.PostAsync("/operator/v1/nodes/update-cancel/agent-update/cancel", null), HttpStatusCode.Conflict,
             "agent_update_not_cancellable");
         await ExpectAsync(await host.Admin.PostAsync("/operator/v1/nodes/update-cancel/agent-update", null), HttpStatusCode.Accepted);
+        var first = await host.UpdateIdAsync(node);
         await using (var browser = new BrowserHandle(await BrowserAsync(host, OperatorApiFixture.AdminToken)))
         {
             var cancelled = await OperatorApiFixture.ReadAsync(await browser.Client.PostAsync("/dashboard/api/nodes/update-cancel/agent-update/cancel", null));
@@ -409,15 +461,19 @@ public sealed class AgentUpdateTests(OperatorApiFixture fixture, AgentUpdateTest
         }
         Assert.False((await host.PollAsync(node, Both)).ContainsKey("agentUpdate"));
         // The Agent may have polled just before: its pickup is refused, so it never starts.
-        Assert.Equal(409, await host.ReportAsync(node, "downloading"));
+        Assert.Equal(409, await host.ReportAsync(node, first, "downloading"));
         Assert.Equal("cancelled", (await host.DetailAsync("update-cancel"))["agentUpdate"]!["state"]!.GetValue<string>());
         Assert.Equal(1, await AuditCountAsync(node, "agent.update_cancelled"));
         // A new request replaces the finished one.
         var again = await ExpectAsync(await host.Admin.PostAsync("/operator/v1/nodes/update-cancel/agent-update", null), HttpStatusCode.Accepted);
         Assert.Equal("requested", again["state"]!.GetValue<string>());
-        Assert.True((await host.PollAsync(node, Both)).ContainsKey("agentUpdate"));
+        var second = await host.UpdateIdAsync(node);
+        Assert.NotEqual(first, second);
+        // A result about the earlier request of the same version (kept while the Node was offline) does not end the new one.
+        Assert.Equal(409, await host.ReportAsync(node, first, "failed", "agent_update_crash_loop"));
+        Assert.Equal("requested", (await host.DetailAsync("update-cancel"))["agentUpdate"]!["state"]!.GetValue<string>());
         // An Agent that already runs the version (upgraded by hand meanwhile) reports success without downloading.
-        Assert.Equal(204, await host.ReportAsync(node, "succeeded"));
+        Assert.Equal(204, await host.ReportAsync(node, second, "succeeded"));
         Assert.Equal("succeeded", (await host.DetailAsync("update-cancel"))["agentUpdate"]!["state"]!.GetValue<string>());
     }
 
@@ -463,6 +519,71 @@ public sealed class AgentUpdateTests(OperatorApiFixture fixture, AgentUpdateTest
         await AgentAsync(second, "update-wrong-version");
         await ExpectAsync(await second.Admin.PostAsync("/operator/v1/nodes/update-wrong-version/agent-update", null), HttpStatusCode.BadGateway,
             "agent_release_invalid");
+    }
+
+    [Fact]
+    public async Task Hostile_or_truncated_archives_are_rejected_before_anything_large_is_read_and_never_cached()
+    {
+        // The manifest is genuine and signed; only the archives were replaced.
+        var hostile = new (string Message, Func<byte[], byte[]> Replace)[]
+        {
+            // A PAX header that claims 1 GiB, which TarReader would allocate before reading it.
+            ("metadata header larger than", _ => Gzip([.. TarHeader("PaxHeaders/fleet-agent", 'x', 1L << 30), .. new byte[1024]])),
+            // A GNU long name that claims 1 GiB.
+            ("metadata header larger than", _ => Gzip([.. TarHeader("././@LongLink", 'L', 1L << 30), .. new byte[1024]])),
+            // An archive that unpacks to more than any release: a 200 MiB entry before fleet-agent.
+            ("unpacks to more than", _ =>
+            {
+                using var output = new MemoryStream();
+                using (var gzip = new GZipStream(output, CompressionLevel.Fastest, leaveOpen: true))
+                {
+                    gzip.Write(TarHeader("padding", '0', 200L << 20));
+                    var zeros = new byte[1 << 20];
+                    for (var i = 0; i < 200; i++) gzip.Write(zeros);
+                }
+                return output.ToArray();
+            }),
+            // A valid gzip stream whose tar ends in the middle of a header.
+            ("not a valid gzip-compressed tar archive", archive => Gzip(Gunzip(archive)[..700])),
+        };
+        foreach (var (message, replace) in hostile)
+        {
+            await using var host = Start(MakeRelease(packed: (platform, archive) => platform == "linux-amd64" ? replace(archive) : archive));
+            var alias = "update-hostile-" + Guid.NewGuid().ToString("N")[..8];
+            await AgentAsync(host, alias);
+            var error = await ExpectAsync(await host.Admin.PostAsync($"/operator/v1/nodes/{alias}/agent-update", null), HttpStatusCode.BadGateway,
+                "agent_release_invalid");
+            Assert.Contains(message, error["message"]!.GetValue<string>());
+            Assert.Contains("fleet-agent-linux-amd64.tar.gz", error["message"]!.GetValue<string>());
+            Assert.Empty(Directory.GetFiles(Path.Combine(host.Cache, "v" + Latest), "*.tar.gz"));
+            Assert.Null((await host.DetailAsync(alias))["agentUpdate"]);
+        }
+    }
+
+    [Fact]
+    public async Task A_request_checked_before_mirroring_does_not_replace_an_update_started_meanwhile()
+    {
+        await using var host = Start(MakeRelease());
+        var node = await AgentAsync(host, "update-race");
+        await ExpectAsync(await host.Admin.PostAsync("/operator/v1/nodes/update-race/agent-update", null), HttpStatusCode.Accepted);
+        var first = await host.UpdateIdAsync(node);
+        Assert.Equal(204, await host.ReportAsync(node, first, "downloading"));
+        Assert.Equal(204, await host.ReportAsync(node, first, "failed", "agent_update_download"));
+
+        // Request A passes its check while the update is failed, then waits for the mirror...
+        using var scope = host.Factory.Services.CreateScope();
+        var coordinator = scope.ServiceProvider.GetRequiredService<IFleetCoordinator>();
+        var latest = SemanticVersion.Parse(Latest);
+        await coordinator.RequestAgentUpdateAsync(node.NodeId, latest, "ana", checkOnly: true);
+        // ...while request B is recorded and the Agent starts it.
+        await ExpectAsync(await host.Admin.PostAsync("/operator/v1/nodes/update-race/agent-update", null), HttpStatusCode.Accepted);
+        var second = await host.UpdateIdAsync(node);
+        Assert.Equal(204, await host.ReportAsync(node, second, "downloading"));
+
+        var error = await Assert.ThrowsAsync<CoordinationException>(() => coordinator.RequestAgentUpdateAsync(node.NodeId, latest, "ana"));
+        Assert.Equal("agent_update_in_progress", error.Code);
+        Assert.Equal("downloading", (await host.DetailAsync("update-race"))["agentUpdate"]!["state"]!.GetValue<string>());
+        Assert.Equal(204, await host.ReportAsync(node, second, "restarting"));
     }
 
     [Fact]
@@ -577,23 +698,26 @@ public sealed class AgentUpdateTests(OperatorApiFixture fixture, AgentUpdateTest
         var outdated = await IssueAsync(host, $"agent_outdated:{node.NodeId.Value:D}");
         Assert.Contains("fleet nodes update update-failed", outdated!["commands"]!.AsArray().Select(x => x!.GetValue<string>()));
         await ExpectAsync(await host.Admin.PostAsync("/operator/v1/nodes/update-failed/agent-update", null), HttpStatusCode.Accepted);
+        var id = await host.UpdateIdAsync(node);
 
         foreach (var body in new object[]
                  {
-                     new { version = Latest, state = "failed", errorCode = (string?)null },
-                     new { version = Latest, state = "failed", errorCode = "Bad Code" },
-                     new { version = Latest, state = "downloading", errorCode = "agent_update_digest" },
-                     new { version = Latest, state = "requested", errorCode = (string?)null },
-                     new { version = "v0.12.0", state = "downloading", errorCode = (string?)null },
-                     new { version = Latest, state = "downloading" },
+                     new { updateId = id, version = Latest, state = "failed", errorCode = (string?)null },
+                     new { updateId = id, version = Latest, state = "failed", errorCode = "Bad Code" },
+                     new { updateId = id, version = Latest, state = "downloading", errorCode = "agent_update_digest" },
+                     new { updateId = id, version = Latest, state = "requested", errorCode = (string?)null },
+                     new { updateId = id, version = "v0.12.0", state = "downloading", errorCode = (string?)null },
+                     new { updateId = id, version = Latest, state = "downloading" },
+                     new { updateId = Guid.Empty, version = Latest, state = "downloading", errorCode = (string?)null },
+                     new { version = Latest, state = "downloading", errorCode = (string?)null },
                  })
         {
             var (status, _, text) = await host.NodeAsync("/agent/v1/agent-update/report", node.Certificate, body, "POST");
             Assert.True(status == 400, text);
         }
 
-        Assert.Equal(204, await host.ReportAsync(node, "downloading"));
-        Assert.Equal(204, await host.ReportAsync(node, "failed", "agent_update_smoke_test"));
+        Assert.Equal(204, await host.ReportAsync(node, id, "downloading"));
+        Assert.Equal(204, await host.ReportAsync(node, id, "failed", "agent_update_smoke_test"));
         var update = (await host.DetailAsync("update-failed"))["agentUpdate"]!;
         Assert.Equal(("failed", "agent_update_smoke_test"), (update["state"]!.GetValue<string>(), update["errorCode"]!.GetValue<string>()));
         Assert.Null(await IssueAsync(host, $"agent_outdated:{node.NodeId.Value:D}"));

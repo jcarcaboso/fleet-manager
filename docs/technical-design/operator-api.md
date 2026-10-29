@@ -731,13 +731,17 @@ design and the [client update guide](client-updates.md) the operation.
 - Every poll request carries `X-Fleet-Agent-Capabilities: disk-usage,agent-update`.
   The Server records on each poll whether `agent-update` was present
   (`agent.selfUpdate`), and only then may it add
-  `"agentUpdate": { "version": "0.12.0" }` to the poll response. The object
-  is sent while an update to the Server's own version is `requested`.
+  `"agentUpdate": { "version": "0.12.0", "updateId": "<uuid>" }` to the poll
+  response. The object is sent while an update to the Server's own version is
+  `requested`. Each request gets a new `updateId`.
   Agents without the capability never receive it, and a new Agent accepts the
   response with or without it. `agentUpdate` has no other members; a new one
   needs a new capability.
 - The Agent finishes the cycle, then reports `downloading`. Only a 204 starts
-  the download; a 409 means the request was cancelled meanwhile.
+  the download; a 409 means the request was cancelled meanwhile. When the
+  report gets no answer the Agent tries the same request again after its next
+  three polls, even if the poll no longer carries it. A failure it could not
+  report is kept in `update.json` and sent later.
 
 ### Agent routes (Node mTLS)
 
@@ -746,13 +750,15 @@ design and the [client update guide](client-updates.md) the operation.
 | `GET /agent/v1/agent-releases/{version}/manifest` | The signed manifest bytes (`application/json`), at most 64 KiB. |
 | `GET /agent/v1/agent-releases/{version}/signature` | The 64-byte Ed25519 signature (`application/octet-stream`). |
 | `GET /agent/v1/agent-releases/{version}/binaries/{os}-{arch}` | The executable for `linux-amd64`, `macos-arm64` or `macos-amd64`, streamed. |
-| `POST /agent/v1/agent-update/report` | `{ "version", "state", "errorCode" }`; 204 when recorded, 409 `agent_update_not_requested` without a matching update. |
+| `POST /agent/v1/agent-update/report` | `{ "updateId", "version", "state", "errorCode" }`; 204 when recorded, 409 `agent_update_not_requested` without a matching update. |
 
 - Only the Server's version is served; another version is 404
   `agent_release_not_found`, an unknown platform 404. A release the Server
   cannot mirror is 503 `agent_release_unavailable`, one that fails
   verification 502 `agent_release_invalid`.
-- The report has all three members. `state` is `downloading`, `restarting`,
+- The report has all four members. `updateId` is the one from the poll; a
+  report about an earlier request, even of the same version, is a 409.
+  `state` is `downloading`, `restarting`,
   `succeeded` or `failed`; `errorCode` is a lowercase code of at most 64
   characters for `failed` and `null` otherwise, else 400 `invalid_request`.
   Allowed moves: `requested` to `downloading`, `succeeded` (the Agent already

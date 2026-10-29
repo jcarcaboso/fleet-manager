@@ -302,7 +302,7 @@ async fn main() -> Result<()> {
                 updater::Session::inactive(&directory)
             } else {
                 match updater::Session::start(&directory)? {
-                    updater::Startup::Continue(session) => session,
+                    updater::Startup::Continue(session) => *session,
                     updater::Startup::Restart => restart(),
                 }
             };
@@ -352,10 +352,11 @@ async fn main() -> Result<()> {
                     }
                     if let Ok(client) = api(&config, &identity) {
                         update.deliver(&client).await;
-                        if let Some(version) = update.take_request()
-                            && self_updater.apply(&client, &version).await
-                        {
-                            restart();
+                        if let Some(request) = update.take_request() {
+                            let outcome = self_updater.apply(&client, &request).await;
+                            if update.applied(request, outcome) {
+                                restart();
+                            }
                         }
                     }
                 }

@@ -5,7 +5,8 @@ using Microsoft.EntityFrameworkCore;
 namespace Fleet.Server.Persistence;
 
 // Agent self-update requests. One row per Node in agent_updates; the Node row lock serializes requests and cancellations of a
-// Node, and the update row lock serializes the Agent's reports with them.
+// Node, and the update row lock serializes the Agent's reports with them. Each request gets a new UpdateId, which the poll
+// sends and every report must repeat.
 public sealed partial class PostgresFleetCoordinator
 {
     private const int MaximumOutdatedNodes = 500;
@@ -34,7 +35,11 @@ public sealed partial class PostgresFleetCoordinator
             .SingleOrDefaultAsync(cancellationToken);
         if (running is not null && SemanticVersion.TryParse(running, out var version) && version >= targetVersion)
             throw Error("agent_update_current", $"The Agent already runs version {running}.");
-        var existing = await db.AgentUpdates.SingleOrDefaultAsync(x => x.NodeId == id, cancellationToken);
+        // The check before mirroring tracks nothing: the write after it must read the row again, locked, as it is by then.
+        var existing = checkOnly
+            ? await db.AgentUpdates.AsNoTracking().SingleOrDefaultAsync(x => x.NodeId == id, cancellationToken)
+            : await db.AgentUpdates.FromSqlInterpolated($"SELECT * FROM agent_updates WHERE \"NodeId\" = {id} FOR UPDATE")
+                .SingleOrDefaultAsync(cancellationToken);
         var now = TruncateToMicroseconds(clock.GetUtcNow());
         if (existing is not null && AgentUpdateRules.IsActive(existing.State))
         {
@@ -48,6 +53,7 @@ public sealed partial class PostgresFleetCoordinator
             existing = new AgentUpdateRow { NodeId = id, TargetVersion = targetVersion.Text, State = AgentUpdateRules.Requested, RequestedBy = actor };
             db.AgentUpdates.Add(existing);
         }
+        existing.UpdateId = Guid.NewGuid();
         existing.FromVersion = running;
         existing.TargetVersion = targetVersion.Text;
         existing.State = AgentUpdateRules.Requested;
@@ -94,7 +100,8 @@ public sealed partial class PostgresFleetCoordinator
         await using var transaction = await db.Database.BeginTransactionAsync(IsolationLevel.ReadCommitted, cancellationToken);
         var row = await db.AgentUpdates.FromSqlInterpolated($"SELECT * FROM agent_updates WHERE \"NodeId\" = {id} FOR UPDATE")
             .SingleOrDefaultAsync(cancellationToken);
-        if (row is null || row.TargetVersion != valid.Version || !AgentUpdateRules.CanMove(row.State, valid.State)) return false;
+        if (row is null || row.UpdateId != valid.UpdateId || row.TargetVersion != valid.Version || !AgentUpdateRules.CanMove(row.State, valid.State))
+            return false;
         if (row.State == valid.State) return true;
         var now = TruncateToMicroseconds(clock.GetUtcNow());
         row.State = valid.State;
@@ -123,13 +130,13 @@ public sealed partial class PostgresFleetCoordinator
             .Select(x => new NodeAliasResult(new(x.Id), x.Name)).ToList();
     }
 
-    private async Task<string?> RequestedAgentUpdate(Guid nodeId, CancellationToken cancellationToken)
+    private async Task<AgentUpdateInstruction?> RequestedAgentUpdate(Guid nodeId, CancellationToken cancellationToken)
     {
         // Only the Server's own version is served, so a request for another version (made before a Server upgrade) waits for a new request.
         var version = options.LatestAgentVersion.Text;
         return await db.AgentUpdates.AsNoTracking()
             .Where(x => x.NodeId == nodeId && x.State == AgentUpdateRules.Requested && x.TargetVersion == version)
-            .Select(x => x.TargetVersion).SingleOrDefaultAsync(cancellationToken);
+            .Select(x => new AgentUpdateInstruction(x.TargetVersion, x.UpdateId)).SingleOrDefaultAsync(cancellationToken);
     }
 
     private static AgentUpdateStatus Status(AgentUpdateRow row) => new(row.FromVersion, row.TargetVersion, row.State, row.ErrorCode,

@@ -26,6 +26,7 @@ public sealed class AddAgentUpdates : Migration
             columns: table => new
             {
                 NodeId = table.Column<Guid>(type: "uuid", nullable: false),
+                UpdateId = table.Column<Guid>(type: "uuid", nullable: false),
                 FromVersion = table.Column<string>(type: "character varying(128)", maxLength: 128, nullable: true),
                 TargetVersion = table.Column<string>(type: "character varying(64)", maxLength: 64, nullable: false),
                 State = table.Column<string>(type: "character varying(16)", maxLength: 16, nullable: false),

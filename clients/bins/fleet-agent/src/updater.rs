@@ -30,6 +30,7 @@ use ring::signature::{ED25519, UnparsedPublicKey};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
+use uuid::Uuid;
 
 use crate::{
     managed,
@@ -52,6 +53,9 @@ const SMOKE_TEST_TIMEOUT: Duration = Duration::from_secs(10);
 const MAX_TRIAL_STARTS: u32 = 3;
 /// A new version without a successful poll for this long is rolled back.
 const TRIAL_CONTACT_LIMIT: Duration = Duration::from_secs(600);
+/// How often a request whose start could not be reported is tried again
+/// without the poll asking for it.
+const MAX_START_RETRIES: u32 = 3;
 // DER SubjectPublicKeyInfo prefix of an Ed25519 key.
 const SPKI_PREFIX: [u8; 12] = [
     0x30, 0x2a, 0x30, 0x05, 0x06, 0x03, 0x2b, 0x65, 0x70, 0x03, 0x21, 0x00,
@@ -111,6 +115,9 @@ pub enum RecordState {
 pub struct Record {
     pub from: String,
     pub to: String,
+    /// The request this update answers, repeated in its reports.
+    #[serde(default)]
+    pub update_id: Uuid,
     pub state: RecordState,
     #[serde(default)]
     pub starts: u32,
@@ -122,6 +129,31 @@ pub struct Record {
     /// Whether the Server has received the final result.
     #[serde(default)]
     pub reported: bool,
+}
+
+impl Record {
+    fn update(&self) -> AgentUpdate {
+        AgentUpdate {
+            version: self.to.clone(),
+            update_id: self.update_id,
+        }
+    }
+}
+
+/// What is left after [`Updater::apply`].
+#[derive(Debug, PartialEq, Eq)]
+pub enum Outcome {
+    /// `current` names the new version: exit with [`RESTART_EXIT_CODE`].
+    Restart,
+    /// Nothing more to do for this request.
+    Done,
+    /// The Server may have recorded the start without the Agent hearing it,
+    /// and then no longer asks for the update: apply it again after the
+    /// next poll.
+    Retry,
+    /// The update failed and the Server was not told: deliver this result
+    /// later. It is in `update.json` already.
+    Unreported(Record),
 }
 
 #[derive(Debug, Deserialize)]
@@ -316,6 +348,20 @@ fn write_record(state_dir: &Path, record: &Record) -> Result<()> {
     state::write_json(&state_dir.join(STATE_FILE), record)
 }
 
+/// The version `update rollback` switches to: during the trial of a new
+/// version the one it replaced, which then reports the rollback; otherwise
+/// [`managed::previous_version`].
+pub fn rollback_target(state_dir: &Path) -> Result<Option<String>> {
+    if let Ok(Some(record)) = read_record(state_dir)
+        && record.state == RecordState::Trial
+        && managed::active_version(state_dir)?.as_deref() == Some(record.to.as_str())
+        && managed::installed_versions(state_dir)?.contains(&record.from)
+    {
+        return Ok(Some(record.from));
+    }
+    managed::previous_version(state_dir)
+}
+
 /// `update status`: the installed versions and the last update. Read-only.
 pub fn status(state_dir: &Path) -> Result<Value> {
     let mut status = managed::status(state_dir)?;
@@ -350,60 +396,81 @@ impl Updater {
         }
     }
 
-    /// Applies a requested update and reports its progress. Returns true when
-    /// `current` now names the new version and the process must exit with
-    /// [`RESTART_EXIT_CODE`]. Failures are reported and logged, never
-    /// returned: the running version keeps working.
-    pub async fn apply(&self, api: &Api, target: &str) -> bool {
+    /// Applies a requested update and reports its progress. Failures are
+    /// reported and logged, never returned: the running version keeps
+    /// working. See [`Outcome`] for what is left to do.
+    pub async fn apply(&self, api: &Api, update: &AgentUpdate) -> Outcome {
+        let target = update.version.as_str();
         if target == self.version {
             // The Server's view was older than this Agent: nothing to do.
-            if let Err(error) = api
-                .agent_update_report(target, AgentUpdateState::Succeeded, None)
+            return match api
+                .agent_update_report(update, AgentUpdateState::Succeeded, None)
                 .await
             {
-                eprintln!("could not report that the Agent already runs {target}: {error}");
-            }
-            return false;
+                Ok(_) => Outcome::Done,
+                Err(error) => {
+                    eprintln!("could not report that the Agent already runs {target}: {error}");
+                    Outcome::Retry
+                }
+            };
         }
         match api
-            .agent_update_report(target, AgentUpdateState::Downloading, None)
+            .agent_update_report(update, AgentUpdateState::Downloading, None)
             .await
         {
             Ok(true) => {}
             Ok(false) => {
                 eprintln!("the update to {target} is no longer requested; not starting it");
-                return false;
+                return Outcome::Done;
             }
             Err(error) => {
                 eprintln!("could not start the update to {target}; will retry: {error}");
-                return false;
+                return Outcome::Retry;
             }
         }
         eprintln!("updating the Agent from {} to {target}", self.version);
-        match self.stage_and_switch(api, target).await {
+        match self.stage_and_switch(api, update).await {
             Ok(()) => {
+                // A lost report is harmless: the new version reports the result.
                 if let Err(error) = api
-                    .agent_update_report(target, AgentUpdateState::Restarting, None)
+                    .agent_update_report(update, AgentUpdateState::Restarting, None)
                     .await
                 {
                     eprintln!("could not report the restart into {target}: {error}");
                 }
-                true
+                Outcome::Restart
             }
             Err(failure) => {
                 eprintln!("the update to {target} failed: {}", failure.code());
-                if let Err(error) = api
-                    .agent_update_report(target, AgentUpdateState::Failed, Some(failure.code()))
+                match api
+                    .agent_update_report(update, AgentUpdateState::Failed, Some(failure.code()))
                     .await
                 {
-                    eprintln!("could not report the failed update: {error}");
+                    Ok(_) => Outcome::Done,
+                    Err(error) => {
+                        eprintln!("could not report the failed update; will retry: {error}");
+                        let record = Record {
+                            from: self.version.clone(),
+                            to: target.to_owned(),
+                            update_id: update.update_id,
+                            state: RecordState::Failed,
+                            starts: 0,
+                            since: now(),
+                            error_code: Some(failure.code().to_owned()),
+                            reported: false,
+                        };
+                        if let Err(error) = write_record(&self.state_dir, &record) {
+                            eprintln!("could not record the failed update: {error}");
+                        }
+                        Outcome::Unreported(record)
+                    }
                 }
-                false
             }
         }
     }
 
-    async fn stage_and_switch(&self, api: &Api, target: &str) -> Result<(), Failure> {
+    async fn stage_and_switch(&self, api: &Api, update: &AgentUpdate) -> Result<(), Failure> {
+        let target = update.version.as_str();
         let executable = self.executable.as_deref().ok_or(Failure::Unmanaged)?;
         if !managed::is_managed(executable, &self.state_dir) {
             return Err(Failure::Unmanaged);
@@ -453,6 +520,7 @@ impl Updater {
         let record = Record {
             from: self.version.clone(),
             to: target.to_owned(),
+            update_id: update.update_id,
             state: RecordState::Trial,
             starts: 0,
             since: now(),
@@ -567,7 +635,7 @@ fn smoke_test(binary: &Path, version: &str, timeout: Duration) -> Result<(), Fai
 
 /// What [`Session::start`] decided.
 pub enum Startup {
-    Continue(Session),
+    Continue(Box<Session>),
     /// `current` was switched back to the previous version; exit with
     /// [`RESTART_EXIT_CODE`].
     Restart,
@@ -579,7 +647,10 @@ pub struct Session {
     state_dir: PathBuf,
     version: String,
     record: Option<Record>,
-    requested: Option<String>,
+    requested: Option<AgentUpdate>,
+    /// A request whose start could not be reported, and how often it was
+    /// tried again.
+    retry: Option<(AgentUpdate, u32)>,
 }
 
 impl Session {
@@ -590,6 +661,7 @@ impl Session {
             version: managed::VERSION.to_owned(),
             record: None,
             requested: None,
+            retry: None,
         }
     }
 
@@ -605,13 +677,14 @@ impl Session {
             version: version.to_owned(),
             record: None,
             requested: None,
+            retry: None,
         };
         let mut record = match read_record(state_dir) {
             Ok(Some(record)) => record,
-            Ok(None) => return Ok(Startup::Continue(session)),
+            Ok(None) => return Ok(Startup::Continue(Box::new(session))),
             Err(error) => {
                 eprintln!("ignoring the update record: {error}");
-                return Ok(Startup::Continue(session));
+                return Ok(Startup::Continue(Box::new(session)));
             }
         };
         if record.state == RecordState::Trial && record.to == version {
@@ -631,13 +704,13 @@ impl Session {
             write_record(state_dir, &record)?;
         }
         session.record = Some(record);
-        Ok(Startup::Continue(session))
+        Ok(Startup::Continue(Box::new(session)))
     }
 
     /// After every successful poll: commits a version in trial, and keeps the
     /// update the poll requested.
     pub fn poll_succeeded(&mut self, requested: Option<&AgentUpdate>) {
-        self.requested = requested.map(|update| update.version.clone());
+        self.requested = requested.cloned();
         let Some(record) = self.record.as_mut() else {
             return;
         };
@@ -692,24 +765,67 @@ impl Session {
             RecordState::Succeeded => AgentUpdateState::Succeeded,
             _ => AgentUpdateState::Failed,
         };
-        match api
-            .agent_update_report(&record.to, state, record.error_code.as_deref())
+        let delivered = match api
+            .agent_update_report(&record.update(), state, record.error_code.as_deref())
             .await
         {
             // A 409 means the Server has nothing to follow; there is no point in repeating it.
-            Ok(_) => {
-                record.reported = true;
-                if let Err(error) = write_record(&self.state_dir, record) {
-                    eprintln!("could not record the reported update: {error}");
-                }
+            Ok(_) => true,
+            // Neither is there in repeating a report the Server refuses.
+            Err(ProtocolError::Http(status)) if status.is_client_error() => {
+                eprintln!("the Server refused the update result ({status}); not repeating it");
+                true
             }
-            Err(error) => eprintln!("could not report the update result; will retry: {error}"),
+            Err(error) => {
+                eprintln!("could not report the update result; will retry: {error}");
+                false
+            }
+        };
+        if delivered {
+            record.reported = true;
+            if let Err(error) = write_record(&self.state_dir, record) {
+                eprintln!("could not record the reported update: {error}");
+            }
         }
     }
 
-    /// The update the last successful poll requested, once.
-    pub fn take_request(&mut self) -> Option<String> {
-        self.requested.take()
+    /// The update to apply now, once: the one the last successful poll
+    /// requested, or else one whose start could not be reported.
+    pub fn take_request(&mut self) -> Option<AgentUpdate> {
+        let retry = self.retry.take();
+        if let Some(requested) = self.requested.take() {
+            // A newer request replaces the one being retried; the same one keeps its count.
+            if let Some((update, tries)) = retry
+                && update == requested
+            {
+                self.retry = Some((update, tries));
+            }
+            return Some(requested);
+        }
+        retry.map(|(update, tries)| {
+            self.retry = Some((update.clone(), tries));
+            update
+        })
+    }
+
+    /// Takes in what [`Updater::apply`] left for `update`. Returns true when
+    /// the process must exit with [`RESTART_EXIT_CODE`].
+    pub fn applied(&mut self, update: AgentUpdate, outcome: Outcome) -> bool {
+        let tries = match self.retry.take() {
+            Some((retried, tries)) if retried == update => tries,
+            _ => 0,
+        };
+        match outcome {
+            Outcome::Restart => return true,
+            Outcome::Done => {}
+            Outcome::Retry if tries < MAX_START_RETRIES => self.retry = Some((update, tries + 1)),
+            Outcome::Retry => eprintln!(
+                "giving up the update to {} after {MAX_START_RETRIES} retries",
+                update.version
+            ),
+            Outcome::Unreported(record) => self.record = Some(record),
+        }
+        false
     }
 }
 
@@ -741,6 +857,14 @@ mod tests {
     const OWN: &str = "0.11.0";
     const NEW: &str = "0.12.0";
     const PLATFORM: &str = "linux-amd64";
+    const UPDATE_ID: Uuid = Uuid::from_u128(0x7d3c_2a91_5b8e_4f60_9a1d_2e4b_6c8f_0a13);
+
+    fn request(version: &str) -> AgentUpdate {
+        AgentUpdate {
+            version: version.to_owned(),
+            update_id: UPDATE_ID,
+        }
+    }
 
     fn scratch(name: &str) -> PathBuf {
         let path = std::env::temp_dir().join(format!(
@@ -860,6 +984,7 @@ mod tests {
             .map(|request| {
                 let body: Value = serde_json::from_str(&request.body).unwrap();
                 assert!(body["version"].as_str().is_some());
+                assert_eq!(body["updateId"], UPDATE_ID.to_string());
                 assert!(body.as_object().unwrap().contains_key("errorCode"));
                 (
                     body["state"].as_str().unwrap().to_owned(),
@@ -894,7 +1019,7 @@ mod tests {
         let server = fake_server(NEW, &release, 204);
         let api = Api::for_loopback_test(&server.url());
 
-        assert!(updater.apply(&api, NEW).await);
+        assert_eq!(updater.apply(&api, &request(NEW)).await, Outcome::Restart);
         assert_eq!(
             managed::active_version(&state).unwrap().as_deref(),
             Some(NEW)
@@ -939,10 +1064,11 @@ mod tests {
         let position = release.manifest.len() - 3;
         release.manifest[position] ^= 1;
         let server = fake_server(NEW, &release, 204);
-        assert!(
-            !updater
-                .apply(&Api::for_loopback_test(&server.url()), NEW)
-                .await
+        assert_eq!(
+            updater
+                .apply(&Api::for_loopback_test(&server.url()), &request(NEW))
+                .await,
+            Outcome::Done
         );
         assert_eq!(reports(&server), failed("agent_update_untrusted"));
         assert!(
@@ -959,10 +1085,11 @@ mod tests {
     async fn a_release_signed_with_an_unknown_key_is_refused() {
         let (state, updater) = installed("wrong-key", vec![public(&key())]);
         let server = fake_server(NEW, &signed_release(NEW, &key()), 204);
-        assert!(
-            !updater
-                .apply(&Api::for_loopback_test(&server.url()), NEW)
-                .await
+        assert_eq!(
+            updater
+                .apply(&Api::for_loopback_test(&server.url()), &request(NEW))
+                .await,
+            Outcome::Done
         );
         assert_eq!(reports(&server), failed("agent_update_untrusted"));
         assert_untouched(&state);
@@ -972,10 +1099,11 @@ mod tests {
         unkeyed.keys = Vec::new();
         let signer = key();
         let server = fake_server(NEW, &signed_release(NEW, &signer), 204);
-        assert!(
-            !unkeyed
-                .apply(&Api::for_loopback_test(&server.url()), NEW)
-                .await
+        assert_eq!(
+            unkeyed
+                .apply(&Api::for_loopback_test(&server.url()), &request(NEW))
+                .await,
+            Outcome::Done
         );
         assert_eq!(reports(&server), failed("agent_update_untrusted"));
         fs::remove_dir_all(state).unwrap();
@@ -989,29 +1117,32 @@ mod tests {
         // A genuine older release, replayed as an update.
         for older in ["0.10.0", "0.11.0-rc.1"] {
             let server = fake_server(older, &signed_release(older, &signer), 204);
-            assert!(
-                !updater
-                    .apply(&Api::for_loopback_test(&server.url()), older)
-                    .await
+            assert_eq!(
+                updater
+                    .apply(&Api::for_loopback_test(&server.url()), &request(older))
+                    .await,
+                Outcome::Done
             );
             assert_eq!(reports(&server), failed("agent_update_downgrade"));
         }
         // A genuine older release served under a newer name.
         let server = fake_server(NEW, &signed_release("0.10.0", &signer), 204);
-        assert!(
-            !updater
-                .apply(&Api::for_loopback_test(&server.url()), NEW)
-                .await
+        assert_eq!(
+            updater
+                .apply(&Api::for_loopback_test(&server.url()), &request(NEW))
+                .await,
+            Outcome::Done
         );
         assert_eq!(reports(&server), failed("agent_update_invalid_manifest"));
         assert_untouched(&state);
 
         // The version this Agent already runs is reported as done and nothing is downloaded.
         let server = fake_server(OWN, &signed_release(OWN, &signer), 204);
-        assert!(
-            !updater
-                .apply(&Api::for_loopback_test(&server.url()), OWN)
-                .await
+        assert_eq!(
+            updater
+                .apply(&Api::for_loopback_test(&server.url()), &request(OWN))
+                .await,
+            Outcome::Done
         );
         assert_eq!(server.requests().len(), 1);
         assert_eq!(reports(&server), [("succeeded".to_owned(), None)]);
@@ -1025,10 +1156,11 @@ mod tests {
         let mut release = signed_release(NEW, &signer);
         release.binary = agent_script("9.9.9");
         let server = fake_server(NEW, &release, 204);
-        assert!(
-            !updater
-                .apply(&Api::for_loopback_test(&server.url()), NEW)
-                .await
+        assert_eq!(
+            updater
+                .apply(&Api::for_loopback_test(&server.url()), &request(NEW))
+                .await,
+            Outcome::Done
         );
         assert_eq!(reports(&server), failed("agent_update_digest"));
         assert_untouched(&state);
@@ -1037,10 +1169,11 @@ mod tests {
         let mut short = signed_release(NEW, &signer);
         short.binary.pop();
         let server = fake_server(NEW, &short, 204);
-        assert!(
-            !updater
-                .apply(&Api::for_loopback_test(&server.url()), NEW)
-                .await
+        assert_eq!(
+            updater
+                .apply(&Api::for_loopback_test(&server.url()), &request(NEW))
+                .await,
+            Outcome::Done
         );
         assert_eq!(reports(&server), failed("agent_update_digest"));
         assert_untouched(&state);
@@ -1060,10 +1193,11 @@ mod tests {
             binary,
         };
         let server = fake_server(NEW, &huge, 204);
-        assert!(
-            !updater
-                .apply(&Api::for_loopback_test(&server.url()), NEW)
-                .await
+        assert_eq!(
+            updater
+                .apply(&Api::for_loopback_test(&server.url()), &request(NEW))
+                .await,
+            Outcome::Done
         );
         assert_eq!(reports(&server), failed("agent_update_too_large"));
         assert!(
@@ -1078,10 +1212,11 @@ mod tests {
         let mut long = signed_release(NEW, &signer);
         long.binary.extend_from_slice(&[b'#'; 4096]);
         let server = fake_server(NEW, &long, 204);
-        assert!(
-            !updater
-                .apply(&Api::for_loopback_test(&server.url()), NEW)
-                .await
+        assert_eq!(
+            updater
+                .apply(&Api::for_loopback_test(&server.url()), &request(NEW))
+                .await,
+            Outcome::Done
         );
         assert_eq!(reports(&server), failed("agent_update_too_large"));
         assert_untouched(&state);
@@ -1104,10 +1239,11 @@ mod tests {
                 binary: script,
             };
             let server = fake_server(NEW, &release, 204);
-            assert!(
-                !updater
-                    .apply(&Api::for_loopback_test(&server.url()), NEW)
-                    .await
+            assert_eq!(
+                updater
+                    .apply(&Api::for_loopback_test(&server.url()), &request(NEW))
+                    .await,
+                Outcome::Done
             );
             assert_eq!(reports(&server), failed("agent_update_smoke_test"));
             assert_untouched(&state);
@@ -1140,10 +1276,11 @@ mod tests {
 
         updater.executable = Some(PathBuf::from("/opt/homebrew/bin/fleet-agent"));
         let server = fake_server(NEW, &release, 204);
-        assert!(
-            !updater
-                .apply(&Api::for_loopback_test(&server.url()), NEW)
-                .await
+        assert_eq!(
+            updater
+                .apply(&Api::for_loopback_test(&server.url()), &request(NEW))
+                .await,
+            Outcome::Done
         );
         assert_eq!(reports(&server), failed("agent_update_unmanaged"));
         assert_eq!(server.requests().len(), 2);
@@ -1152,10 +1289,11 @@ mod tests {
         updater.executable = Some(managed::current_executable(&state).canonicalize().unwrap());
         updater.platform = Some("macos-amd64".to_owned());
         let server = fake_server(NEW, &release, 204);
-        assert!(
-            !updater
-                .apply(&Api::for_loopback_test(&server.url()), NEW)
-                .await
+        assert_eq!(
+            updater
+                .apply(&Api::for_loopback_test(&server.url()), &request(NEW))
+                .await,
+            Outcome::Done
         );
         assert_eq!(reports(&server), failed("agent_update_platform"));
         assert_untouched(&state);
@@ -1163,10 +1301,11 @@ mod tests {
         // Cancelled between the poll and the pickup: the Server answers 409 and nothing is downloaded.
         updater.platform = Some(PLATFORM.to_owned());
         let server = fake_server(NEW, &release, 409);
-        assert!(
-            !updater
-                .apply(&Api::for_loopback_test(&server.url()), NEW)
-                .await
+        assert_eq!(
+            updater
+                .apply(&Api::for_loopback_test(&server.url()), &request(NEW))
+                .await,
+            Outcome::Done
         );
         assert_eq!(server.requests().len(), 1);
         assert_untouched(&state);
@@ -1185,6 +1324,7 @@ mod tests {
             &Record {
                 from: OWN.to_owned(),
                 to: NEW.to_owned(),
+                update_id: UPDATE_ID,
                 state: RecordState::Trial,
                 starts: 0,
                 since,
@@ -1197,7 +1337,7 @@ mod tests {
 
     fn continued(startup: Startup) -> Session {
         match startup {
-            Startup::Continue(session) => session,
+            Startup::Continue(session) => *session,
             Startup::Restart => panic!("expected the Agent to continue"),
         }
     }
@@ -1247,6 +1387,7 @@ mod tests {
         assert!(read_record(&state).unwrap().unwrap().reported);
         let body: Value = serde_json::from_str(&server.requests()[0].body).unwrap();
         assert_eq!(body["version"], NEW);
+        assert_eq!(body["updateId"], UPDATE_ID.to_string());
         fs::remove_dir_all(state).unwrap();
     }
 
@@ -1292,10 +1433,8 @@ mod tests {
             ["0.10.0", OWN, NEW]
         );
         let mut session = continued(Session::start_with(&state, NEW, switched + 15).unwrap());
-        session.poll_succeeded(Some(&AgentUpdate {
-            version: "0.13.0".to_owned(),
-        }));
-        assert_eq!(session.take_request().as_deref(), Some("0.13.0"));
+        session.poll_succeeded(Some(&request("0.13.0")));
+        assert_eq!(session.take_request(), Some(request("0.13.0")));
         assert_eq!(session.take_request(), None);
         // Only the new version and the one to roll back to remain.
         assert_eq!(managed::installed_versions(&state).unwrap(), [OWN, NEW]);
@@ -1332,10 +1471,119 @@ mod tests {
         fs::remove_dir_all(state).unwrap();
     }
 
+    #[tokio::test]
+    async fn a_lost_start_report_is_retried_without_the_poll_and_a_lost_failure_report_is_kept() {
+        let signer = key();
+        let (state, mut updater) = installed("lost-reports", vec![public(&signer)]);
+        let release = signed_release(NEW, &signer);
+        let mut session = Session::inactive(&state);
+
+        // The Server recorded the start, but its answer was lost; the next poll no longer asks.
+        let failing = fake_server(NEW, &release, 500);
+        let api = Api::for_loopback_test(&failing.url());
+        session.poll_succeeded(Some(&request(NEW)));
+        for _ in 0..=MAX_START_RETRIES {
+            let update = session.take_request().expect("retried without a poll");
+            assert_eq!(updater.apply(&api, &update).await, Outcome::Retry);
+            assert!(!session.applied(update, Outcome::Retry));
+            session.poll_succeeded(None);
+        }
+        assert_eq!(session.take_request(), None, "given up after the retries");
+        assert_untouched(&state);
+
+        // A retry that gets through goes on as usual.
+        session.poll_succeeded(Some(&request(NEW)));
+        let update = session.take_request().unwrap();
+        assert!(!session.applied(update, Outcome::Retry));
+        session.poll_succeeded(None);
+        let server = fake_server(NEW, &release, 204);
+        let update = session.take_request().unwrap();
+        let outcome = updater
+            .apply(&Api::for_loopback_test(&server.url()), &update)
+            .await;
+        assert_eq!(outcome, Outcome::Restart);
+        assert!(session.applied(update, outcome));
+        assert_eq!(session.take_request(), None);
+        managed::activate(&state, OWN).unwrap();
+        fs::remove_file(state.join(STATE_FILE)).unwrap();
+
+        // The update fails and its failure report is lost: the result is kept in update.json and delivered later.
+        updater.executable = Some(PathBuf::from("/opt/homebrew/bin/fleet-agent"));
+        let flaky = MockServer::start(vec![(204, ""), (500, "")]);
+        let outcome = updater
+            .apply(&Api::for_loopback_test(&flaky.url()), &request(NEW))
+            .await;
+        let Outcome::Unreported(record) = &outcome else {
+            panic!("expected an unreported failure, got {outcome:?}");
+        };
+        assert_eq!(
+            (record.state, record.error_code.as_deref(), record.update_id),
+            (
+                RecordState::Failed,
+                Some("agent_update_unmanaged"),
+                UPDATE_ID
+            )
+        );
+        assert_eq!(read_record(&state).unwrap().as_ref(), Some(record));
+        let mut session = Session::inactive(&state);
+        assert!(!session.applied(request(NEW), outcome));
+        let server = fake_server(NEW, &release, 204);
+        session
+            .deliver(&Api::for_loopback_test(&server.url()))
+            .await;
+        assert_eq!(
+            reports(&server),
+            [(
+                "failed".to_owned(),
+                Some("agent_update_unmanaged".to_owned())
+            )]
+        );
+        assert!(read_record(&state).unwrap().unwrap().reported);
+        fs::remove_dir_all(state).unwrap();
+    }
+
+    #[test]
+    fn rollback_returns_to_the_version_a_trial_replaced_by_semver_not_by_name() {
+        let state = scratch("rollback-target");
+        for version in ["0.11.9", "0.11.10", "0.11.11"] {
+            let source = state.join("source");
+            fs::write(&source, agent_script(version)).unwrap();
+            managed::install(&state, &source, version).unwrap();
+        }
+        // Outside a trial: the newest version older than the active one.
+        managed::activate(&state, "0.11.10").unwrap();
+        assert_eq!(rollback_target(&state).unwrap().as_deref(), Some("0.11.9"));
+        managed::activate(&state, "0.11.9").unwrap();
+        assert_eq!(rollback_target(&state).unwrap().as_deref(), Some("0.11.11"));
+        // In the trial of 0.11.11 from 0.11.10: back to 0.11.10, whatever else is installed.
+        managed::activate(&state, "0.11.11").unwrap();
+        let record = Record {
+            from: "0.11.10".to_owned(),
+            to: "0.11.11".to_owned(),
+            update_id: UPDATE_ID,
+            state: RecordState::Trial,
+            starts: 1,
+            since: now(),
+            error_code: None,
+            reported: false,
+        };
+        write_record(&state, &record).unwrap();
+        assert_eq!(rollback_target(&state).unwrap().as_deref(), Some("0.11.10"));
+        // ...which then reports the rollback.
+        managed::activate(&state, "0.11.10").unwrap();
+        continued(Session::start_with(&state, "0.11.10", now()).unwrap());
+        assert_eq!(
+            read_record(&state).unwrap().unwrap().error_code.as_deref(),
+            Some("agent_update_rolled_back")
+        );
+        fs::remove_dir_all(state).unwrap();
+    }
+
     #[test]
     fn a_manual_rollback_during_the_trial_is_recorded_as_a_failure() {
         let state = scratch("manual-rollback");
         trial(&state, now());
+        assert_eq!(rollback_target(&state).unwrap().as_deref(), Some(OWN));
         managed::activate(&state, OWN).unwrap();
         continued(Session::start_with(&state, OWN, now()).unwrap());
         let record = read_record(&state).unwrap().unwrap();

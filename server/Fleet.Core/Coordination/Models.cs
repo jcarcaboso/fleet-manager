@@ -151,10 +151,10 @@ public sealed record AgentAssignment(
 
 /// <summary>
 /// What a poll found. <paramref name="DiskUsageRequested"/> is true while an Operator's disk refresh request is pending;
-/// the route only tells Agents that sent the <c>disk-usage</c> capability. <paramref name="AgentUpdateVersion"/> is the version of a
-/// requested Agent update; it is looked up only for Agents that sent the <c>agent-update</c> capability.
+/// the route only tells Agents that sent the <c>disk-usage</c> capability. <paramref name="AgentUpdate"/> is a requested
+/// Agent update; it is looked up only for Agents that sent the <c>agent-update</c> capability.
 /// </summary>
-public sealed record PollResult(AgentAssignment? Assignment, bool DiskUsageRequested = false, string? AgentUpdateVersion = null);
+public sealed record PollResult(AgentAssignment? Assignment, bool DiskUsageRequested = false, AgentUpdateInstruction? AgentUpdate = null);
 
 public sealed record AttemptReport(
     AttemptId AttemptId,

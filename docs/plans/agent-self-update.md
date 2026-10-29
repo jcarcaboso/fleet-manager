@@ -177,10 +177,10 @@ Agent routes (Node mTLS, same authorization as Bundles):
 
 | Route | Behavior |
 |---|---|
-| `POST poll` | With capability `agent-update` and a pending request, the response includes `"agentUpdate": { "version": "0.12.0" }`. |
+| `POST poll` | With capability `agent-update` and a pending request, the response includes `"agentUpdate": { "version": "0.12.0", "updateId": "<uuid>" }`. |
 | `GET agent-releases/{version}/manifest`, `…/signature` | The cached signed manifest. Only the Server version is served. |
 | `GET agent-releases/{version}/binaries/{os}-{arch}` | The cached binary, streamed. |
-| `POST agent-update/report` | `{ "version", "state", "errorCode" }` from the Agent; ignored without a matching request. |
+| `POST agent-update/report` | `{ "updateId", "version", "state", "errorCode" }` from the Agent; ignored without a matching request. |
 
 ## Agent updater
 
