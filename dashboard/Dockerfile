@@ -26,7 +26,7 @@ LABEL org.opencontainers.image.title="Fleet Manager Dashboard" \
       org.opencontainers.image.licenses="MIT" \
       org.opencontainers.image.source="https://github.com/jcarcaboso/fleet-manager" \
       org.opencontainers.image.url="https://github.com/jcarcaboso/fleet-manager" \
-      org.opencontainers.image.version="0.12.0"
+      org.opencontainers.image.version="0.12.1"
 # Not the Server's uid (1654): the dashboard owns only the 0600 files in its own dashboard-tls volume.
 USER 1655:1655
 EXPOSE 8443
