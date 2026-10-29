@@ -84,7 +84,7 @@ path at each start.
 | Command | Behavior |
 |---|---|
 | `update status` | Active and previous versions, and the last update result. Read-only. |
-| `update rollback` | Points `current` at the previous version and restarts the service. |
+| `update rollback` | Points `current` at the previous version (the one a trial replaced) and restarts the service. |
 
 Migration from `brew services`: `service install` detects the Homebrew
 definition, runs `brew services stop fleet-agent`, says so, and installs the
@@ -312,9 +312,21 @@ the wire contract.
   `_rolled_back` (switched back by hand with `update rollback` during the trial).
   The error catalog explains each, and a Server test checks that the catalog
   covers every code in `updater.rs`.
-- **`update.json`** also holds `since` (when `current` was switched, for the
-  ten-minute limit), `errorCode` and `reported` (the result was delivered).
-  `update status` shows it as `lastUpdate`.
+- **`update.json`** also holds `updateId`, `since` (when `current` was
+  switched, for the ten-minute limit), `errorCode` and `reported` (the result
+  was delivered). `update status` shows it as `lastUpdate`.
+- **Update IDs.** Each request gets a new `updateId`, sent in the poll and
+  required in every report, so a late result about an earlier request of the
+  same version cannot end a new one. The check before mirroring reads without
+  tracking, and the write after it locks the update row again.
+- **Lost reports.** When the start report gets no answer, the Agent tries the
+  same request again after up to three polls, even if the poll no longer
+  carries it (the Server may have recorded the start). A failure it could not
+  report is written to `update.json` and delivered later. A result the Server
+  refuses with a 4xx is not repeated.
+- **Rollback target.** `update rollback` switches to the version a trial
+  replaced; outside a trial to the newest version older than the active one,
+  compared by semver.
 - **Keys.** A build script embeds every `release-keys/*.pem` (none, one or two)
   in the Agent; the Server embeds the same files as resources, and
   `Fleet:AgentReleases:PublicKeys` overrides them for tests. .NET has no Ed25519
@@ -322,7 +334,10 @@ the wire contract.
   the RFC vector and OpenSSL signatures.
 - **Mirror.** The Server keeps only the verified binaries of archives it
   downloaded, and keeps archives an Operator placed. A failed mirror run is
-  remembered for a minute. `DownloadTimeoutSeconds` (300) bounds one run.
+  remembered for a minute, and its downloads are deleted. `DownloadTimeoutSeconds`
+  (300) bounds one run. Archives are read by a small bounded tar reader instead
+  of `TarReader`, which allocates what a PAX or GNU long-name header claims
+  before reading it: at most 64 KiB per metadata header and 128 MiB unpacked.
 - **Dashboard.** The machine page has no Agent tab, so **Update Agent** and the
   update state are in the Machine panel on Overview. **Update outdated Agents**
   on the machines list asks for confirmation, lets the Operator untick machines

@@ -197,7 +197,7 @@ The same commands manage the service on Linux and macOS:
 | `fleet-agent service logs [--follow]` | The last 200 log lines (`journalctl` on Linux, the log file on macOS) |
 | `fleet-agent service uninstall [--purge-binaries]` | Stop and remove the definition; with `--purge-binaries` also the installed versions |
 | `fleet-agent update status` | This executable's version, the installed versions and the last update (read-only) |
-| `fleet-agent update rollback` | Switch the service to the other installed version and restart it |
+| `fleet-agent update rollback` | Switch the service back to the previous version (during an update, the one it replaced) and restart it |
 
 Uninstall never removes the identity, credentials or other Agent state.
 
