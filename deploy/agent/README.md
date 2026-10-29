@@ -1,31 +1,61 @@
 # Run the Fleet Node Agent
 
-`fleet-agent` installs the Skills assigned to this machine. It works with Server
-`0.2.0`. The `fleet` command is the separate Operator tool used to authorize
-Node enrollment and manage the Server.
+`fleet-agent` installs the Skills assigned to this machine. The `fleet` command
+is the separate Operator tool used to authorize Node enrollment and manage the
+Server. Server and Agent releases share version numbers; install the Agent of
+the release your Server runs.
 
-## Linux amd64 installation
+Setting up a Node takes three steps: install a first `fleet-agent`, enroll it,
+and run `fleet-agent service install`. From then on the Agent runs from its own
+copy in the state directory, and from 0.12.1 an Operator updates it from the
+dashboard or the `fleet` CLI (see [Updates from the Server](#updates-from-the-server)).
 
-Download `fleet-agent-linux-amd64.tar.gz` and its adjacent `.sha256` file.
-Run these commands as the user whose home will contain the Skills:
+## Install
+
+Install and run the Agent as the user whose home will contain the Skills. Each
+method below only supplies the first executable; `service install` copies it
+into the state directory, so later updates do not depend on how it was
+installed.
+
+| Method | Platforms | Command |
+| --- | --- | --- |
+| Homebrew | Linux amd64, macOS 13 or newer (Apple silicon, Intel) | `brew install jcarcaboso/fleet/fleet-agent` after `brew tap jcarcaboso/fleet https://github.com/jcarcaboso/fleet-manager` |
+| Release archive | `fleet-agent-linux-amd64`, `fleet-agent-macos-arm64`, `fleet-agent-macos-amd64` | below |
+| Cargo | any platform with Rust 1.95.0 | `cargo install --locked --git https://github.com/jcarcaboso/fleet-manager --tag v0.12.1 fleet-agent` |
+
+For a release archive, download it and its adjacent `.sha256` file from the
+[GitHub release](https://github.com/jcarcaboso/fleet-manager/releases/latest),
+then verify and install it:
 
 ```sh
+curl -fLO https://github.com/jcarcaboso/fleet-manager/releases/latest/download/fleet-agent-linux-amd64.tar.gz
+curl -fLO https://github.com/jcarcaboso/fleet-manager/releases/latest/download/fleet-agent-linux-amd64.tar.gz.sha256
 sha256sum --check fleet-agent-linux-amd64.tar.gz.sha256
-tar -xzf fleet-agent-linux-amd64.tar.gz
-sha256sum --check SHA256SUMS
+work_dir=$(mktemp -d)
+tar -xzf fleet-agent-linux-amd64.tar.gz -C "$work_dir"
+(cd "$work_dir" && sha256sum --check SHA256SUMS)
 mkdir -p ~/.local/bin
-install -m 0755 fleet-agent ~/.local/bin/fleet-agent
-~/.local/bin/fleet-agent --help
+install -m 0755 "$work_dir/fleet-agent" ~/.local/bin/fleet-agent
+rm -rf "$work_dir"
+~/.local/bin/fleet-agent --version
 ```
+
+On macOS, use the `macos-arm64` or `macos-amd64` archive and
+`shasum -a 256 -c` instead of `sha256sum --check`. The macOS binaries are not
+signed or notarized.
 
 The Linux archive is a static binary. Rust and OpenSSL executables are not
 required on the Node. Keep the Agent binary outside managed Skill directories.
+Every build from this repository, whichever the method, embeds the release
+public keys from `clients/bins/fleet-agent/release-keys/`, which the Agent needs
+to accept signed updates later. The [CLI installation guide](../../docs/technical-design/cli-installation.md)
+covers PATH setup and the Operator CLI.
 
 ## Enroll the machine
 
-The upgraded Server's dashboard can generate a short-lived enrollment link.
-This needs a Server build newer than the deployed `0.2.0` image. See the
-[dashboard guide](../../docs/plans/enrollment-dashboard.md). On the Node, run:
+In the dashboard, **Add machine** creates a short-lived enrollment link for the
+Node's alias. The [dashboard enrollment guide](../../docs/plans/enrollment-dashboard.md)
+explains its trust checks. On the Node, run:
 
 ```sh
 ~/.local/bin/fleet-agent enroll --link
@@ -203,10 +233,22 @@ Uninstall never removes the identity, credentials or other Agent state.
 
 ### Updates from the Server
 
-From 0.12.0, an Operator updates the Agent without logging in to the machine:
-**Update Agent** in the dashboard, or `fleet nodes update <node>` (one Node,
-several, or `--all-outdated`). The Agent always updates to the Server's own
-version. On its next poll it downloads the release from the Server, then:
+An Operator updates the Agent without logging in to the machine:
+**Update Agent** in the Machine panel or **Update outdated Agents** on the
+machines list of the dashboard, or `fleet nodes update <node>` (one Node,
+several, or `--all-outdated`; scope `admin`). The Agent always updates to the
+Server's own version, so upgrade the Server first. An Agent can update itself
+when:
+
+- it is 0.12.1 or newer. 0.12.1 is the first release that published Agents
+  with this feature; the 0.12.0 tag published only its images;
+- it runs from `<state-dir>/current/fleet-agent`, the copy made by
+  `fleet-agent service install`. `fleet nodes show <node>` then reports
+  `agent.selfUpdate: true`; and
+- the Server runs a newer release and can mirror it, from GitHub or from its
+  release cache (see the [client update guide](../../docs/technical-design/client-updates.md#agent-self-update)).
+
+On its next poll the Agent downloads the release from the Server, then:
 
 1. checks the Ed25519 signature of the release manifest against the release
    keys compiled into it, and that the version is newer than its own;
@@ -219,9 +261,12 @@ version. On its next poll it downloads the release from the Server, then:
    than three starts, or ten minutes without a successful poll, it switches
    `current` back and exits, and the restored version reports the failure.
 
-Only an Agent started from `<state-dir>/current/fleet-agent` can update itself,
-so run `fleet-agent service install` once. Agents up to 0.11 cannot update
-themselves: upgrade them by hand once (below). Neither the Server nor GitHub can
+Agents up to 0.11 cannot update themselves: upgrade them by hand once to
+0.12.1 or newer and run `fleet-agent service install` (below). Follow an update
+with `fleet nodes show <node>`: `agentUpdate.state` goes `requested`,
+`downloading`, `restarting`, then `succeeded` or `failed` with an error code
+that `fleet explain <code>` describes. `fleet nodes update --cancel <node>`
+withdraws a request the Agent has not picked up. Neither the Server nor GitHub can
 make the Agent run a binary that the release key did not sign. A new version
 that crashes before it records its start keeps restarting without rolling back;
 run `fleet-agent update rollback` on the machine to recover it.
@@ -229,10 +274,20 @@ run `fleet-agent update rollback` on the machine to recover it.
 
 ### Manual upgrades
 
-To upgrade by hand, get the new `fleet-agent` the way you first installed it
-(for example `brew upgrade fleet-agent`, or a new release archive), then run
-`fleet-agent service install` with the new executable. If the new version
-misbehaves, `fleet-agent update rollback` returns to the previous one.
+Upgrade by hand once to move an Agent up to 0.11 to self-update, or whenever
+the Server cannot update it. Get the new `fleet-agent` the way you first
+installed it, then run `service install` with the new executable:
+
+| First installed with | Upgrade |
+| --- | --- |
+| Homebrew | `brew update && brew upgrade jcarcaboso/fleet/fleet-agent`, then `"$(brew --prefix jcarcaboso/fleet/fleet-agent)/bin/fleet-agent" service install` |
+| Release archive | Verify and install the new archive as in [Install](#install), then `~/.local/bin/fleet-agent service install` |
+| Cargo | `cargo install --locked --force --git https://github.com/jcarcaboso/fleet-manager --tag v<version> fleet-agent`, then `~/.cargo/bin/fleet-agent service install` |
+
+Run `service install` with the new executable, not with whichever
+`fleet-agent` comes first on PATH: check with `fleet-agent --version` first.
+Keep the state directory. If the new version misbehaves,
+`fleet-agent update rollback` returns to the previous one.
 
 If the Agent was started with `brew services` by an earlier release,
 `fleet-agent service install` stops and unregisters that Homebrew service and
@@ -257,7 +312,7 @@ The run loop follows the Server's polling delay, bounded to 5 to 3,600 seconds, 
 retries transient failures after 30 seconds. It renews certificates with less
 than one day remaining. If the Node stays offline past certificate expiration,
 an Operator must arrange fresh enrollment with a free alias; automatic recovery
-of an expired identity is not supported by Server 0.2.0.
+of an expired identity is not supported.
 
 ## Inspect the Agent while it runs
 
@@ -315,10 +370,11 @@ It also verifies the last successful installation on later cycles, repairing
 local drift from its cached Bundles. A corrupt receipt, unsafe path, symlink, or
 unowned conflict causes a safe failure rather than deleting unknown files.
 
-Server 0.2.0 does not offer the full observed-state/recovery protocol. It stops
-sending terminal Assignments. Local drift repair therefore preserves the last
-successful server status; it cannot publish a separate drift condition. A failed
-Attempt needs a changed source publication to receive new work. Moving an active
+The Server does not yet run the full observed-state/recovery conversation.
+Drift the Agent repairs is reported only as the list of repaired paths (see
+[Enroll the machine](#enroll-the-machine)), and a repair that fails as a
+`repair_failed` issue. A failed Attempt receives new work from a changed source
+publication or from `fleet retry <node> <target>`. Moving an active
 Target, restoring an expired Node identity, and deleting the Agent's state as an
 uninstall mechanism are not supported.
 
@@ -335,8 +391,10 @@ archives and runs the Rust tests. For a native build on Linux or macOS:
 cargo build --manifest-path clients/Cargo.toml --package fleet-agent --release --locked
 ```
 
-macOS service installation and a macOS release binary are not included in the
-Linux package. Native macOS installation and login-startup validation remain
-pending; see the [client update design](../../docs/technical-design/client-updates.md).
-Updates started by an Operator are planned in the
-[self-update plan](../../docs/plans/agent-self-update.md).
+Both builds compile in the release public keys through `build.rs`. CI checks
+that the packaged Linux Agent embeds every committed key. The tag workflow
+builds the macOS archives natively. macOS installation and login startup have
+not yet been tested on physical Macs, and neither has a launchd self-update; see
+the [client update guide](../../docs/technical-design/client-updates.md). The
+[self-update plan](../../docs/plans/agent-self-update.md) records the design of
+Operator-started updates.

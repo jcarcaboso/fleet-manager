@@ -41,7 +41,11 @@ fleet-agent service status
 After `brew upgrade fleet-agent`, run `fleet-agent service install` again to
 switch the service to the new version. The formula only supplies new
 binaries; it has no `brew services` definition from the release after 0.11.0
-on.
+on. From 0.12.1, once the service runs, an Operator can update the Agent from
+the Server instead (`fleet nodes update <node>` or **Update Agent** in the
+dashboard); the Homebrew formula then stays at the version first installed,
+which does not matter because the service runs its own copy. See the
+[Agent guide](../../deploy/agent/README.md#updates-from-the-server).
 
 Agent state remains under `~/.local/state/fleet-agent` unless `--state-dir`
 selects another absolute path. Give the same `--state-dir` to every command.
@@ -119,11 +123,13 @@ rustup; the guard keeps shell startup working when it is absent.
 
 ## Install a binary archive
 
-The prepared release workflow publishes separate archives on
-[GitHub releases](https://github.com/jcarcaboso/fleet-manager/releases), such as `fleet-linux-amd64.tar.gz` and
-`fleet-agent-linux-amd64.tar.gz`. Download an archive and its adjacent
-`.sha256` file, then run the following commands in the download directory.
-Replace `fleet` with `fleet-agent` when installing the agent archive.
+Each release publishes separate archives on
+[GitHub releases](https://github.com/jcarcaboso/fleet-manager/releases):
+`fleet-<platform>.tar.gz` and `fleet-agent-<platform>.tar.gz` for
+`linux-amd64`, `macos-arm64` and `macos-amd64`. Download an archive and its
+adjacent `.sha256` file, then run the following commands in the download
+directory. Replace `fleet` with `fleet-agent` when installing the agent
+archive. On macOS, use `shasum -a 256 -c` instead of `sha256sum --check`.
 
 ```sh
 sha256sum --check fleet-linux-amd64.tar.gz.sha256
@@ -139,21 +145,27 @@ rm -rf "$work_dir"
 fleet --help
 ```
 
+After installing the Agent, enroll it and run
+`~/.local/bin/fleet-agent service install`, as in the
+[Agent guide](../../deploy/agent/README.md).
+
 To update a direct installation, verify a newer archive and run the same
-`install` command. Replacing the executable does not change shell environment
-variables or the agent state in `~/.local/state/fleet-agent`, so Operator and
-Node credentials remain in place. See the
+`install` command; for the Agent, then run `fleet-agent service install` with
+the new executable, unless the Server updates it. Replacing the executable does
+not change shell environment variables or the agent state in
+`~/.local/state/fleet-agent`, so Operator and Node credentials remain in place.
+See the
 [client update runbook](client-updates.md) for staged rollout and rollback
 steps.
 
 ## Install with Cargo from a release tag
 
-Install Rust 1.95.0, then replace `v0.3.0` below with an existing release tag.
+Install Rust 1.95.0, then replace `v0.12.1` below with an existing release tag.
 
 ```sh
 cargo install --locked \
     --git https://github.com/jcarcaboso/fleet-manager \
-    --tag v0.3.0 \
+    --tag v0.12.1 \
     fleet fleet-agent
 fleet --version
 fleet-agent --version
@@ -163,17 +175,22 @@ Cargo requires the package names because the Git repository contains several
 packages. `--locked` uses the repository lockfile. The tag keeps every machine
 on the same source revision.
 
-To update, select a newer release tag and force Cargo to rebuild both commands:
+To update, select a newer release tag (`vX.Y.Z` below) and force Cargo to
+rebuild both commands:
 
 ```sh
 cargo install --locked --force \
     --git https://github.com/jcarcaboso/fleet-manager \
-    --tag v0.4.0 \
+    --tag vX.Y.Z \
     fleet fleet-agent
+~/.cargo/bin/fleet-agent service install
 ```
 
 Cargo replaces the installed executables under `~/.cargo/bin`. It does not
-change Fleet credentials or Agent state. `cargo update` updates dependencies in
+change Fleet credentials or Agent state; `service install` switches the Agent
+service to the rebuilt executable. A Cargo build compiles in the release public
+keys like the release archives, so an Agent from 0.12.1 on can also be updated
+from the Server. `cargo update` updates dependencies in
 a source checkout; it does not update commands installed by `cargo install`.
 
 Publishing a GitHub tag does not publish these packages to crates.io. A future
@@ -225,7 +242,10 @@ The build requires Docker with BuildKit support. From the repository root, run:
 The script builds locked dependencies from `clients/Cargo.lock`, runs the Rust
 workspace tests, and writes both archives and their checksums under
 `artifacts/`. It creates a temporary build context containing the client
-workspace and the contract fixtures used by its tests. Server files and local
+workspace, the Agent's `build.rs` and release public keys, and the contract
+fixtures used by its tests. A tagged build (`FLEET_RELEASE_VERSION` set) stops
+when no public key is committed, because that Agent would refuse every
+update. Server files and local
 configuration are not sent to the builder.
 
 ## Build on macOS

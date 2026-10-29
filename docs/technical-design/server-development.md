@@ -174,5 +174,6 @@ cross-language Agent fixtures are implemented.
 The [hardening guide](operations-hardening.md) describes named Operators,
 metrics, cleanup, and listener validation. A manual
 [backup/restore tool](backup-restore.md) is available. Backup scheduling,
-retention periods, issuing-key rotation, release signing, and measured load
-budgets remain release work. See [implementation status](../implementation-status.md).
+retention periods, issuing-key rotation, image signing, macOS notarization and
+measured load budgets remain release work; Agent releases are signed (see the
+[client update guide](client-updates.md#release-signing)). See [implementation status](../implementation-status.md).

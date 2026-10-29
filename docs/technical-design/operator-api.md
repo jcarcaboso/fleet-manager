@@ -546,13 +546,21 @@ release.
 - `GET issues` adds `agent_outdated` (warning), one per non-revoked Node with
   `outdated: true`. `since` is `reportedAt`. `commands` include
   `fleet nodes show <alias>`. Its `detail` names the running and the latest
-  version, and its `action` gives the upgrade command for the install
-  method:
-  - Homebrew: `brew upgrade fleet-agent`.
+  version, and its `action` gives the upgrade path:
+  - Agent that can update itself (`agent.selfUpdate`): Update Agent in the
+    dashboard or `fleet nodes update <node>`, which is also added to
+    `commands`.
+  - Managed (run from `fleet-agent service install`): get the new
+    `fleet-agent` the way it was first installed, then run
+    `fleet-agent service install` with it.
+  - Homebrew: `brew upgrade fleet-agent`, then `brew services restart
+    fleet-agent`.
   - Cargo: reinstall with Cargo from the release tag, as in
     `cli-installation.md`.
   - Binary: replace the binary from the release archive and restart the
     service.
+  A Node whose last Agent update failed gets `agent_update_failed` instead
+  (see [Agent self-update](#agent-self-update)).
 
 ## Phase 4: deployments, drift and issue state
 
