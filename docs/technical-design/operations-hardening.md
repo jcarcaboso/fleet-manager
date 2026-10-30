@@ -198,12 +198,13 @@ requirement: older strict clients do not understand AI-client Assignments.
 ## Metrics
 
 The `Fleet.Server` .NET Meter exposes request counts and duration, database
-command duration, Bundle response bytes, source scan outcomes, and maintenance
-record counts. Labels use fixed operations and outcomes, without Node IDs,
+command duration, Bundle response bytes, source scan outcomes, maintenance record
+counts, and TLS certificate renewals. Labels use fixed operations and outcomes, without Node IDs,
 Operator names, source URLs, SQL, paths, or credentials.
 
-`GET /operator/v1/metrics` returns in-process request and source counters to
-authenticated Operators. Counters reset on restart. Histograms are available
+`GET /operator/v1/metrics` returns in-process request, source and TLS renewal
+counters to authenticated Operators, and the expiry of each
+[TLS certificate](tls-certificates.md). Counters reset on restart. Histograms are available
 through .NET Meter listeners, not the JSON endpoint. No exporter or outbound
 telemetry is enabled. Stale-Node aggregate metrics, process resource budgets,
 and a deployment-selected metrics collector remain follow-up work.
