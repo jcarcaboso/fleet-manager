@@ -60,6 +60,10 @@ def field(certificate, option):
     return subprocess.run(['openssl', 'x509', '-in', str(certificate), '-noout', option], check=True, capture_output=True, text=True).stdout
 
 
+def expiry(certificate):
+    return ssl.cert_time_to_seconds(field(certificate, '-enddate').strip().split('=', 1)[1])
+
+
 def text(certificate):
     return field(certificate, '-text')
 
@@ -101,10 +105,13 @@ with tempfile.TemporaryDirectory(prefix='fleet-setup-certificates-') as director
             '--renew left files behind')
 
     # --renew-ca: certificates from before it stay valid, and a client that keeps the old CA trusts certificates from after it.
+    # Start from a 365-day CA, as installations from before 0.12.2 have: one created a moment ago would get the same date again.
+    subprocess.run(['openssl', 'x509', '-in', str(tls / 'ca.pem'), '-signkey', str(tls / 'ca.key'), '-sha256', '-days', '365',
+                    '-set_serial', '0x01', '-out', str(tls / 'ca.pem')], check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     old_ca = root / 'old-ca.pem'
     shutil.copy(tls / 'ca.pem', old_ca)
     setup(root, '--renew-ca')
-    require(field(tls / 'ca.pem', '-enddate') != field(old_ca, '-enddate'), '--renew-ca did not change the expiry')
+    require(expiry(tls / 'ca.pem') > expiry(old_ca), '--renew-ca did not extend the expiry')
     require(field(tls / 'ca.pem', '-serial') != field(old_ca, '-serial'), '--renew-ca kept the serial number')
     for option in ('-subject', '-pubkey'):
         require(field(tls / 'ca.pem', option) == field(old_ca, option), f'--renew-ca changed {option[1:]}')
