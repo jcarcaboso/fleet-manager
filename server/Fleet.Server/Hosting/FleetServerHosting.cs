@@ -39,8 +39,11 @@ public static class FleetServerHosting
             .Validate(x => x.HasValidPublicUrl(), "Fleet:PublicUrl must be an HTTPS origin without a path, credentials, query, or fragment.")
             .Validate(x => x.HasValidDashboardOrigin(), "Fleet:DashboardOrigin must be an HTTPS origin of at most 200 characters without a path, credentials, query, or fragment.")
             .Validate(x => x.HasValidCliProxyApiKey(), "Fleet:CliProxyApiKey must be empty or contain at most 4096 printable ASCII characters.")
+            .Validate(x => x.TlsCertificateRenewBeforeDays < x.TlsCertificateLifetimeDays, "Fleet:TlsCertificateRenewBeforeDays must be less than Fleet:TlsCertificateLifetimeDays.")
             .ValidateOnStart();
         builder.Services.AddSingleton<NodeCertificateIssuer>();
+        builder.Services.AddSingleton<TlsCertificateRenewal>();
+        builder.Services.AddHostedService(services => services.GetRequiredService<TlsCertificateRenewal>());
         builder.Services.AddHttpClient("cliproxy", client => client.Timeout = TimeSpan.FromSeconds(15))
             .ConfigurePrimaryHttpMessageHandler(() => new HttpClientHandler { AllowAutoRedirect = false });
         builder.Services.AddOptions<AgentReleaseOptions>().BindConfiguration("Fleet:AgentReleases").ValidateDataAnnotations()

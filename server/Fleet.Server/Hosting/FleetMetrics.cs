@@ -12,6 +12,7 @@ public sealed class FleetMetrics : IDisposable
     private readonly Counter<long> _bundleBytes;
     private readonly Counter<long> _cleanup;
     private readonly Counter<long> _sourceScans;
+    private readonly Counter<long> _tlsRenewals;
     private readonly ConcurrentDictionary<string, long> _counts = new(StringComparer.Ordinal);
 
     public FleetMetrics()
@@ -22,6 +23,7 @@ public sealed class FleetMetrics : IDisposable
         _bundleBytes = _meter.CreateCounter<long>("fleet.bundle.response_bytes", "By");
         _cleanup = _meter.CreateCounter<long>("fleet.maintenance.records");
         _sourceScans = _meter.CreateCounter<long>("fleet.source.scans");
+        _tlsRenewals = _meter.CreateCounter<long>("fleet.tls.renewals");
     }
 
     public void RecordRequest(string operation, int status, double seconds, long bytes)
@@ -49,6 +51,18 @@ public sealed class FleetMetrics : IDisposable
         _cleanup.Add(audit, new KeyValuePair<string, object?>("record", "audit"));
         _cleanup.Add(scans, new KeyValuePair<string, object?>("record", "source_scan"));
     }
+
+    /// <param name="certificate">server or dashboard.</param>
+    public void RecordTlsRenewal(string certificate, bool succeeded)
+    {
+        var outcome = succeeded ? "ok" : "failed";
+        _tlsRenewals.Add(1, new("certificate", certificate), new("outcome", outcome));
+        _counts.AddOrUpdate($"tls.{certificate}.renewal.{outcome}", 1, (_, count) => count + 1);
+    }
+
+    /// <param name="certificate">server, dashboard or ca.</param>
+    public void RecordTlsExpiry(string certificate, DateTimeOffset notAfter) =>
+        _counts[$"tls.{certificate}.not_after_unix"] = notAfter.ToUnixTimeSeconds();
 
     public IReadOnlyDictionary<string, long> Snapshot() => new SortedDictionary<string, long>(_counts, StringComparer.Ordinal);
     public void Dispose() => _meter.Dispose();
