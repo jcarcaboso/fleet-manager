@@ -6,6 +6,8 @@ namespace Fleet.Server.Security;
 
 public sealed class NodeCertificateIssuer : IDisposable
 {
+    private const string ServerAuthentication = "1.3.6.1.5.5.7.3.1";
+    private const string SubjectAlternativeName = "2.5.29.17";
     private readonly X509Certificate2 _issuer;
     private readonly FleetOptions _options;
     private readonly TimeProvider _time;
@@ -93,6 +95,51 @@ public sealed class NodeCertificateIssuer : IDisposable
             && chain.ChainElements.Cast<X509ChainElement>().Select((element, index) =>
                 element.Certificate.NotBefore.ToUniversalTime() <= now &&
                 (allowExpired && index == 0 || element.Certificate.NotAfter.ToUniversalTime() > now)).All(valid => valid);
+    }
+
+    /// <summary>When the issuing CA certificate expires. Certificates it signs do not outlive this.</summary>
+    public DateTimeOffset NotAfter => _issuer.NotAfter.ToUniversalTime();
+
+    /// <summary>
+    /// Whether this CA signed the TLS server certificate, valid or not. Agents verify the Server against the CA they enrolled
+    /// with, so only such a certificate may be replaced by one this CA signs.
+    /// </summary>
+    public bool Issued(X509Certificate2 certificate)
+    {
+        using var chain = new X509Chain();
+        chain.ChainPolicy.TrustMode = X509ChainTrustMode.CustomRootTrust;
+        chain.ChainPolicy.CustomTrustStore.Add(_issuer);
+        chain.ChainPolicy.RevocationMode = X509RevocationMode.NoCheck;
+        chain.ChainPolicy.DisableCertificateDownloads = true;
+        chain.ChainPolicy.VerificationFlags = X509VerificationFlags.IgnoreNotTimeValid;
+        chain.ChainPolicy.ApplicationPolicy.Add(new Oid(ServerAuthentication));
+        return chain.Build(certificate);
+    }
+
+    /// <summary>
+    /// Issues a TLS server certificate with a new key, the subject and names of <paramref name="template"/> and the extensions
+    /// deploy/homelab/setup.py gives its certificates. Unlike Node certificates it stops at the CA's expiry instead of failing.
+    /// </summary>
+    public X509Certificate2 IssueTlsCertificate(X509Certificate2 template, int lifetimeDays)
+    {
+        var names = template.Extensions[SubjectAlternativeName]
+            ?? throw new InvalidOperationException("A TLS certificate without subject alternative names cannot be renewed.");
+        using var key = ECDsa.Create(ECCurve.NamedCurves.nistP256);
+        var request = new CertificateRequest(template.SubjectName, key, HashAlgorithmName.SHA256);
+        request.CertificateExtensions.Add(new X509BasicConstraintsExtension(false, false, 0, true));
+        request.CertificateExtensions.Add(new X509KeyUsageExtension(X509KeyUsageFlags.DigitalSignature, true));
+        request.CertificateExtensions.Add(new X509EnhancedKeyUsageExtension(new OidCollection { new(ServerAuthentication) }, false));
+        request.CertificateExtensions.Add(new X509SubjectKeyIdentifierExtension(request.PublicKey, false));
+        // A CA from an early setup has no key identifier to refer to.
+        if (_issuer.Extensions.OfType<X509SubjectKeyIdentifierExtension>().Any())
+            request.CertificateExtensions.Add(X509AuthorityKeyIdentifierExtension.CreateFromCertificate(_issuer, true, false));
+        request.CertificateExtensions.Add(names);
+        var now = _time.GetUtcNow();
+        var issuerStart = _issuer.NotBefore.ToUniversalTime();
+        var notBefore = now.AddMinutes(-1) < issuerStart ? issuerStart : now.AddMinutes(-1);
+        var notAfter = now.AddDays(lifetimeDays) > NotAfter ? NotAfter : now.AddDays(lifetimeDays);
+        using var certificate = request.Create(_issuer, notBefore, notAfter, RandomNumberGenerator.GetBytes(16));
+        return certificate.CopyWithPrivateKey(key);
     }
 
     public void Dispose() => _issuer.Dispose();

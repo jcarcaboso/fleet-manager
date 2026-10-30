@@ -81,26 +81,45 @@ Setup creates a private CA, a Server certificate and a separate dashboard
 certificate (each with its own key, both signed by the CA and carrying the same
 names), database password, workspace ID, and Operator bearer token. It refuses to overwrite an existing installation.
 Keep `secrets/`, `operator.env`, and `.env` private and backed up. They are not
-included in the image. Do not rerun setup to renew certificates or change DNS:
-replace the server certificate with one signed by the existing CA and containing
-the new hostname, do the same for `dashboard.pem` and `dashboard.key`, update the
-client URL, then recreate the stack. Changing the hostname environment variable
-alone cannot change an already issued certificate. The initial Server and
-dashboard certificates expire after 90 days and the CA after 365 days;
-certificate renewal is currently manual. When you issue a replacement, give it
+included in the image. Do not rerun setup to change DNS: replace the server
+certificate with one signed by the existing CA and containing the new hostname, do
+the same for `dashboard.pem` and `dashboard.key`, update the client URL, then
+recreate the stack. Changing the hostname environment variable alone cannot change
+an already issued certificate. When you issue a replacement, give it
 the same extensions setup uses: a named-curve P-256 key, a SHA-256 signature,
 `subjectKeyIdentifier=hash` and `authorityKeyIdentifier=keyid,issuer`.
 Certificates from earlier versions of setup lack the key identifiers, and on macOS
 (LibreSSL) they also have explicit curve parameters and a SHA-1 signature.
 Browsers and the Fleet clients accept them, but strict verifiers such as Python
-3.13 and later refuse them, so replace them at the next renewal.
-`scripts/check-setup-certificates.py` checks what setup issues.
+3.13 and later refuse them. The Server issues the replacements it makes with those
+extensions. `scripts/check-setup-certificates.py` checks what setup issues.
+
+The Server and dashboard certificates renew themselves. They last 90 days, and with
+less than 30 left the Server issues new ones from the CA, with the same names. The
+Server keeps its own in memory, and writes the dashboard's to `dashboard-tls`, where
+the dashboard reloads it. Neither needs a restart, and Agents need nothing, because
+they trust the CA. The files in `secrets/tls` are only the first copies: they go
+stale and that is harmless, and a deployment that copies them again undoes nothing.
+`GET /operator/v1/metrics` reports the expiry of each certificate, and
+[TLS certificates](../../docs/technical-design/tls-certificates.md) explains the rest.
+
+If the Server cannot renew, for example on a release before 0.12.2, run
+`python3 setup.py --renew`, which replaces both certificates and their keys with the
+same names, then `docker compose up -d --force-recreate --wait`. Without
+`--force-recreate` the new files reach the volumes but the running Server keeps its
+old certificate, because Compose cannot see inside mounted secrets.
+
+The CA does not renew itself. New installations get a CA that lasts 10 years;
+those created before 0.12.2 have one that lasts 365 days, and the Server stops
+starting 7 days before it expires. Run `python3 setup.py --renew-ca` to extend it
+with the same key, then recreate the stack. Agents need no change.
 
 PostgreSQL data persists in a named volume and its port is not published. The
 Server runs as UID 1654 with a read-only root filesystem. The dashboard container
 has the same restrictions (read-only root, no capabilities, `no-new-privileges`)
 but a different identity: UID 1655 and its own volume, `dashboard-tls`, which it
-mounts read-only. It serves static files only and joins neither the database
+mounts read-only through the Server's group, GID 1654, because the Server renews the
+certificate there. It serves static files only and joins neither the database
 network nor the Server's network.
 
 An isolated setup container (`configure`, no network) copies configuration into
@@ -111,7 +130,7 @@ access.
 | Volume | Owner | Holds | Mounted by |
 |---|---|---|---|
 | `runtime-config` | 1654 | `appsettings.Production.json` (database password, Operator token digests), `tls/ca.key`, `ca.pem`, `server.key`, `server.pem`, `.ssh/` | Server (and migrate), read-only |
-| `dashboard-tls` | 1655 | `dashboard.key`, `dashboard.pem` and the public `ca.pem`, nothing else | dashboard, read-only |
+| `dashboard-tls` | 1654, group-readable | `dashboard.key`, `dashboard.pem` and the public `ca.pem`, nothing else | Server, to renew the certificate; dashboard, read-only |
 
 A compromised dashboard container can therefore read its own key and the public
 CA certificate, and cannot read the CA key that signs Node certificates, the

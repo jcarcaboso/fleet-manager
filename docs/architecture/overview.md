@@ -245,6 +245,9 @@ not a second independently mutable truth.
   endpoint accepts expired Node certificates. The issuing CA must still be valid.
 - Revoked Nodes and credentials cannot renew. Lost keys and explicit revocation
   require Operator-authorized recovery.
+- The Server renews its own TLS certificate and the dashboard's from the same CA.
+  Agents trust the CA and pin no certificate, so these renewals reach them without
+  any change. See [TLS certificates](../technical-design/tls-certificates.md).
 - Operator and Agent credentials are separate.
 - Agent private keys never leave the Node and use user-only file permissions.
 - The Server authorizes every Assignment and Bundle request for the exact Node

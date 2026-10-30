@@ -42,6 +42,8 @@ use `npm run dev:mock` in `dashboard/`; it needs no Server. When you change
 `dashboard/Dockerfile` or `dashboard/nginx/`, also run `make dashboard-image`,
 which builds the image through `deploy/homelab/compose.build.yaml` and starts it
 read-only as UID 1655 with a throwaway certificate authority and certificate.
+When you change how certificates are issued, loaded or trusted, also run
+`scripts/smoke-tls-renewal.sh` with images built from your tree and an Agent binary.
 `deploy/homelab/compose.yaml` only pulls images; to build the dashboard in a
 Compose project, add `-f compose.build.yaml` and a local `FLEET_DASHBOARD_IMAGE`
 tag (never a published release name).

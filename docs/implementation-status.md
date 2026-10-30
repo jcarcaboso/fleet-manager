@@ -37,7 +37,8 @@ PostgreSQL, migrations, and private TLS configuration. The amd64 Server image is
 published to `skorcius/fleet-manager:0.2.0`. A static Linux amd64
 [Operator CLI archive](technical-design/cli-installation.md) is built locally.
 Container HTTPS/mTLS smoke tests and a CLI request against the packaged Server
-passed; artifact signing and automated certificate renewal remain open.
+passed; artifact signing remains open. The Server and dashboard
+[TLS certificates](technical-design/tls-certificates.md) now renew automatically.
 
 Server 0.2.0 uses unique Node aliases as source manifest keys and
 supports authenticated self-service alias changes through `PUT /agent/v1/alias`

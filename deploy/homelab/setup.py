@@ -2,7 +2,8 @@
 """Create private configuration and TLS certificates for a Fleet installation.
 
 Without options it creates a new installation. With --add-dashboard it adds the dashboard's own certificate
-to an installation that was created before the dashboard had one.
+to an installation that was created before the dashboard had one. With --renew or --renew-ca it replaces certificates of an
+existing installation. The Server renews the Server and dashboard certificates by itself; --renew is for a Server that cannot.
 """
 
 import argparse
@@ -19,6 +20,9 @@ import uuid
 
 SERVER_IMAGE = 'skorcius/fleet-manager:0.12.1'
 DASHBOARD_IMAGE = 'skorcius/fleet-manager:dashboard-0.12.1'
+# Agents keep the CA they enrolled with, so a short CA lifetime protects nothing and only adds a step. Certificates stay short.
+CA_DAYS = 3650
+CERTIFICATE_DAYS = 90
 
 parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
 parser.add_argument('--host', default=None, help='Private DNS hostname or IPv4 address (default: FLEET_HOSTNAME; with --add-dashboard, FLEET_HOSTNAME from .env)')
@@ -28,7 +32,13 @@ parser.add_argument('--dashboard-port', type=int, default=None, help='Published 
 parser.add_argument('--directory', type=Path, default=Path(__file__).resolve().parent)
 parser.add_argument('--add-dashboard', action='store_true',
                     help='Upgrade an existing installation: issue the dashboard certificate from the existing CA and add the dashboard settings')
+parser.add_argument('--renew', action='store_true',
+                    help='Replace the Server and dashboard certificates of an existing installation, with the existing CA and the same names')
+parser.add_argument('--renew-ca', action='store_true',
+                    help=f'Extend the CA certificate of an existing installation by {CA_DAYS} days from today, with the same key and subject. Agents need no change')
 args = parser.parse_args()
+if sum([args.add_dashboard, args.renew, args.renew_ca]) > 1:
+    parser.error('--add-dashboard, --renew and --renew-ca are separate steps; run them one at a time')
 
 IPV6_ADVICE = ('the dashboard cannot use an IPv6 literal: browsers drop IPv6 addresses from Content-Security-Policy host sources, '
                'so every call to the Server would be blocked. Use a DNS hostname that resolves to the address')
@@ -106,6 +116,65 @@ def certificate_names(certificate):
     return names
 
 
+def existing_tls(*names):
+    """The secrets/tls directory of an existing installation, which must hold the named files."""
+    root = args.directory.resolve()
+    tls = root / 'secrets' / 'tls'
+    missing = [name for name in names if not (tls / name).is_file()]
+    if missing:
+        parser.error(f'{tls} is not an existing installation (missing {", ".join(missing)})')
+    return tls
+
+
+def common_name(certificate):
+    subject = openssl('x509', '-in', str(certificate), '-noout', '-subject', capture=True)
+    match = re.search(r'CN\s*=\s*([^,/\n]+)', subject)
+    if not match:
+        parser.error(f'{certificate} has no common name')
+    return match.group(1).strip()
+
+
+def renew():
+    tls = existing_tls('ca.pem', 'ca.key', 'server.pem')
+    os.umask(0o077)
+    renewed = []
+    for name in ('server', 'dashboard'):
+        current = tls / (name + '.pem')
+        if not current.is_file():
+            continue
+        names = certificate_names(current)
+        if not names:
+            parser.error(f'{current} has no subject alternative names to keep')
+        # Beside the current files, which stay in place if issuing fails. Agents pin neither the certificate nor its key.
+        issue_certificate(tls, name + '.new', common_name(current), names, CERTIFICATE_DAYS)
+        (tls / (name + '.new.key')).replace(tls / (name + '.key'))
+        (tls / (name + '.new.pem')).replace(current)
+        renewed.append(name)
+    print(f'Replaced the {" and ".join(renewed)} certificates and keys in secrets/tls, valid for {CERTIFICATE_DAYS} days with the same names. The CA is unchanged.')
+    print('Agents need no change. Apply the files with: docker compose up -d --force-recreate --wait')
+
+
+def renew_ca():
+    tls = existing_tls('ca.pem', 'ca.key')
+    os.umask(0o077)
+    current, key, new = tls / 'ca.pem', tls / 'ca.key', tls / 'ca.new.pem'
+
+    def anchor(certificate):
+        return [openssl('x509', '-in', str(certificate), '-noout', option, capture=True) for option in ('-subject', '-pubkey')]
+
+    try:
+        # Reissue rather than create: subject, key and extensions are what every issued certificate and every Agent refer to.
+        # The serial number must differ, because a certificate with another's issuer and serial number is an error to some verifiers.
+        openssl('x509', '-in', str(current), '-signkey', str(key), '-sha256', '-days', str(CA_DAYS), '-set_serial', '0x' + secrets.token_hex(16), '-out', str(new))
+        if anchor(new) != anchor(current):
+            parser.error('the reissued CA certificate does not have the same subject and key; ca.key may not belong to ca.pem')
+        new.replace(current)
+    finally:
+        new.unlink(missing_ok=True)
+    print(f'Extended secrets/tls/ca.pem by {CA_DAYS} days from today. Its key and subject are unchanged, so every issued certificate stays valid and Agents need no change.')
+    print('Apply it with: docker compose up -d --force-recreate --wait')
+
+
 def add_dashboard():
     if args.port is not None or args.bind_ip is not None:
         parser.error('--port and --bind-ip belong to the first setup and do not apply to --add-dashboard')
@@ -150,7 +219,7 @@ def add_dashboard():
                                                  ('FLEET_DASHBOARD_URL', dashboard_url)] if key not in env]
 
     os.umask(0o077)
-    issue_certificate(tls, 'dashboard', host, names, 90)
+    issue_certificate(tls, 'dashboard', host, names, CERTIFICATE_DAYS)
     if set_origin:
         temporary = config_path.with_name('server.json.new')
         temporary.write_text(json.dumps(config, indent=2) + '\n')
@@ -173,6 +242,12 @@ def add_dashboard():
 
 if args.add_dashboard:
     add_dashboard()
+    raise SystemExit(0)
+if args.renew:
+    renew()
+    raise SystemExit(0)
+if args.renew_ca:
+    renew_ca()
     raise SystemExit(0)
 
 host = args.host or os.environ.get('FLEET_HOSTNAME')
@@ -203,13 +278,13 @@ tls.mkdir(parents=True)
 (root / 'ssh').mkdir(exist_ok=True)
 
 openssl('req', '-x509', '-sha256', '-newkey', 'ec', '-pkeyopt', 'ec_paramgen_curve:P-256', '-pkeyopt', 'ec_param_enc:named_curve', '-nodes',
-        '-keyout', str(tls / 'ca.key'), '-out', str(tls / 'ca.pem'), '-days', '365', '-subj', '/CN=Fleet homelab CA',
+        '-keyout', str(tls / 'ca.key'), '-out', str(tls / 'ca.pem'), '-days', str(CA_DAYS), '-subj', '/CN=Fleet homelab CA',
         '-addext', 'basicConstraints=critical,CA:TRUE', '-addext', 'keyUsage=critical,keyCertSign,cRLSign',
         '-addext', 'subjectKeyIdentifier=hash')
 # The Server and the dashboard get separate keys with the same names. The dashboard container never sees the Server's key or the CA key.
 names = list(dict.fromkeys([san, 'DNS:localhost', 'IP:127.0.0.1', 'IP:::1']))
-issue_certificate(tls, 'server', host, names, 90)
-issue_certificate(tls, 'dashboard', host, names, 90)
+issue_certificate(tls, 'server', host, names, CERTIFICATE_DAYS)
+issue_certificate(tls, 'dashboard', host, names, CERTIFICATE_DAYS)
 
 password = secrets.token_hex(32)
 token = secrets.token_urlsafe(32)

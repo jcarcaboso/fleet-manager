@@ -13,6 +13,12 @@ public sealed class FleetOptions
     [Required] public string IssuerCertificatePath { get; set; } = "";
     [Required] public string IssuerKeyPath { get; set; } = "";
     [Range(1, 30)] public int CertificateLifetimeDays { get; set; } = 7;
+    // TLS certificates the issuer signed for the Server and the dashboard are replaced when less than RenewBeforeDays remain.
+    [Range(2, 397)] public int TlsCertificateLifetimeDays { get; set; } = 90;
+    [Range(1, 396)] public int TlsCertificateRenewBeforeDays { get; set; } = 30;
+    [Range(10, 86400)] public int TlsCertificateCheckSeconds { get; set; } = 3600;
+    // The directory holding dashboard.pem and dashboard.key. Empty leaves the dashboard's certificate alone.
+    public string DashboardCertificateDirectory { get; set; } = "";
     [Range(30, 600)] public int EnrollmentDeliverySeconds { get; set; } = 120;
     [Range(10, 3600)] public int PollIntervalSeconds { get; set; } = 60;
     [Range(60, 86400)] public int StaleAfterSeconds { get; set; } = 300;

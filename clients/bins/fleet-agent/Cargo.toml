@@ -22,6 +22,10 @@ fleet-reconcile = { path = "../../crates/fleet-reconcile" }
 toml_edit = "0.25.13"
 jsonc-parser = { version = "0.33.2", features = ["cst", "serde_json"] }
 
+[dev-dependencies]
+# The Server side of the trust tests. Already locked through reqwest.
+rustls = { version = "0.23.46", default-features = false, features = ["ring", "std"] }
+
 [target.'cfg(unix)'.dependencies]
 # Disk usage: one statvfs (Linux) or statfs (macOS) call. Already locked as a
 # transitive dependency.

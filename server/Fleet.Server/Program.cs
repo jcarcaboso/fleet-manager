@@ -17,6 +17,9 @@ builder.WebHost.ConfigureKestrel((context, options) =>
     options.Limits.KeepAliveTimeout = TimeSpan.FromSeconds(30);
     options.ConfigureHttpsDefaults(https =>
     {
+        // Kestrel keeps the certificate it loaded for a listener from ASPNETCORE_URLS, so a renewed one must come through the selector.
+        var renewal = options.ApplicationServices.GetRequiredService<TlsCertificateRenewal>();
+        if (renewal.ManagesServerCertificate) https.ServerCertificateSelector = (_, _) => renewal.ServerCertificate;
         https.ClientCertificateMode = ClientCertificateMode.AllowCertificate;
         https.ClientCertificateValidation = (certificate, _, _) =>
         {
@@ -39,6 +42,8 @@ if (args.Contains("--migrate", StringComparer.Ordinal))
 
 // Validate the issuing key and certificate before accepting any connections.
 _ = app.Services.GetRequiredService<NodeCertificateIssuer>();
+// Before the listener binds: an expired certificate file must never be served.
+app.Services.GetRequiredService<TlsCertificateRenewal>().Initialize();
 ListenerPolicy.Validate(app.Configuration, app.Services.GetRequiredService<IOptions<FleetOptions>>().Value.AllowLoopbackHttp);
 
 app.UseFleetServer();

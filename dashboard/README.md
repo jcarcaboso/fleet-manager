@@ -46,7 +46,8 @@ The page fetches `/config.json` with `cache: "no-store"` before it mounts:
 origin only (no path, query, fragment or user info). A missing file, invalid JSON, a missing or invalid `apiUrl` shows the
 configuration error page (`views/ConfigError/ConfigErrorView.vue`) instead of a blank screen. One build works for every
 deployment; the container writes `config.json` from `FLEET_API_ORIGIN`. `public/config.json` is the development default
-(`https://localhost:7443`).
+(`https://localhost:7443`). The container also reloads nginx when the Server renews its certificate in `/run/dashboard-tls`,
+checking every `FLEET_TLS_RELOAD_SECONDS` (default 60).
 
 In mock mode and in tests no config is fetched (`MOCK_API_URL = https://mock.fleet.invalid`).
 

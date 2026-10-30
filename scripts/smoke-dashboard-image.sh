@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
-# Run a locally built dashboard image the way Compose does (read-only, uid 1655, no capabilities, a volume that holds
-# only dashboard.pem, dashboard.key and the public ca.pem) with a throwaway CA, and check the container's HTTPS
-# behaviour. It needs Docker, curl and openssl.
+# Run a locally built dashboard image the way Compose does (read-only, uid 1655 in the Server's group, no capabilities, a
+# volume that holds only dashboard.pem, dashboard.key and the public ca.pem) with a throwaway CA, and check the container's
+# HTTPS behaviour and that it reloads a renewed certificate. It needs Docker, curl and openssl.
 #   scripts/smoke-dashboard-image.sh IMAGE
 set -euo pipefail
 
@@ -20,7 +20,7 @@ trap cleanup EXIT
 
 fail() { echo "dashboard image smoke test failed: $*" >&2; exit 1; }
 run_hardened() {
-    docker run --read-only --cap-drop ALL --security-opt no-new-privileges:true --user 1655:1655 \
+    docker run --read-only --cap-drop ALL --security-opt no-new-privileges:true --user 1655:1654 \
         --tmpfs /tmp:rw,noexec,nosuid,nodev,size=16m,mode=1777 -v "$volume":/run/dashboard-tls:ro "$@"
 }
 
@@ -30,14 +30,14 @@ openssl req -new -newkey ec -pkeyopt ec_paramgen_curve:P-256 -pkeyopt ec_param_e
 printf 'basicConstraints=critical,CA:FALSE\nkeyUsage=critical,digitalSignature\nextendedKeyUsage=serverAuth\nsubjectKeyIdentifier=hash\nauthorityKeyIdentifier=keyid,issuer\nsubjectAltName=DNS:localhost,IP:127.0.0.1\n' >"$work/dashboard.ext"
 openssl x509 -req -sha256 -in "$work/dashboard.csr" -CA "$work/ca.pem" -CAkey "$work/ca.key" -CAcreateserial -out "$work/dashboard.pem" -days 2 -extfile "$work/dashboard.ext" >/dev/null 2>&1
 docker volume create "$volume" >/dev/null
-# Install the files as the configure service does: only these three, owned by 1655 with mode 0600 (directory 0700).
+# Install the files as the configure service does: only these three, owned by the Server with mode 0640 (directory 0750).
 docker run --rm --user 0:0 --entrypoint sh -v "$volume":/dashboard-tls -v "$work":/in:ro "$image" -ec \
-    'cp /in/dashboard.pem /in/dashboard.key /in/ca.pem /dashboard-tls/ && chown -R 1655:1655 /dashboard-tls && chmod 0700 /dashboard-tls && chmod 0600 /dashboard-tls/*'
+    'cp /in/dashboard.pem /in/dashboard.key /in/ca.pem /dashboard-tls/ && chown -R 1654:1654 /dashboard-tls && chmod 0750 /dashboard-tls && chmod 0640 /dashboard-tls/*'
 
 # Without its certificate the container must say what is missing, and how to fix an older installation.
 empty=fleet-dashboard-smoke-empty-$suffix
 docker volume create "$empty" >/dev/null
-if output=$(docker run --rm --read-only --cap-drop ALL --user 1655:1655 --tmpfs /tmp -v "$empty":/run/dashboard-tls:ro -e FLEET_API_ORIGIN="$api" "$image" 2>&1); then
+if output=$(docker run --rm --read-only --cap-drop ALL --user 1655:1654 --tmpfs /tmp -v "$empty":/run/dashboard-tls:ro -e FLEET_API_ORIGIN="$api" "$image" 2>&1); then
     docker volume rm "$empty" >/dev/null; fail 'the container started without a certificate'
 fi
 docker volume rm "$empty" >/dev/null
@@ -52,7 +52,10 @@ for origin in '' "$api/" 'http://fleet.example.test:7443' 'https://user@fleet.ex
     esac
 done
 
-run_hardened -d --name "$container" -e FLEET_API_ORIGIN="$api" -p 127.0.0.1::8443 "$image" >/dev/null
+if output=$(run_hardened --rm -e FLEET_API_ORIGIN="$api" -e FLEET_TLS_RELOAD_SECONDS=soon "$image" 2>&1); then fail 'a bad FLEET_TLS_RELOAD_SECONDS was accepted'; fi
+grep -q 'FLEET_TLS_RELOAD_SECONDS' <<<"$output" || fail 'a bad FLEET_TLS_RELOAD_SECONDS failed without naming it'
+
+run_hardened -d --name "$container" -e FLEET_API_ORIGIN="$api" -e FLEET_TLS_RELOAD_SECONDS=1 -p 127.0.0.1::8443 "$image" >/dev/null
 port=$(docker port "$container" 8443/tcp | head -n1 | sed 's/.*://')
 curl_args=(--silent --show-error --cacert "$work/ca.pem" --resolve "localhost:$port:127.0.0.1" --max-time 5)
 for _ in $(seq 1 30); do
@@ -106,4 +109,20 @@ get -o /dev/null "$base/machines?secret=hidden-in-query" || true
 logs=$(docker logs "$container" 2>&1)
 grep -q 'GET /machines ' <<<"$logs" || fail 'the access log has no request line'
 if grep -q 'hidden-in-query' <<<"$logs"; then fail 'a query string reached the access log'; fi
-echo 'Dashboard image smoke: config.json, headers (also on error pages), routes, TLS, uid 1655 read-only start, and fail-fast origin and certificate checks passed'
+# The Server renews the certificate in the shared volume: new connections must get it, without a restart.
+serial() { openssl s_client -connect "127.0.0.1:$port" -servername localhost </dev/null 2>/dev/null | openssl x509 -noout -serial; }
+before=$(serial)
+started=$(docker inspect "$container" --format '{{.State.StartedAt}}')
+openssl req -new -newkey ec -pkeyopt ec_paramgen_curve:P-256 -pkeyopt ec_param_enc:named_curve -nodes -keyout "$work/renewed.key" -out "$work/renewed.csr" -subj /CN=localhost >/dev/null 2>&1
+openssl x509 -req -sha256 -in "$work/renewed.csr" -CA "$work/ca.pem" -CAkey "$work/ca.key" -CAcreateserial -out "$work/renewed.pem" -days 2 -extfile "$work/dashboard.ext" >/dev/null 2>&1
+docker run --rm --user 0:0 --entrypoint sh -v "$volume":/dashboard-tls -v "$work":/in:ro "$image" -ec \
+    'for file in key pem; do install -o 1654 -g 1654 -m 0640 /in/renewed.$file /dashboard-tls/.tmp && mv /dashboard-tls/.tmp /dashboard-tls/dashboard.$file; done'
+for _ in $(seq 1 30); do
+    [ "$(serial)" != "$before" ] && break
+    sleep 1
+done
+[ "$(serial)" = "$(openssl x509 -in "$work/renewed.pem" -noout -serial)" ] || fail 'the renewed certificate was not served'
+get -o /dev/null "$base/healthz" || fail 'the renewed certificate does not verify'
+[ "$(docker inspect "$container" --format '{{.State.StartedAt}}')" = "$started" ] || fail 'the container restarted to reload its certificate'
+
+echo 'Dashboard image smoke: config.json, headers (also on error pages), routes, TLS, certificate reload, uid 1655 read-only start, and fail-fast origin and certificate checks passed'
