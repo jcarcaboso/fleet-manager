@@ -839,6 +839,7 @@ struct AliasRequest<'a> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use rustls::pki_types::{CertificateDer, PrivateKeyDer};
 
     #[test]
     fn poll_fixture_matches_server_wire_contract() {
@@ -1144,6 +1145,172 @@ mod tests {
             Err(ProtocolError::RequestTooLarge { .. })
         ));
         assert!(server.requests().is_empty());
+    }
+
+    /// Certificates for the trust tests: a CA key whose certificate can be
+    /// reissued, as `setup.py --renew-ca` does, and server certificates under it.
+    mod trust {
+        use rcgen::{
+            BasicConstraints, CertificateParams, DnType, ExtendedKeyUsagePurpose, IsCa, Issuer,
+            KeyPair, KeyUsagePurpose, PKCS_ECDSA_P256_SHA256,
+        };
+        use rustls::pki_types::{CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer};
+        use time::{Duration, OffsetDateTime};
+
+        pub fn key() -> KeyPair {
+            KeyPair::generate_for(&PKCS_ECDSA_P256_SHA256).unwrap()
+        }
+
+        pub fn key_copy(key: &KeyPair) -> KeyPair {
+            KeyPair::from_pem(&key.serialize_pem()).unwrap()
+        }
+
+        fn ca_params(days_left: i64) -> CertificateParams {
+            let mut params = CertificateParams::new(Vec::<String>::new()).unwrap();
+            params
+                .distinguished_name
+                .push(DnType::CommonName, "Fleet test CA");
+            params.is_ca = IsCa::Ca(BasicConstraints::Unconstrained);
+            params.key_usages = vec![KeyUsagePurpose::KeyCertSign, KeyUsagePurpose::CrlSign];
+            let now = OffsetDateTime::now_utc();
+            params.not_before = now - Duration::days(400);
+            params.not_after = now + Duration::days(days_left);
+            params
+        }
+
+        pub fn ca_pem(key: &KeyPair, days_left: i64) -> String {
+            ca_params(days_left).self_signed(key).unwrap().pem()
+        }
+
+        /// A server certificate for `localhost`, and its key, signed by `key`.
+        pub fn server_certificate(
+            key: KeyPair,
+            days_left: i64,
+        ) -> (CertificateDer<'static>, PrivateKeyDer<'static>) {
+            let issuer = Issuer::new(ca_params(3650), key);
+            let server_key = self::key();
+            let mut params = CertificateParams::new(vec!["localhost".to_owned()]).unwrap();
+            params.extended_key_usages = vec![ExtendedKeyUsagePurpose::ServerAuth];
+            params.use_authority_key_identifier_extension = true;
+            let now = OffsetDateTime::now_utc();
+            params.not_before = now - Duration::days(30);
+            params.not_after = now + Duration::days(days_left);
+            let certificate = params.signed_by(&server_key, &issuer).unwrap();
+            (
+                certificate.der().clone(),
+                PrivatePkcs8KeyDer::from(server_key.serialize_der()).into(),
+            )
+        }
+
+        pub fn identity_pem() -> Vec<u8> {
+            let key = self::key();
+            let certificate = CertificateParams::new(Vec::<String>::new())
+                .unwrap()
+                .self_signed(&key)
+                .unwrap();
+            format!("{}{}", certificate.pem(), key.serialize_pem()).into_bytes()
+        }
+    }
+
+    /// Serves one TLS connection with the same stack as the Agent and answers
+    /// its request with [`POLL`]. Returns the port.
+    fn serve_poll(certificate: (CertificateDer<'static>, PrivateKeyDer<'static>)) -> u16 {
+        use std::io::{Read, Write};
+        let config = rustls::ServerConfig::builder_with_provider(
+            rustls::crypto::ring::default_provider().into(),
+        )
+        .with_safe_default_protocol_versions()
+        .unwrap()
+        .with_no_client_auth()
+        .with_single_cert(vec![certificate.0], certificate.1)
+        .unwrap();
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        std::thread::spawn(move || {
+            let (mut tcp, _) = listener.accept().unwrap();
+            let mut connection = rustls::ServerConnection::new(config.into()).unwrap();
+            let mut tls = rustls::Stream::new(&mut connection, &mut tcp);
+            // A client that refuses the certificate ends the connection here.
+            if tls.read(&mut [0; 4096]).is_ok() {
+                let response = format!(
+                    "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{POLL}",
+                    POLL.len()
+                );
+                let _ = tls.write_all(response.as_bytes());
+                let _ = tls.flush();
+            }
+        });
+        port
+    }
+
+    async fn poll_trusting(
+        ca_pem: &str,
+        certificate: (CertificateDer<'static>, PrivateKeyDer<'static>),
+    ) -> Result<PollResponse, ProtocolError> {
+        let port = serve_poll(certificate);
+        Api::new(
+            &format!("https://localhost:{port}"),
+            ca_pem.as_bytes(),
+            Some(&trust::identity_pem()),
+        )?
+        .poll()
+        .await
+    }
+
+    #[tokio::test]
+    async fn a_server_certificate_renewed_under_the_same_ca_needs_nothing_from_the_agent() {
+        let key = trust::key();
+        let ca_pem = trust::ca_pem(&key, 300);
+        let first = trust::server_certificate(trust::key_copy(&key), 10);
+        let renewed = trust::server_certificate(trust::key_copy(&key), 90);
+        assert_ne!(first.0, renewed.0);
+        poll_trusting(&ca_pem, first).await.unwrap();
+        poll_trusting(&ca_pem, renewed).await.unwrap();
+    }
+
+    // Extending the CA relies on this: an enrolled Agent keeps the CA certificate
+    // it received, and rustls takes only the name and key from a trust anchor.
+    // If an upgrade makes this fail, Agents stop connecting when that certificate
+    // expires, so docs/technical-design/tls-certificates.md must change first.
+    #[tokio::test]
+    async fn an_agent_keeps_trusting_a_ca_whose_certificate_it_holds_has_expired() {
+        let key = trust::key();
+        let expired_ca_pem = trust::ca_pem(&key, -1);
+        let certificate = trust::server_certificate(key, 90);
+        poll_trusting(&expired_ca_pem, certificate).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn every_certificate_in_a_ca_file_is_trusted() {
+        let key = trust::key();
+        let bundle = format!(
+            "{}{}",
+            trust::ca_pem(&trust::key(), 300),
+            trust::ca_pem(&key, 300)
+        );
+        let certificate = trust::server_certificate(key, 90);
+        poll_trusting(&bundle, certificate).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn the_expired_ca_trusts_only_its_own_key() {
+        let expired_ca_pem = trust::ca_pem(&trust::key(), -1);
+        let certificate = trust::server_certificate(trust::key(), 90);
+        assert!(matches!(
+            poll_trusting(&expired_ca_pem, certificate).await,
+            Err(ProtocolError::Transport(_))
+        ));
+    }
+
+    #[tokio::test]
+    async fn an_agent_refuses_an_expired_server_certificate_under_a_trusted_ca() {
+        let key = trust::key();
+        let ca_pem = trust::ca_pem(&key, 300);
+        let certificate = trust::server_certificate(key, -1);
+        assert!(matches!(
+            poll_trusting(&ca_pem, certificate).await,
+            Err(ProtocolError::Transport(_))
+        ));
     }
 
     fn sample_telemetry() -> TelemetryReport {
