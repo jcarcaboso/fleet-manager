@@ -9,7 +9,7 @@ certificate, and what reaches Agents. The decision is recorded in
 | Node client certificate | 7 days (`Fleet:CertificateLifetimeDays`) | The Agent, in its poll cycle, with less than a day left | Nothing |
 | Server TLS certificate | 90 days | The Server, in memory, with less than 30 days left | Nothing |
 | Dashboard TLS certificate | 90 days | The Server, in the shared volume; the dashboard reloads it | Nothing |
-| Fleet CA certificate | 10 years (365 days before Fleet 0.13) | An Operator: `setup.py --renew-ca` | Nothing, with the same key |
+| Fleet CA certificate | 10 years (365 days before Fleet 0.12.2) | An Operator: `setup.py --renew-ca` | Nothing, with the same key |
 
 Certificates issued by a public CA for a proxy in front of Fleet are not part of
 this. The proxy that terminates them owns their renewal.

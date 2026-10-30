@@ -103,14 +103,14 @@ stale and that is harmless, and a deployment that copies them again undoes nothi
 `GET /operator/v1/metrics` reports the expiry of each certificate, and
 [TLS certificates](../../docs/technical-design/tls-certificates.md) explains the rest.
 
-If the Server cannot renew, for example on a release before 0.13, run
+If the Server cannot renew, for example on a release before 0.12.2, run
 `python3 setup.py --renew`, which replaces both certificates and their keys with the
 same names, then `docker compose up -d --force-recreate --wait`. Without
 `--force-recreate` the new files reach the volumes but the running Server keeps its
 old certificate, because Compose cannot see inside mounted secrets.
 
 The CA does not renew itself. New installations get a CA that lasts 10 years;
-those created before 0.13 have one that lasts 365 days, and the Server stops
+those created before 0.12.2 have one that lasts 365 days, and the Server stops
 starting 7 days before it expires. Run `python3 setup.py --renew-ca` to extend it
 with the same key, then recreate the stack. Agents need no change.
 
