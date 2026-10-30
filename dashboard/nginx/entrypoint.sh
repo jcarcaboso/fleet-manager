@@ -4,6 +4,8 @@
 # The image is read-only, so everything generated here goes to /tmp/fleet (a tmpfs):
 #   config.json  {"apiUrl": FLEET_API_ORIGIN}, served as /config.json
 #   csp.conf     the Content-Security-Policy header, with FLEET_API_ORIGIN in connect-src
+# nginx reads its certificate only when it starts or reloads, so a background loop reloads it after the Server has replaced
+# the files in /run/dashboard-tls. FLEET_TLS_RELOAD_SECONDS is how often it looks (default 60).
 set -eu
 
 fail() {
@@ -51,4 +53,24 @@ printf '{"apiUrl":"%s"}\n' "$origin" > "$runtime/config.json"
 printf '%s\n' "add_header Content-Security-Policy \"default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self'; font-src 'self'; connect-src 'self' $origin; base-uri 'none'; frame-ancestors 'none'; form-action 'none'\" always;" > "$runtime/csp.conf"
 
 nginx -t -q || fail "the nginx configuration is invalid."
+
+reload_seconds="${FLEET_TLS_RELOAD_SECONDS:-60}"
+case "$reload_seconds" in
+    '' | *[!0-9]* | 0) fail "FLEET_TLS_RELOAD_SECONDS must be a positive number of seconds." ;;
+esac
+watch_certificate() {
+    certificate=/run/dashboard-tls/dashboard.pem
+    served=$(cksum <"$certificate")
+    while sleep "$reload_seconds"; do
+        current=$(cksum <"$certificate") || continue
+        [ "$current" != "$served" ] || continue
+        # A failed test leaves nginx on the certificate it has, and the next round tries again.
+        if nginx -t -q 2>/dev/null && nginx -s reload; then
+            served=$current
+            echo "fleet-dashboard: reloaded the TLS certificate" >&2
+        fi
+    done
+}
+watch_certificate &
+
 exec "$@"

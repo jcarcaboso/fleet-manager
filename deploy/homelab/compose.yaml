@@ -36,9 +36,10 @@ services:
     entrypoint: [/bin/sh, -ec]
     command:
       - |
-        # Two private volumes, two owners. The Server gets everything it needs (including the CA key that signs
-        # Node certificates) in runtime-config, owned by 1654. The dashboard gets only its own certificate and
-        # key plus the public CA certificate in dashboard-tls, owned by 1655. Nothing else goes into that volume.
+        # Two private volumes. The Server gets everything it needs (including the CA key that signs Node
+        # certificates) in runtime-config, which only 1654 can read. The dashboard gets only its own certificate and
+        # key plus the public CA certificate in dashboard-tls. Nothing else goes into that volume. The Server owns it
+        # because it renews that certificate, and the dashboard reads it through the group.
         for file in dashboard.pem dashboard.key; do
           if [ ! -r "/input/tls/$$file" ]; then
             echo "configure: secrets/tls/$$file is missing. This installation was created before the dashboard had its own certificate. Run: python3 setup.py --add-dashboard" >&2
@@ -54,11 +55,17 @@ services:
         chown -R 1654:1654 /runtime
         find /runtime -type d -exec chmod 0700 {} +
         find /runtime -type f -exec chmod 0600 {} +
-        find /dashboard-tls -mindepth 1 -delete
-        cp /input/tls/dashboard.pem /input/tls/dashboard.key /input/tls/ca.pem /dashboard-tls/
-        chown -R 1655:1655 /dashboard-tls
-        chmod 0700 /dashboard-tls
-        find /dashboard-tls -type f -exec chmod 0600 {} +
+        # The copy in secrets/ only seeds the volume: keep the certificate the Server renewed unless the copy lasts longer.
+        expires() { date -d "$$(openssl x509 -in "$$1" -noout -enddate | cut -d= -f2)" +%s; }
+        find /dashboard-tls -mindepth 1 ! -name dashboard.pem ! -name dashboard.key -delete
+        if [ ! -r /dashboard-tls/dashboard.key ] || [ ! -r /dashboard-tls/dashboard.pem ] ||
+          [ "$$(expires /input/tls/dashboard.pem)" -gt "$$(expires /dashboard-tls/dashboard.pem)" ]; then
+          cp /input/tls/dashboard.pem /input/tls/dashboard.key /dashboard-tls/
+        fi
+        cp /input/tls/ca.pem /dashboard-tls/
+        chown -R 1654:1654 /dashboard-tls
+        chmod 0750 /dashboard-tls
+        find /dashboard-tls -type f -exec chmod 0640 {} +
     read_only: true
     network_mode: none
     cap_drop: [ALL]
@@ -106,6 +113,11 @@ services:
       <<: *server-environment
       Fleet__CliProxyApiKey: ${FLEET_CLIPROXY_API_KEY:-}
       Fleet__CliProxySyncIntervalSeconds: ${FLEET_CLIPROXY_SYNC_INTERVAL_SECONDS:-604800}
+      Fleet__DashboardCertificateDirectory: /run/fleet-dashboard-tls
+    volumes:
+      - runtime-config:/run/fleet:ro
+      - runtime-config:/home/app:ro
+      - dashboard-tls:/run/fleet-dashboard-tls
     ports:
       - "${FLEET_BIND_IP:-127.0.0.1}:${FLEET_PORT:-7443}:7443"
     depends_on:
@@ -122,8 +134,9 @@ services:
     image: ${FLEET_DASHBOARD_IMAGE:-skorcius/fleet-manager:dashboard-0.12.1}
     restart: unless-stopped
     # Its own uid and its own volume: the dashboard reads dashboard.pem, dashboard.key and the public ca.pem,
-    # and nothing the Server owns (no CA key, Server key, database password or Operator token digests).
-    user: "1655:1655"
+    # and nothing else the Server owns (no CA key, Server key, database password or Operator token digests).
+    # The group is the Server's so it can read the files the Server renews; that volume is the only one it shares.
+    user: "1655:1654"
     read_only: true
     cap_drop: [ALL]
     security_opt: [no-new-privileges:true]
