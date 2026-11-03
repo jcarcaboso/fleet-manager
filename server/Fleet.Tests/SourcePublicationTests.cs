@@ -61,8 +61,10 @@ public sealed class SourcePublicationTests : IAsyncLifetime
         Assert.Equal(sourceBundle.Content, (await coordinator.GetBundleAsync(authentication, skill.BundleDigest)).Content);
     }
 
-    [Fact]
-    public async Task Publication_persists_managed_files_and_authorizes_their_content()
+    [Theory]
+    [InlineData("codex")]
+    [InlineData("claude")]
+    public async Task Publication_persists_managed_files_and_authorizes_their_content(string client)
     {
         await using var database = Database();
         var coordinator = Coordinator(database);
@@ -80,7 +82,7 @@ public sealed class SourcePublicationTests : IAsyncLifetime
             new(nodeId, credentialId, certificateDigest, now - TimeSpan.FromMinutes(1), now + TimeSpan.FromHours(1), "certificate"u8.ToArray())));
 
         var source = CreateRepository();
-        Write(source, "fleet.yml", """
+        Write(source, "fleet.yml", $$"""
             schema: fleet/v1
             targets:
               skills:
@@ -94,7 +96,7 @@ public sealed class SourcePublicationTests : IAsyncLifetime
                       - stable
                   agents:
                     - source: personal
-                      clients: [codex]
+                      clients: [{{client}}]
             """);
         Write(source, "agents/personal/AGENTS.md", "# Fleet instructions\n");
         Git(source, "add", ".");
@@ -105,21 +107,37 @@ public sealed class SourcePublicationTests : IAsyncLifetime
         await coordinator.AcceptSourceSnapshotAsync(scan.Value);
 
         var authentication = new NodeAuthentication(nodeId, credentialId, certificateDigest);
-        AgentAssignment? codex = null;
-        for (var index = 0; index < 2; index++)
+        AgentAssignment? clientFile = null;
+        AgentAssignment? claudeSkills = null;
+        for (var index = 0; index < (client == "claude" ? 3 : 2); index++)
         {
-            var assignment = Assert.IsType<AgentAssignment>((await coordinator.PollAsync(authentication, DateTimeOffset.UtcNow)).Assignment);
-            if (assignment.TargetName == "agent-file/codex") codex = assignment;
+            var assignment = Assert.IsType<AgentAssignment>((await coordinator.PollAsync(
+                authentication, DateTimeOffset.UtcNow, AgentCapabilities.ClaudeSkills)).Assignment);
+            if (assignment.TargetName == $"agent-file/{client}") clientFile = assignment;
+            if (assignment.TargetName == "skills/claude") claudeSkills = assignment;
             await coordinator.ReportAttemptAsync(authentication,
                 new(assignment.AttemptId, ConvergenceState.Succeeded, null, null, DateTimeOffset.UtcNow));
         }
 
-        Assert.NotNull(codex);
-        Assert.Empty(codex.Skills);
-        Assert.Equal("AGENTS.md", codex.File!.Name);
-        Assert.Equal("fleet.file/v1", codex.File.Schema);
-        var content = await coordinator.GetBundleAsync(authentication, codex.File.BundleDigest!);
+        Assert.NotNull(clientFile);
+        Assert.Empty(clientFile.Skills);
+        Assert.Equal(client == "claude" ? "CLAUDE.md" : "AGENTS.md", clientFile.File!.Name);
+        Assert.Equal("fleet.file/v1", clientFile.File.Schema);
+        var content = await coordinator.GetBundleAsync(authentication, clientFile.File.BundleDigest!);
         Assert.Equal("# Fleet instructions\n"u8.ToArray(), content.Content);
+        if (client == "claude")
+        {
+            Assert.NotNull(claudeSkills);
+            Assert.Equal(new TargetDescriptor("home", ".claude/skills"), claudeSkills.Target);
+            var skill = Assert.Single(claudeSkills.Skills);
+            Assert.Equal("review", skill.Name);
+            var bundle = await coordinator.GetBundleAsync(authentication, skill.BundleDigest);
+            Assert.Equal(scan.Value.Bundles.Single(candidate => candidate.Digest == skill.BundleDigest).Content, bundle.Content);
+        }
+        else
+        {
+            Assert.Null(claudeSkills);
+        }
     }
 
     [Fact]

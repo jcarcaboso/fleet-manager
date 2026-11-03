@@ -19,9 +19,9 @@ const MAX_REPAIR_REQUEST_BYTES: usize = 512 * 1024;
 /// and repair failures).
 const SIDE_REPORT_TIMEOUT: Duration = Duration::from_secs(10);
 /// Tells the Server which optional features this Agent understands. Only then
-/// may the poll response carry the matching fields.
+/// may the poll response carry the matching fields or Target kinds.
 const CAPABILITIES_HEADER: &str = "x-fleet-agent-capabilities";
-const CAPABILITIES: &str = "disk-usage,agent-update";
+const CAPABILITIES: &str = "disk-usage,agent-update,claude-skills";
 /// Largest signed release manifest the Agent reads.
 pub const MAX_RELEASE_MANIFEST_BYTES: usize = 64 * 1024;
 /// Size of an Ed25519 signature, the whole content of the signature file.
@@ -929,7 +929,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn every_poll_request_advertises_the_disk_usage_and_agent_update_capabilities() {
+    async fn every_poll_request_advertises_the_supported_capabilities() {
         let server =
             crate::detail::testing::MockServer::start(vec![(200, POLL), (200, POLL_REQUESTED)]);
         let client = Api::for_loopback_test(&server.url());
@@ -944,7 +944,7 @@ mod tests {
             );
             assert_eq!(
                 request.header("x-fleet-agent-capabilities"),
-                Some("disk-usage,agent-update")
+                Some("disk-usage,agent-update,claude-skills")
             );
         }
     }

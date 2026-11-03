@@ -173,7 +173,7 @@ a later `true` counts again only after a poll that returned `false`. A failed
 report, including 404 from an older Server or 429, is therefore logged and
 tried again only at the next 4-hour slot or a new request, not on every poll.
 The schedule lives in memory and uses a monotonic clock, so a restart reports
-again. Every poll request carries `X-Fleet-Agent-Capabilities: disk-usage`,
+again. Every poll request includes `disk-usage` in `X-Fleet-Agent-Capabilities`,
 which is what allows the Server to set that flag. The
 [Operator API](../technical-design/operator-api.md#disk-usage) defines the route.
 

@@ -428,7 +428,7 @@ on Linux or `statfs` on macOS. It never walks directories.
   cycle after the Server sets `diskUsageRequested`. The schedule is kept in
   memory only, so a restart sends a new report. A failed report is retried at
   the next 4-hour slot, or on the next request.
-- Every poll request carries `X-Fleet-Agent-Capabilities: disk-usage`. Only
+- Every poll request includes `disk-usage` in `X-Fleet-Agent-Capabilities`. Only
   then may the Server add `"diskUsageRequested": true` to the poll response.
   Agents without the header never receive the field, because they reject
   unknown fields. A new Agent accepts the poll response with or without it.
@@ -728,7 +728,8 @@ design and the [client update guide](client-updates.md) the operation.
 
 ### Capability and poll
 
-- Every poll request carries `X-Fleet-Agent-Capabilities: disk-usage,agent-update`.
+- Every poll request carries
+  `X-Fleet-Agent-Capabilities: disk-usage,agent-update,claude-skills`.
   The Server records on each poll whether `agent-update` was present
   (`agent.selfUpdate`), and only then may it add
   `"agentUpdate": { "version": "0.12.0", "updateId": "<uuid>" }` to the poll
@@ -737,6 +738,10 @@ design and the [client update guide](client-updates.md) the operation.
   Agents without the capability never receive it, and a new Agent accepts the
   response with or without it. `agentUpdate` has no other members; a new one
   needs a new capability.
+- The Server delivers `skills/claude` Assignments only when `claude-skills` is
+  present. On older Agents the Target remains pending, while other supported
+  Assignments continue to be delivered. Upgrading the Agent enables delivery
+  without another source publication.
 - The Agent finishes the cycle, then reports `downloading`. Only a 204 starts
   the download; a 409 means the request was cancelled meanwhile. When the
   report gets no answer the Agent tries the same request again after its next

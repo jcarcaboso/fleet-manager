@@ -37,7 +37,7 @@ impl ActionKind {
 
     fn matches(self, target_name: &str) -> bool {
         match self {
-            Self::Skills => target_name == "skills",
+            Self::Skills => matches!(target_name, "skills" | "skills/claude"),
             Self::ManagedFile => target_name.starts_with("agent-file/"),
             Self::AiClient => target_name.starts_with("ai-client/"),
         }
@@ -452,6 +452,66 @@ mod tests {
             schema: "fleet.bundle/v1".to_owned(),
         }];
         assignment
+    }
+
+    #[tokio::test]
+    async fn claude_skills_reconcile_independently_of_shared_skills() {
+        let fixture = Fixture::new();
+        let api = offline_api();
+        let shared = skill_assignment(&fixture, ".agents/skills", "alpha", false);
+        let mut claude = shared.clone();
+        claude.target_name = "skills/claude".to_owned();
+        claude.target.path = ".claude/skills".to_owned();
+        let registry = Registry::new(&fixture.content, &fixture.ai, &fixture.cache);
+
+        assert_eq!(kind_name(&claude.target_name), "skills");
+        registry.validate(&claude).unwrap();
+        registry.recover(&claude).unwrap();
+        registry.prepare(&api, &claude).await.unwrap();
+        fixture.apply(&api, &shared).await.unwrap();
+        fixture.apply(&api, &claude).await.unwrap();
+        for path in [
+            ".agents/skills/alpha/SKILL.md",
+            ".claude/skills/alpha/SKILL.md",
+        ] {
+            assert_eq!(std::fs::read(fixture.home.join(path)).unwrap(), b"x");
+        }
+
+        let path = fixture.home.join(".claude/skills/alpha/SKILL.md");
+        std::fs::write(&path, b"edited").unwrap();
+        assert_eq!(
+            fixture.apply(&api, &claude).await.unwrap(),
+            [".claude/skills/alpha/SKILL.md"]
+        );
+        assert_eq!(std::fs::read(&path).unwrap(), b"x");
+
+        let personal = fixture.home.join(".claude/skills/personal/SKILL.md");
+        std::fs::create_dir_all(personal.parent().unwrap()).unwrap();
+        std::fs::write(&personal, b"personal").unwrap();
+        claude.skills.clear();
+        fixture.apply(&api, &claude).await.unwrap();
+        assert!(!path.exists());
+        assert_eq!(std::fs::read(&personal).unwrap(), b"personal");
+        assert!(fixture.home.join(".agents/skills/alpha/SKILL.md").is_file());
+    }
+
+    #[tokio::test]
+    async fn claude_skills_preserve_unowned_content() {
+        let fixture = Fixture::new();
+        let api = offline_api();
+        let mut assignment = skill_assignment(&fixture, ".claude/skills", "alpha", false);
+        assignment.target_name = "skills/claude".to_owned();
+        let path = fixture.home.join(".claude/skills/alpha/SKILL.md");
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(&path, b"personal").unwrap();
+
+        let error = fixture.apply(&api, &assignment).await.unwrap_err();
+
+        assert_eq!(error.code(), "ownership_conflict");
+        assert_eq!(error.path(), Some(".claude/skills/alpha"));
+        assert_eq!(std::fs::read(path).unwrap(), b"personal");
+        assignment.target_name = "skills/unknown".to_owned();
+        assert!(registered_action(&assignment).is_err());
     }
 
     #[tokio::test]
