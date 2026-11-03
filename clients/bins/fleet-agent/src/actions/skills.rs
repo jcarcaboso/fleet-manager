@@ -10,7 +10,7 @@ use std::{
 };
 
 pub fn validate(assignment: &Assignment) -> Result<()> {
-    if assignment.target_name != "skills"
+    if !matches!(assignment.target_name.as_str(), "skills" | "skills/claude")
         || assignment.target.base != "home"
         || assignment.file.is_some()
         || assignment.ai_client.is_some()

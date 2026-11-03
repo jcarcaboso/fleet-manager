@@ -63,17 +63,26 @@ internal static class SourceTargetPublishers
     internal static bool IsValidModelId(string value) => value.Length is > 0 and <= 200 &&
         value.All(character => character is >= '!' and <= '~');
 
-    private static IEnumerable<SnapshotTarget> BuildSkillTargets(TargetPublication publication) =>
-        publication.Manifest.Nodes.OrderBy(x => x.Key, StringComparer.Ordinal).Select(pair =>
+    private static IEnumerable<SnapshotTarget> BuildSkillTargets(TargetPublication publication)
+    {
+        foreach (var pair in publication.Manifest.Nodes.OrderBy(x => x.Key, StringComparer.Ordinal))
         {
             var target = pair.Value.Targets.Skills;
             var skills = new Dictionary<string, SnapshotSkill>(StringComparer.Ordinal);
             foreach (var group in SelectedGroups(target, publication.SkillGroups))
                 foreach (var skill in publication.SkillGroups[group].OrderBy(x => x.Key, StringComparer.Ordinal))
                     skills.TryAdd(skill.Key, new SnapshotSkill(skill.Key, skill.Value.Bundle.Digest));
-            return new SnapshotTarget(publication.NodeAliases[pair.Key], "skills",
-                new TargetDescriptor("home", target.Path ?? publication.Manifest.Targets.Skills.Path!), skills.Values.ToArray());
-        });
+            var descriptor = new TargetDescriptor("home", target.Path ?? publication.Manifest.Targets.Skills.Path!);
+            var resolvedSkills = skills.Values.ToArray();
+            yield return new SnapshotTarget(publication.NodeAliases[pair.Key], "skills", descriptor, resolvedSkills);
+
+            var usesClaude = pair.Value.Targets.Agents?.Any(agent => agent.Clients is null || agent.Clients.Contains("claude")) == true ||
+                pair.Value.Targets.AiClients?.ContainsKey("claude") == true;
+            if (usesClaude && descriptor.Path != ".claude/skills")
+                yield return new SnapshotTarget(publication.NodeAliases[pair.Key], "skills/claude",
+                    new TargetDescriptor("home", ".claude/skills"), resolvedSkills);
+        }
+    }
 
     private static IEnumerable<SnapshotTarget> BuildAgentTargets(TargetPublication publication)
     {

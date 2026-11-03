@@ -145,6 +145,19 @@ filename:
 | OpenCode | `.config/opencode/AGENTS.md` |
 | Claude Code | `.claude/CLAUDE.md` |
 
+Nodes selecting Claude Code also receive their resolved Skills at
+`~/.claude/skills`, through a separate `skills/claude` Target. Claude is selected
+by an `agents` entry that includes `claude` or omits `clients`, or by an
+`ai-clients.claude` connection in `fleet/v2`. The configured shared `skills`
+Target remains unchanged for other clients. If it already points at
+`.claude/skills`, no second Target is created. An empty `agents: []` clears
+instruction files but does not select a Claude Skills Target.
+The Server delivers `skills/claude` only to Agents announcing the
+`claude-skills` capability. Older Agents keep receiving their existing Targets;
+the Claude Skills Target remains pending until the Agent is upgraded.
+Existing accepted Desired revisions are not rewritten. Claude Skills Targets
+are added when a new source revision is published.
+
 For example, `source: personal` resolves exactly
 `agents/personal/AGENTS.md`. Omitting `clients` selects Codex, OpenCode, and
 Claude Code. When `clients` is present, the source applies only to those

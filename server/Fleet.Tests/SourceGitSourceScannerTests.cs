@@ -249,6 +249,70 @@ public sealed class SourceGitSourceScannerTests : IDisposable
         Assert.DoesNotContain(snapshot.Value.Targets, target => target.File is not null);
     }
 
+    [Theory]
+    [InlineData("fleet/v1", "      agents:\n        - source: personal\n          clients: [claude]\n", true)]
+    [InlineData("fleet/v1", "      agents:\n        - source: personal\n          clients: [codex, claude]\n", true)]
+    [InlineData("fleet/v1", "      agents:\n        - source: personal\n", true)]
+    [InlineData("fleet/v1", "      agents:\n        - source: personal\n          clients: [codex, opencode]\n", false)]
+    [InlineData("fleet/v1", "      agents: []\n", false)]
+    [InlineData("fleet/v1", "", false)]
+    [InlineData("fleet/v2", "      ai-clients:\n        claude:\n          mode: native\n", true)]
+    [InlineData("fleet/v2", "      ai-clients:\n        claude:\n          mode: cliproxy\n", true)]
+    [InlineData("fleet/v2", "      agents:\n        - source: personal\n          clients: [claude]\n      ai-clients:\n        claude:\n          mode: native\n", true)]
+    public async Task Claude_receives_the_same_resolved_skills_in_its_own_directory(string schema, string nodeTargets, bool usesClaude)
+    {
+        var repository = CreateRepository();
+        var manifest = Manifest(["preferred", "fallback"]).Replace("schema: fleet/v1", $"schema: {schema}", StringComparison.Ordinal);
+        if (schema == "fleet/v2")
+            manifest = manifest.Replace("schema: fleet/v2\n", "schema: fleet/v2\ncliproxy:\n  base-url: https://proxy.example/v1\n", StringComparison.Ordinal);
+        Write(repository, "fleet.yml", manifest + nodeTargets);
+        Write(repository, "agents/personal/AGENTS.md", "# Personal instructions\n");
+        Write(repository, "skills/preferred/review/SKILL.md", "# Preferred review\n");
+        Write(repository, "skills/fallback/review/SKILL.md", "# Fallback review\n");
+        Write(repository, "skills/fallback/deploy/SKILL.md", "# Deploy\n");
+        Commit(repository, "client-specific skills");
+
+        var snapshot = Assert.IsType<SourceScanResult.Snapshot>(
+            await Scanner(repository).ScanAsync(null, CancellationToken.None));
+
+        var shared = Assert.Single(snapshot.Value.Targets, target => target.TargetName == "skills");
+        Assert.Equal(".agents/skills", shared.Descriptor.Path);
+        Assert.Equal(["review", "deploy"], shared.Skills.Select(skill => skill.Name));
+        var claude = snapshot.Value.Targets.Where(target => target.TargetName == "skills/claude").ToArray();
+        if (usesClaude)
+        {
+            var target = Assert.Single(claude);
+            Assert.Equal(_nodeId, target.NodeId);
+            Assert.Equal(new TargetDescriptor("home", ".claude/skills"), target.Descriptor);
+            Assert.Equal(shared.Skills, target.Skills);
+        }
+        else
+        {
+            Assert.Empty(claude);
+        }
+    }
+
+    [Fact]
+    public async Task A_skills_target_already_in_the_Claude_directory_is_not_duplicated()
+    {
+        var repository = CreateRepository();
+        Write(repository, "fleet.yml", Manifest([]).Replace(
+            "        groups: []\n",
+            "        groups: []\n        path: .claude/skills\n      agents:\n        - source: personal\n          clients: [claude]\n",
+            StringComparison.Ordinal));
+        Write(repository, "agents/personal/AGENTS.md", "# Personal instructions\n");
+        Write(repository, "skills/stable/review/SKILL.md", "# Review\n");
+        Commit(repository, "existing Claude skills destination");
+
+        var snapshot = Assert.IsType<SourceScanResult.Snapshot>(
+            await Scanner(repository).ScanAsync(null, CancellationToken.None));
+
+        var target = Assert.Single(snapshot.Value.Targets, target => target.File is null);
+        Assert.Equal("skills", target.TargetName);
+        Assert.Equal(".claude/skills", target.Descriptor.Path);
+        Assert.Equal("review", Assert.Single(target.Skills).Name);
+    }
+
     [Fact]
     public async Task Target_publishers_keep_registered_action_order()
     {
@@ -268,7 +332,7 @@ public sealed class SourceGitSourceScannerTests : IDisposable
                     groups: []
                   agents:
                     - source: personal
-                      clients: [codex]
+                      clients: [codex, claude]
                   ai-clients:
                     codex:
                       mode: cliproxy
@@ -281,7 +345,7 @@ public sealed class SourceGitSourceScannerTests : IDisposable
             await Scanner(repository).ScanAsync(null, CancellationToken.None));
 
         Assert.Equal(
-            ["skills", "agent-file/codex", "ai-client/codex"],
+            ["skills", "skills/claude", "agent-file/claude", "agent-file/codex", "ai-client/codex"],
             snapshot.Value.Targets.Select(target => target.TargetName));
     }
 

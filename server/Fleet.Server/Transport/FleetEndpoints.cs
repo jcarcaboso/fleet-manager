@@ -177,10 +177,12 @@ public static class FleetEndpoints
 
     public const string DiskUsageCapability = "disk-usage";
     public const string AgentUpdateCapability = "agent-update";
+    public const string ClaudeSkillsCapability = "claude-skills";
 
     private static AgentCapabilities Capabilities(HttpContext context) =>
         (HasCapability(context, DiskUsageCapability) ? AgentCapabilities.DiskUsage : AgentCapabilities.None) |
-        (HasCapability(context, AgentUpdateCapability) ? AgentCapabilities.AgentUpdate : AgentCapabilities.None);
+        (HasCapability(context, AgentUpdateCapability) ? AgentCapabilities.AgentUpdate : AgentCapabilities.None) |
+        (HasCapability(context, ClaudeSkillsCapability) ? AgentCapabilities.ClaudeSkills : AgentCapabilities.None);
 
     // Only the Server's own version is served: it is the only release an update request can name.
     private static async Task<AgentRelease> ReleaseAsync(string version, AgentReleaseMirror mirror, LatestAgentVersion latest, CancellationToken ct) =>

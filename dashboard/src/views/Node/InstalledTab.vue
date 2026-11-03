@@ -5,42 +5,47 @@ import Icon from '@/components/Icon.vue';
 import StateTag from '@/components/StateTag.vue';
 import { digestShort, hostOf, initial, shortSha } from '@/lib/format';
 import type { NodeDetailView } from '@/lib/model';
-import { clientName, targetClient, targetKind, targetWhere } from '@/lib/targets';
+import { clientName, targetClient, targetKind, targetLabel, targetWhere } from '@/lib/targets';
 
 /** Installed: the Skills, the agent files and the AI client connections that Fleet manages on this machine. */
 const props = defineProps<{ node: NodeDetailView }>();
-const skillsTarget = computed(() => props.node.targets.find(t => targetKind(t.name) === 'skills'));
+const skillsTargets = computed(() => props.node.targets.filter(t => targetKind(t.name) === 'skills'));
 const files = computed(() => props.node.targets.filter(t => targetKind(t.name) === 'agent-file'));
 const clients = computed(() => props.node.targets.filter(t => targetKind(t.name) === 'ai-client'));
-const other = computed(() => props.node.targets.filter(t => !['skills', 'agent-file', 'ai-client'].includes(targetKind(t.name)) && t !== skillsTarget.value));
-const skills = computed(() => skillsTarget.value?.skills ?? []);
+const other = computed(() => props.node.targets.filter(t => !['skills', 'agent-file', 'ai-client'].includes(targetKind(t.name))));
 const monoClass = (c: string | null): string => `m-${c && ['claude', 'codex', 'opencode'].includes(c) ? c : 'other'}`;
 const connection = (mode: string): string => (mode === 'cliproxy' ? 'CLIProxy' : mode === 'native' ? 'Native login' : mode);
 </script>
 
 <template>
-  <section class="panel">
+  <section v-for="skillsTarget in skillsTargets" :key="skillsTarget.name" class="panel">
     <header class="panel-head row">
       <div>
-        <h2>Skills <span class="cnt">{{ skills.length }}</span></h2>
-        <p v-if="skillsTarget"><span class="mono">{{ targetWhere(skillsTarget) }}</span> · in manifest order</p>
-        <p v-else>No Skills Target is assigned to this machine.</p>
+        <h2>{{ targetLabel(skillsTarget) }} <span class="cnt">{{ skillsTarget.skills.length }}</span></h2>
+        <p><span class="mono">{{ targetWhere(skillsTarget) }}</span> · in manifest order</p>
       </div>
-      <StateTag v-if="skillsTarget" :state="skillsTarget.state" />
+      <StateTag :state="skillsTarget.state" />
     </header>
-    <div v-if="skills.length" class="tbl-wrap">
+    <div v-if="skillsTarget.skills.length" class="tbl-wrap">
       <table class="tbl">
         <thead><tr><th>Skill</th><th>Bundle digest</th><th>Status</th></tr></thead>
         <tbody>
-          <tr v-for="s in skills" :key="s.name">
+          <tr v-for="s in skillsTarget.skills" :key="s.name">
             <td><b>{{ s.name }}</b></td>
             <td><span class="digest"><code :data-tip="s.bundleDigest || ''">{{ digestShort(s.bundleDigest) }}</code><CopyButton v-if="s.bundleDigest" :text="s.bundleDigest" :aria-label="`Copy digest of ${s.name}`" /></span></td>
-            <td><StateTag :state="skillsTarget!.state" /></td>
+            <td><StateTag :state="skillsTarget.state" /></td>
           </tr>
         </tbody>
       </table>
     </div>
     <p v-else class="empty-note">No Skills assigned.</p>
+  </section>
+  <section v-if="!skillsTargets.length" class="panel">
+    <header class="panel-head">
+      <h2>Skills <span class="cnt">0</span></h2>
+      <p>No Skills Target is assigned to this machine.</p>
+    </header>
+    <p class="empty-note">No Skills assigned.</p>
   </section>
   <div class="cols">
     <section class="panel">

@@ -518,7 +518,7 @@ public sealed partial class PostgresFleetCoordinator(
             throw Error("invalid_contact_time", "Node contact time is too far in the future.");
         var selfUpdate = capabilities?.HasFlag(AgentCapabilities.AgentUpdate);
         var node = await Authenticate(authentication, contactedAt, true, cancellationToken, selfUpdate);
-        var result = await FindPollAssignment(authentication, targetName, cancellationToken) with
+        var result = await FindPollAssignment(authentication, targetName, capabilities ?? AgentCapabilities.None, cancellationToken) with
         {
             DiskUsageRequested = node.DiskUsageRefreshRequestedAt is not null,
             AgentUpdate = selfUpdate == true ? await RequestedAgentUpdate(authentication.NodeId.Value, cancellationToken) : null
@@ -528,11 +528,14 @@ public sealed partial class PostgresFleetCoordinator(
         return result;
     }
 
-    private async Task<PollResult> FindPollAssignment(NodeAuthentication authentication, string? targetName, CancellationToken cancellationToken)
+    private async Task<PollResult> FindPollAssignment(NodeAuthentication authentication, string? targetName,
+        AgentCapabilities capabilities, CancellationToken cancellationToken)
     {
         await RetryFailedAiAssignment(authentication.NodeId.Value, targetName, cancellationToken);
+        var claudeSkills = capabilities.HasFlag(AgentCapabilities.ClaudeSkills);
         var assignment = await db.Assignments.AsNoTracking().Where(x => x.NodeId == authentication.NodeId.Value && x.IsCurrent &&
                 (x.State == (int)ConvergenceState.Pending || x.State == (int)ConvergenceState.Applying) &&
+                (claudeSkills || x.TargetName != "skills/claude") &&
                 (targetName == null || x.TargetName == targetName))
             .OrderBy(x => x.TargetName).FirstOrDefaultAsync(cancellationToken);
         if (assignment is null) return new(null);
@@ -869,7 +872,7 @@ public sealed partial class PostgresFleetCoordinator(
                 throw Error("invalid_target_descriptor", "Target must be a non-empty relative path below home.");
             if (target.Skills.Count > 10_000 || target.Skills.Select(x => x.Name).Distinct(StringComparer.Ordinal).Count() != target.Skills.Count)
                 throw Error("invalid_skills", "Target Skills exceed the limit or contain duplicate names.");
-            var isSkills = target.TargetName == "skills";
+            var isSkills = target.TargetName is "skills" or "skills/claude";
             var isFile = target.TargetName.StartsWith("agent-file/", StringComparison.Ordinal);
             var isAiClient = target.TargetName.StartsWith("ai-client/", StringComparison.Ordinal);
             if ((isSkills ? 1 : 0) + (isFile ? 1 : 0) + (isAiClient ? 1 : 0) != 1 ||

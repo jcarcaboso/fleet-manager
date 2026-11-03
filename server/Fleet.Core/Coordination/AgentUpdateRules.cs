@@ -9,6 +9,7 @@ public enum AgentCapabilities
     None = 0,
     DiskUsage = 1,
     AgentUpdate = 2,
+    ClaudeSkills = 4,
 }
 
 /// <summary>

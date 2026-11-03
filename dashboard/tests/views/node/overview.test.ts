@@ -260,6 +260,22 @@ describe('the check-in chart (range)', () => {
 });
 
 describe('Installed', () => {
+  it('shows shared and Claude skills destinations with their own states', async () => {
+    t = await openNode('/machines/design-imac');
+    patchNodeResponse(t, 'studio-mini', d => {
+      const shared = d.targets.find((x: any) => x.name === 'skills');
+      d.targets.push({ ...shared, name: 'skills/claude', path: '.claude/skills', state: 'failed' });
+    });
+    await t.go('/machines/studio-mini/installed');
+    await t.until(() => t!.findAll('.panel-head h2').some(heading => heading.text().startsWith('Skills for Claude Code')));
+
+    const panels = t.findAll('.panel').slice(0, 2);
+    expect(panels.map(panel => panel.find('.panel-head h2').text())).toEqual(['Skills 6', 'Skills for Claude Code 6']);
+    expect(panels.map(panel => panel.find('.panel-head .mono').text())).toEqual(['~/.agents/skills', '~/.claude/skills']);
+    expect(panels[1]!.find('.panel-head .stag').text()).toBe('Failed');
+    expect(panels[1]!.findAll('table.tbl tbody tr')).toHaveLength(6);
+  });
+
   it('lists the Skills with digests and copy buttons, the agent files and the AI client connections', async () => {
     t = await openNode('/machines/studio-mini/installed');
     expect(t.text('.panel-head h2')).toBe('Skills 6');

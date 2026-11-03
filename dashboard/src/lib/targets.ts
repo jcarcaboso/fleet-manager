@@ -29,7 +29,7 @@ export const targetClient = (t: TargetLike): string | null => {
 export const targetLabel = (t: TargetLike): string => {
   const kind = targetKind(t.name);
   const client = targetClient(t);
-  if (kind === 'skills') return 'Skills';
+  if (kind === 'skills') return client ? `Skills for ${clientName(client)}` : 'Skills';
   if (kind === 'agent-file') return t.file?.name ? (client ? `${t.file.name} for ${clientName(client)}` : t.file.name) : `${client ? clientName(client) : 'AI client'} agent file`;
   if (kind === 'ai-client') return `${clientName(client)} connection`;
   return String(t.name);
@@ -37,7 +37,7 @@ export const targetLabel = (t: TargetLike): string => {
 export const targetShort = (t: TargetLike): string => {
   const kind = targetKind(t.name);
   const client = targetClient(t);
-  if (kind === 'skills') return 'Skills';
+  if (kind === 'skills') return client ? `${clientShort(client)} Skills` : 'Skills';
   if (kind === 'agent-file') return t.file?.name || `${client ? clientShort(client) : 'Agent'} file`;
   if (kind === 'ai-client') return clientShort(client);
   return String(t.name);

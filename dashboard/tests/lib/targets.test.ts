@@ -7,6 +7,8 @@ import {
 describe('Targets', () => {
   it('derives the kind and client from the name', () => {
     expect(targetKind('skills')).toBe('skills');
+    expect(targetKind('skills/claude')).toBe('skills');
+    expect(targetClient({ name: 'skills/claude' })).toBe('claude');
     expect(targetKind('ai-client/claude')).toBe('ai-client');
     expect(targetClient({ name: 'ai-client/claude' })).toBe('claude');
     expect(targetClient({ name: 'agent-file/codex' })).toBe('codex');
@@ -21,6 +23,7 @@ describe('Targets', () => {
   });
   it('labels Targets', () => {
     expect(targetLabel({ name: 'skills' })).toBe('Skills');
+    expect(targetLabel({ name: 'skills/claude' })).toBe('Skills for Claude Code');
     expect(targetLabel({ name: 'ai-client/claude' })).toBe('Claude Code connection');
     expect(targetLabel({ name: 'agent-file/claude', file: { name: 'CLAUDE.md', bundleDigest: null } })).toBe('CLAUDE.md for Claude Code');
     expect(targetLabel({ name: 'agent-file/claude' })).toBe('Claude Code agent file');
@@ -28,6 +31,7 @@ describe('Targets', () => {
     expect(targetShort({ name: 'ai-client/codex' })).toBe('Codex');
     expect(targetShort({ name: 'agent-file/codex' })).toBe('Codex file');
     expect(targetShort({ name: 'skills' })).toBe('Skills');
+    expect(targetShort({ name: 'skills/claude' })).toBe('Claude Skills');
     expect(targetIcon({ name: 'ai-client/codex' })).toBe('spark');
     expect(targetIcon({ name: 'agent-file/codex' })).toBe('file');
     expect(targetIcon({ name: 'skills' })).toBe('layers');
