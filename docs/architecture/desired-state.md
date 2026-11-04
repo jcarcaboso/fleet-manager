@@ -145,13 +145,24 @@ filename:
 | OpenCode | `.config/opencode/AGENTS.md` |
 | Claude Code | `.claude/CLAUDE.md` |
 
-Nodes selecting Claude Code also receive their resolved Skills at
-`~/.claude/skills`, through a separate `skills/claude` Target. Claude is selected
-by an `agents` entry that includes `claude` or omits `clients`, or by an
-`ai-clients.claude` connection in `fleet/v2`. The configured shared `skills`
-Target remains unchanged for other clients. If it already points at
-`.claude/skills`, no second Target is created. An empty `agents: []` clears
-instruction files but does not select a Claude Skills Target.
+Every Node also receives its resolved Skills at
+`~/.claude/skills/<skill-name>/SKILL.md`, through a separate `skills/claude`
+Target. This does not require `agents` or `ai-clients.claude` configuration.
+In both manifest versions, `targets.skills.excludeClaude` is a boolean that
+defaults to `false`. A Node's value overrides the top-level default; an omitted
+Node value inherits it. Set it to `true` to publish an empty Claude Skills map.
+The Agent removes Skills recorded in its ownership receipt and preserves
+personal Skills and other unowned content, including existing `synced/` content.
+Setting it back to `false` restores the Node's resolved Skills.
+The configured shared `skills` Target remains unchanged for other clients.
+If it already points at `.claude/skills`, no second Target is created, and the
+same exclusion rule empties that Target instead. An empty `agents: []` only
+clears instruction files and does not disable Claude Skills.
+Removing a Skill from an accepted source revision or a Node's resolved selection
+also removes its installed copy from each managed destination. This includes
+removing the last Skill or the optional `skills/` source root when no missing
+groups are explicitly selected. Invalid revisions leave the previous desired
+state active.
 The Server delivers `skills/claude` only to Agents announcing the
 `claude-skills` capability. Older Agents keep receiving their existing Targets;
 the Claude Skills Target remains pending until the Agent is upgraded.

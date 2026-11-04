@@ -462,6 +462,9 @@ mod tests {
         let mut claude = shared.clone();
         claude.target_name = "skills/claude".to_owned();
         claude.target.path = ".claude/skills".to_owned();
+        let bucket = fixture.home.join(".claude/skills/synced/.bucket-personal");
+        std::fs::create_dir_all(bucket.parent().unwrap()).unwrap();
+        std::fs::write(&bucket, b"personal sync metadata").unwrap();
         let registry = Registry::new(&fixture.content, &fixture.ai, &fixture.cache);
 
         assert_eq!(kind_name(&claude.target_name), "skills");
@@ -492,7 +495,45 @@ mod tests {
         fixture.apply(&api, &claude).await.unwrap();
         assert!(!path.exists());
         assert_eq!(std::fs::read(&personal).unwrap(), b"personal");
+        assert_eq!(std::fs::read(&bucket).unwrap(), b"personal sync metadata");
         assert!(fixture.home.join(".agents/skills/alpha/SKILL.md").is_file());
+    }
+
+    #[tokio::test]
+    async fn removed_repository_skills_are_deleted_from_both_destinations() {
+        let fixture = Fixture::new();
+        let api = offline_api();
+        for (target_name, directory) in [
+            ("skills", ".agents/skills"),
+            ("skills/claude", ".claude/skills"),
+        ] {
+            let mut assignment = skill_assignment(&fixture, directory, "removed", false);
+            assignment.target_name = target_name.to_owned();
+            assignment
+                .skills
+                .extend(skill_assignment(&fixture, directory, "kept", false).skills);
+            let personal = fixture.home.join(directory).join("personal/SKILL.md");
+            std::fs::create_dir_all(personal.parent().unwrap()).unwrap();
+            std::fs::write(&personal, b"personal").unwrap();
+            fixture.apply(&api, &assignment).await.unwrap();
+            let removed = fixture.home.join(directory).join("removed");
+            let kept = fixture.home.join(directory).join("kept/SKILL.md");
+            assert!(removed.join("SKILL.md").is_file());
+            assert!(kept.is_file());
+
+            assignment.assignment_id = Uuid::new_v4();
+            assignment.skills.retain(|skill| skill.name == "kept");
+            fixture.apply(&api, &assignment).await.unwrap();
+            assert!(!removed.exists());
+            assert_eq!(std::fs::read(&kept).unwrap(), b"x");
+            assert_eq!(std::fs::read(&personal).unwrap(), b"personal");
+
+            assignment.assignment_id = Uuid::new_v4();
+            assignment.skills.clear();
+            fixture.apply(&api, &assignment).await.unwrap();
+            assert!(!kept.parent().unwrap().exists());
+            assert_eq!(std::fs::read(&personal).unwrap(), b"personal");
+        }
     }
 
     #[tokio::test]

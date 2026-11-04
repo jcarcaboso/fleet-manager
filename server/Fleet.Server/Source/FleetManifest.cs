@@ -33,6 +33,7 @@ internal sealed class ManifestTarget
     public string? Base { get; init; }
     public string? Path { get; init; }
     public List<string>? Groups { get; init; }
+    public bool? ExcludeClaude { get; init; }
 }
 
 internal sealed class ManifestNode
