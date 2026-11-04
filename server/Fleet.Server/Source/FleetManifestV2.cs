@@ -40,6 +40,7 @@ internal sealed class FleetManifestV2Parser : IManifestSchemaParser
         Base = source?.Base,
         Path = source?.Path,
         Groups = source?.Groups,
+        ExcludeClaude = source?.ExcludeClaude,
     };
 }
 
@@ -83,4 +84,5 @@ internal sealed class ManifestTargetV2
     [YamlMember(Alias = "base")] public string? Base { get; init; }
     [YamlMember(Alias = "path")] public string? Path { get; init; }
     [YamlMember(Alias = "groups")] public List<string>? Groups { get; init; }
+    [YamlMember(Alias = "excludeClaude")] public bool? ExcludeClaude { get; init; }
 }

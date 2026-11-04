@@ -7,6 +7,7 @@ targets:
   skills:
     base: home
     path: .agents/skills
+    excludeClaude: false
 
 nodes:
   example-node:

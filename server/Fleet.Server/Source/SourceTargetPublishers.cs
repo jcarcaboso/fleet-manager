@@ -74,13 +74,14 @@ internal static class SourceTargetPublishers
                     skills.TryAdd(skill.Key, new SnapshotSkill(skill.Key, skill.Value.Bundle.Digest));
             var descriptor = new TargetDescriptor("home", target.Path ?? publication.Manifest.Targets.Skills.Path!);
             var resolvedSkills = skills.Values.ToArray();
-            yield return new SnapshotTarget(publication.NodeAliases[pair.Key], "skills", descriptor, resolvedSkills);
+            var excludeClaude = target.ExcludeClaude ?? publication.Manifest.Targets.Skills.ExcludeClaude ?? false;
+            var claudeSkills = excludeClaude ? [] : resolvedSkills;
+            yield return new SnapshotTarget(publication.NodeAliases[pair.Key], "skills", descriptor,
+                descriptor.Path == ".claude/skills" ? claudeSkills : resolvedSkills);
 
-            var usesClaude = pair.Value.Targets.Agents?.Any(agent => agent.Clients is null || agent.Clients.Contains("claude")) == true ||
-                pair.Value.Targets.AiClients?.ContainsKey("claude") == true;
-            if (usesClaude && descriptor.Path != ".claude/skills")
+            if (descriptor.Path != ".claude/skills")
                 yield return new SnapshotTarget(publication.NodeAliases[pair.Key], "skills/claude",
-                    new TargetDescriptor("home", ".claude/skills"), resolvedSkills);
+                    new TargetDescriptor("home", ".claude/skills"), claudeSkills);
         }
     }
 

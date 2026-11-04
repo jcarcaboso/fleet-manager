@@ -59,6 +59,85 @@ public sealed class SourcePublicationTests : IAsyncLifetime
         Assert.Equal("review", skill.Name);
         Assert.Equal(sourceBundle.Digest, skill.BundleDigest);
         Assert.Equal(sourceBundle.Content, (await coordinator.GetBundleAsync(authentication, skill.BundleDigest)).Content);
+
+        await coordinator.ReportAttemptAsync(authentication,
+            new(assignment.AttemptId, ConvergenceState.Succeeded, null, null, DateTimeOffset.UtcNow));
+        Assert.Null((await coordinator.PollAsync(authentication, DateTimeOffset.UtcNow)).Assignment);
+        var claude = Assert.IsType<AgentAssignment>((await coordinator.PollAsync(
+            authentication, DateTimeOffset.UtcNow, AgentCapabilities.ClaudeSkills)).Assignment);
+        Assert.Equal("skills/claude", claude.TargetName);
+        Assert.Equal(new TargetDescriptor("home", ".claude/skills"), claude.Target);
+        Assert.Equal(sourceBundle.Digest, Assert.Single(claude.Skills).BundleDigest);
+    }
+
+    [Theory]
+    [InlineData("fleet/v1", true)]
+    [InlineData("fleet/v2", true)]
+    [InlineData("fleet/v1", false)]
+    [InlineData("fleet/v2", false)]
+    public async Task Exclusion_and_repository_removal_publish_empty_skill_assignments(string schema, bool excludeClaude)
+    {
+        await using var database = Database();
+        var coordinator = Coordinator(database);
+        var nodeId = await EnrollAsync(coordinator, "skills-cleanup-certificate");
+        var authentication = Assert.IsType<NodeAuthentication>(
+            await coordinator.FindActiveNodeByCertificateAsync(Sha("skills-cleanup-certificate")));
+        var source = CreateRepository();
+        var manifest = File.ReadAllText(Path.Combine(source, "fleet.yml"))
+            .Replace("schema: fleet/v1", $"schema: {schema}", StringComparison.Ordinal)
+            .Replace("    path: .agents/skills", "    path: .agents/skills\n    excludeClaude: false", StringComparison.Ordinal)
+            .Replace("        groups:\n          - stable", "        groups: []", StringComparison.Ordinal);
+        Write(source, "fleet.yml", manifest);
+        Git(source, "add", ".");
+        Git(source, "commit", "-m", "configure cleanup test");
+        var scanner = new GitSourceScanner(source, Path.Combine(_files, "cleanup-mirror.git"), new Nodes(nodeId));
+        var initial = Assert.IsType<SourceScanResult.Snapshot>(await scanner.ScanAsync(null, CancellationToken.None));
+        await coordinator.AcceptSourceSnapshotAsync(initial.Value);
+        for (var index = 0; index < 2; index++)
+        {
+            var assignment = Assert.IsType<AgentAssignment>((await coordinator.PollAsync(
+                authentication, DateTimeOffset.UtcNow, AgentCapabilities.ClaudeSkills)).Assignment);
+            Assert.Equal("review", Assert.Single(assignment.Skills).Name);
+            await coordinator.ReportAttemptAsync(authentication,
+                new(assignment.AttemptId, ConvergenceState.Succeeded, null, null, DateTimeOffset.UtcNow));
+        }
+
+        if (excludeClaude)
+            Write(source, "fleet.yml", manifest.Replace("excludeClaude: false", "excludeClaude: true", StringComparison.Ordinal));
+        else
+            Git(source, "rm", "-r", "skills");
+        Git(source, "add", ".");
+        Git(source, "commit", "-m", "remove managed skills");
+        var cleanup = Assert.IsType<SourceScanResult.Snapshot>(
+            await scanner.ScanAsync(initial.Value.SourceRevision, CancellationToken.None));
+        var publication = await coordinator.AcceptSourceSnapshotAsync(cleanup.Value);
+        Assert.Equal(excludeClaude ? 1 : 2, publication.ChangedAssignmentCount);
+        string[] targets = excludeClaude ? ["skills/claude"] : ["skills", "skills/claude"];
+        foreach (var target in targets)
+        {
+            var assignment = Assert.IsType<AgentAssignment>((await coordinator.PollAsync(
+                authentication, DateTimeOffset.UtcNow, AgentCapabilities.ClaudeSkills)).Assignment);
+            Assert.Equal(target, assignment.TargetName);
+            Assert.Empty(assignment.Skills);
+            await coordinator.ReportAttemptAsync(authentication,
+                new(assignment.AttemptId, ConvergenceState.Succeeded, null, null, DateTimeOffset.UtcNow));
+        }
+        Assert.Null((await coordinator.PollAsync(
+            authentication, DateTimeOffset.UtcNow, AgentCapabilities.ClaudeSkills)).Assignment);
+
+        if (excludeClaude)
+        {
+            Write(source, "fleet.yml", manifest);
+            Git(source, "add", ".");
+            Git(source, "commit", "-m", "include Claude skills again");
+            var restored = Assert.IsType<SourceScanResult.Snapshot>(
+                await scanner.ScanAsync(cleanup.Value.SourceRevision, CancellationToken.None));
+            Assert.Equal(1, (await coordinator.AcceptSourceSnapshotAsync(restored.Value)).ChangedAssignmentCount);
+            var assignment = Assert.IsType<AgentAssignment>((await coordinator.PollAsync(
+                authentication, DateTimeOffset.UtcNow, AgentCapabilities.ClaudeSkills)).Assignment);
+            Assert.Equal("skills/claude", assignment.TargetName);
+            Assert.Equal("review", Assert.Single(assignment.Skills).Name);
+        }
     }
 
     [Theory]
@@ -109,7 +188,7 @@ public sealed class SourcePublicationTests : IAsyncLifetime
         var authentication = new NodeAuthentication(nodeId, credentialId, certificateDigest);
         AgentAssignment? clientFile = null;
         AgentAssignment? claudeSkills = null;
-        for (var index = 0; index < (client == "claude" ? 3 : 2); index++)
+        for (var index = 0; index < 3; index++)
         {
             var assignment = Assert.IsType<AgentAssignment>((await coordinator.PollAsync(
                 authentication, DateTimeOffset.UtcNow, AgentCapabilities.ClaudeSkills)).Assignment);
@@ -125,19 +204,12 @@ public sealed class SourcePublicationTests : IAsyncLifetime
         Assert.Equal("fleet.file/v1", clientFile.File.Schema);
         var content = await coordinator.GetBundleAsync(authentication, clientFile.File.BundleDigest!);
         Assert.Equal("# Fleet instructions\n"u8.ToArray(), content.Content);
-        if (client == "claude")
-        {
-            Assert.NotNull(claudeSkills);
-            Assert.Equal(new TargetDescriptor("home", ".claude/skills"), claudeSkills.Target);
-            var skill = Assert.Single(claudeSkills.Skills);
-            Assert.Equal("review", skill.Name);
-            var bundle = await coordinator.GetBundleAsync(authentication, skill.BundleDigest);
-            Assert.Equal(scan.Value.Bundles.Single(candidate => candidate.Digest == skill.BundleDigest).Content, bundle.Content);
-        }
-        else
-        {
-            Assert.Null(claudeSkills);
-        }
+        Assert.NotNull(claudeSkills);
+        Assert.Equal(new TargetDescriptor("home", ".claude/skills"), claudeSkills.Target);
+        var skill = Assert.Single(claudeSkills.Skills);
+        Assert.Equal("review", skill.Name);
+        var bundle = await coordinator.GetBundleAsync(authentication, skill.BundleDigest);
+        Assert.Equal(scan.Value.Bundles.Single(candidate => candidate.Digest == skill.BundleDigest).Content, bundle.Content);
     }
 
     [Fact]

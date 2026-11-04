@@ -25,7 +25,7 @@ public sealed class SourceGitSourceScannerTests : IDisposable
 
         var scanner = Scanner(repository);
         var first = Assert.IsType<SourceScanResult.Snapshot>(await scanner.ScanAsync(null, CancellationToken.None));
-        var target = Assert.Single(first.Value.Targets);
+        var target = Assert.Single(first.Value.Targets, target => target.TargetName == "skills");
         Assert.Equal(_nodeId, target.NodeId);
         Assert.Equal(first.Value.Bundles.Single(x => x.Digest == Assert.Single(target.Skills).BundleDigest).Digest, target.Skills[0].BundleDigest);
         var warning = Assert.Single(first.Value.Warnings, x => x.Code == "duplicate_skill_name");
@@ -97,7 +97,7 @@ public sealed class SourceGitSourceScannerTests : IDisposable
 
         var snapshot = Assert.IsType<SourceScanResult.Snapshot>(
             await Scanner(repository).ScanAsync(null, CancellationToken.None));
-        var skill = Assert.Single(Assert.Single(snapshot.Value.Targets).Skills);
+        var skill = Assert.Single(Assert.Single(snapshot.Value.Targets, target => target.TargetName == "skills").Skills);
         var bundle = snapshot.Value.Bundles.Single(x => x.Digest == skill.BundleDigest);
 
         Assert.True(bundle.Content.AsSpan().EndsWith("alpha"u8));
@@ -149,7 +149,7 @@ public sealed class SourceGitSourceScannerTests : IDisposable
 
         var snapshot = Assert.IsType<SourceScanResult.Snapshot>(
             await Scanner(repository).ScanAsync(null, CancellationToken.None));
-        var target = Assert.Single(snapshot.Value.Targets);
+        var target = Assert.Single(snapshot.Value.Targets, target => target.TargetName == "skills");
 
         Assert.Equal(missingDirectory == "agents" ? ["review"] : [], target.Skills.Select(x => x.Name));
         Assert.DoesNotContain(snapshot.Value.Targets, x => x.File is not null);
@@ -250,16 +250,19 @@ public sealed class SourceGitSourceScannerTests : IDisposable
     }
 
     [Theory]
-    [InlineData("fleet/v1", "      agents:\n        - source: personal\n          clients: [claude]\n", true)]
-    [InlineData("fleet/v1", "      agents:\n        - source: personal\n          clients: [codex, claude]\n", true)]
-    [InlineData("fleet/v1", "      agents:\n        - source: personal\n", true)]
-    [InlineData("fleet/v1", "      agents:\n        - source: personal\n          clients: [codex, opencode]\n", false)]
-    [InlineData("fleet/v1", "      agents: []\n", false)]
-    [InlineData("fleet/v1", "", false)]
-    [InlineData("fleet/v2", "      ai-clients:\n        claude:\n          mode: native\n", true)]
-    [InlineData("fleet/v2", "      ai-clients:\n        claude:\n          mode: cliproxy\n", true)]
-    [InlineData("fleet/v2", "      agents:\n        - source: personal\n          clients: [claude]\n      ai-clients:\n        claude:\n          mode: native\n", true)]
-    public async Task Claude_receives_the_same_resolved_skills_in_its_own_directory(string schema, string nodeTargets, bool usesClaude)
+    [InlineData("fleet/v1", "      agents:\n        - source: personal\n          clients: [claude]\n")]
+    [InlineData("fleet/v1", "      agents:\n        - source: personal\n          clients: [codex, claude]\n")]
+    [InlineData("fleet/v1", "      agents:\n        - source: personal\n")]
+    [InlineData("fleet/v1", "      agents:\n        - source: personal\n          clients: [codex, opencode]\n")]
+    [InlineData("fleet/v1", "      agents: []\n")]
+    [InlineData("fleet/v1", "")]
+    [InlineData("fleet/v2", "")]
+    [InlineData("fleet/v2", "      agents: []\n")]
+    [InlineData("fleet/v2", "      ai-clients:\n        codex:\n          mode: native\n")]
+    [InlineData("fleet/v2", "      ai-clients:\n        claude:\n          mode: native\n")]
+    [InlineData("fleet/v2", "      ai-clients:\n        claude:\n          mode: cliproxy\n")]
+    [InlineData("fleet/v2", "      agents:\n        - source: personal\n          clients: [claude]\n      ai-clients:\n        claude:\n          mode: native\n")]
+    public async Task Claude_receives_the_same_resolved_skills_independently_of_other_targets(string schema, string nodeTargets)
     {
         var repository = CreateRepository();
         var manifest = Manifest(["preferred", "fallback"]).Replace("schema: fleet/v1", $"schema: {schema}", StringComparison.Ordinal);
@@ -278,29 +281,91 @@ public sealed class SourceGitSourceScannerTests : IDisposable
         var shared = Assert.Single(snapshot.Value.Targets, target => target.TargetName == "skills");
         Assert.Equal(".agents/skills", shared.Descriptor.Path);
         Assert.Equal(["review", "deploy"], shared.Skills.Select(skill => skill.Name));
-        var claude = snapshot.Value.Targets.Where(target => target.TargetName == "skills/claude").ToArray();
-        if (usesClaude)
+        var claude = Assert.Single(snapshot.Value.Targets, target => target.TargetName == "skills/claude");
+        Assert.Equal(_nodeId, claude.NodeId);
+        Assert.Equal(new TargetDescriptor("home", ".claude/skills"), claude.Descriptor);
+        Assert.Equal(shared.Skills, claude.Skills);
+    }
+
+    [Theory]
+    [InlineData("fleet/v1", "")]
+    [InlineData("fleet/v1", "      agents:\n        - source: personal\n          clients: [claude]\n")]
+    [InlineData("fleet/v2", "")]
+    [InlineData("fleet/v2", "      ai-clients:\n        claude:\n          mode: native\n")]
+    public async Task Exclude_Claude_inherits_the_default_and_allows_node_overrides(string schema, string nodeTargets)
+    {
+        var repository = CreateRepository();
+        Write(repository, "agents/personal/AGENTS.md", "# Personal instructions\n");
+        Write(repository, "skills/stable/review/SKILL.md", "# Review\n");
+        foreach (var (defaultValue, nodeValue, excluded) in new (bool?, bool?, bool)[]
         {
-            var target = Assert.Single(claude);
-            Assert.Equal(_nodeId, target.NodeId);
-            Assert.Equal(new TargetDescriptor("home", ".claude/skills"), target.Descriptor);
-            Assert.Equal(shared.Skills, target.Skills);
-        }
-        else
+            (null, null, false),
+            (false, null, false),
+            (true, null, true),
+            (null, false, false),
+            (null, true, true),
+            (false, true, true),
+            (true, false, false),
+            (true, true, true),
+        })
         {
-            Assert.Empty(claude);
+            var manifest = Manifest([]).Replace("schema: fleet/v1", $"schema: {schema}", StringComparison.Ordinal);
+            if (defaultValue is { } defaultExclude)
+                manifest = manifest.Replace("    path: .agents/skills\n",
+                    $"    path: .agents/skills\n    excludeClaude: {defaultExclude.ToString().ToLowerInvariant()}\n", StringComparison.Ordinal);
+            if (nodeValue is { } nodeExclude)
+                manifest = manifest.Replace("        groups: []\n",
+                    $"        groups: []\n        excludeClaude: {nodeExclude.ToString().ToLowerInvariant()}\n", StringComparison.Ordinal);
+            Write(repository, "fleet.yml", manifest + nodeTargets);
+            Commit(repository, "Claude skills exclusion");
+
+            var snapshot = Assert.IsType<SourceScanResult.Snapshot>(
+                await Scanner(repository).ScanAsync(null, CancellationToken.None));
+
+            var shared = Assert.Single(snapshot.Value.Targets, target => target.TargetName == "skills");
+            Assert.Equal("review", Assert.Single(shared.Skills).Name);
+            var claude = Assert.Single(snapshot.Value.Targets, target => target.TargetName == "skills/claude");
+            Assert.Equal(new TargetDescriptor("home", ".claude/skills"), claude.Descriptor);
+            Assert.Equal(excluded ? [] : shared.Skills, claude.Skills);
+            Assert.Equal(nodeTargets.Contains("      agents:", StringComparison.Ordinal),
+                snapshot.Value.Targets.Any(target => target.TargetName == "agent-file/claude"));
+            Assert.Equal(nodeTargets.Contains("      ai-clients:", StringComparison.Ordinal),
+                snapshot.Value.Targets.Any(target => target.TargetName == "ai-client/claude"));
         }
     }
 
-    [Fact]
-    public async Task A_skills_target_already_in_the_Claude_directory_is_not_duplicated()
+    [Theory]
+    [InlineData("fleet/v1", "    path: .agents/skills\n")]
+    [InlineData("fleet/v1", "        groups: []\n")]
+    [InlineData("fleet/v2", "    path: .agents/skills\n")]
+    [InlineData("fleet/v2", "        groups: []\n")]
+    public async Task Exclude_Claude_rejects_non_boolean_values(string schema, string location)
     {
         var repository = CreateRepository();
-        Write(repository, "fleet.yml", Manifest([]).Replace(
+        var manifest = Manifest([]).Replace("schema: fleet/v1", $"schema: {schema}", StringComparison.Ordinal);
+        var indentation = location[..location.IndexOf(location.TrimStart(), StringComparison.Ordinal)];
+        Write(repository, "fleet.yml", manifest.Replace(location,
+            $"{location}{indentation}excludeClaude: not-a-boolean\n", StringComparison.Ordinal));
+        Commit(repository, "invalid Claude exclusion");
+
+        var invalid = Assert.IsType<SourceScanResult.Invalid>(
+            await Scanner(repository).ScanAsync(null, CancellationToken.None));
+
+        Assert.Contains(invalid.Diagnostics, diagnostic => diagnostic.Code == "invalid_manifest");
+    }
+
+    [Theory]
+    [InlineData("fleet/v1", false)]
+    [InlineData("fleet/v1", true)]
+    [InlineData("fleet/v2", false)]
+    [InlineData("fleet/v2", true)]
+    public async Task A_skills_target_already_in_the_Claude_directory_is_not_duplicated(string schema, bool excludeClaude)
+    {
+        var repository = CreateRepository();
+        Write(repository, "fleet.yml", Manifest([]).Replace("schema: fleet/v1", $"schema: {schema}", StringComparison.Ordinal).Replace(
             "        groups: []\n",
-            "        groups: []\n        path: .claude/skills\n      agents:\n        - source: personal\n          clients: [claude]\n",
+            $"        groups: []\n        path: .claude/skills\n        excludeClaude: {excludeClaude.ToString().ToLowerInvariant()}\n",
             StringComparison.Ordinal));
-        Write(repository, "agents/personal/AGENTS.md", "# Personal instructions\n");
         Write(repository, "skills/stable/review/SKILL.md", "# Review\n");
         Commit(repository, "existing Claude skills destination");
 
@@ -310,7 +375,7 @@ public sealed class SourceGitSourceScannerTests : IDisposable
         var target = Assert.Single(snapshot.Value.Targets, target => target.File is null);
         Assert.Equal("skills", target.TargetName);
         Assert.Equal(".claude/skills", target.Descriptor.Path);
-        Assert.Equal("review", Assert.Single(target.Skills).Name);
+        Assert.Equal(excludeClaude ? [] : ["review"], target.Skills.Select(skill => skill.Name));
     }
 
     [Fact]

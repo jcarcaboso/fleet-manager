@@ -36,7 +36,7 @@ migrations with Docker Compose. The dashboard is its own image and container
 7444 next to the Server's 7443. Follow the
 [homelab setup](deploy/homelab/README.md) for a first installation.
 
-The amd64 Server image is `skorcius/fleet-manager:0.12.2`.
+The amd64 Server image is `skorcius/fleet-manager:0.12.3`.
 For an existing installation, back up PostgreSQL and private configuration,
 replace `compose.yaml` with the current release copy, and preserve `.env`, `secrets/`,
 `operator.env`, `ssh/`, and Docker volumes. Set the image in `.env`, then run:
@@ -189,6 +189,16 @@ A nonempty array selects those groups and defines their duplicate-Skill
 precedence. The `skills/` and `agents/` roots are independent and optional. An
 absent root contributes no content of that type.
 
+Fleet also publishes each Node's resolved Skills to
+`~/.claude/skills/<skill-name>/SKILL.md`, independently of agent instruction files
+and AI client connections. In both `fleet/v1` and `fleet/v2`, the boolean
+`targets.skills.excludeClaude` defaults to `false`. Set it to `true` to remove
+Fleet-managed Claude Skills while preserving personal Skills and other unowned
+content. A Node's `targets.skills.excludeClaude` overrides the top-level default.
+The shared Skills Target is unchanged unless it also points at `.claude/skills`.
+Skills removed from an accepted source revision or a Node's resolved selection
+are also removed from its managed destinations.
+
 Repositories using the earlier layout must move `groups/<group>/<skill>/` to
 `skills/<group>/<skill>/` and remove the top-level `groups` field from
 `fleet.yml` in the same commit. The Server rejects the legacy layout to prevent
@@ -318,6 +328,7 @@ The main design references are:
 - [Fleet Manager 0.12.0 release notes](docs/releases/0.12.0.md)
 - [Fleet Manager 0.12.1 release notes](docs/releases/0.12.1.md)
 - [Fleet Manager 0.12.2 release notes](docs/releases/0.12.2.md)
+- [Fleet Manager 0.12.3 release notes](docs/releases/0.12.3.md)
 - [Project release skill](.agents/skills/fleet-release/SKILL.md)
 - [Fleet Manager 0.6.5 release notes](docs/releases/0.6.5.md)
 - [Fleet Manager 0.5.0 release notes](docs/releases/0.5.0.md)
