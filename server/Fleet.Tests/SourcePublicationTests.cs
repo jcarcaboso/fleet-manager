@@ -5,6 +5,8 @@ using Fleet.Core.Coordination;
 using Fleet.Server.Persistence;
 using Fleet.Server.Source;
 using Microsoft.EntityFrameworkCore;
+using Microsoft.EntityFrameworkCore.Infrastructure;
+using Microsoft.EntityFrameworkCore.Migrations;
 using Testcontainers.PostgreSql;
 
 namespace Fleet.Tests;
@@ -19,7 +21,7 @@ public sealed class SourcePublicationTests : IAsyncLifetime
     {
         await _postgres.StartAsync();
         await using var database = Database();
-        await database.Database.EnsureCreatedAsync();
+        await database.Database.MigrateAsync();
     }
 
     public async Task DisposeAsync()
@@ -68,6 +70,75 @@ public sealed class SourcePublicationTests : IAsyncLifetime
         Assert.Equal("skills/claude", claude.TargetName);
         Assert.Equal(new TargetDescriptor("home", ".claude/skills"), claude.Target);
         Assert.Equal(sourceBundle.Digest, Assert.Single(claude.Skills).BundleDigest);
+    }
+
+    [Theory]
+    [InlineData(false, false)]
+    [InlineData(true, false)]
+    [InlineData(false, true)]
+    [InlineData(true, true)]
+    public async Task A_server_upgrade_rechecks_the_same_commit_without_reinstalling_unchanged_targets(
+        bool succeeded, bool claudeAlreadyPublished)
+    {
+        await using var database = Database();
+        var coordinator = Coordinator(database);
+        var nodeId = await EnrollAsync(coordinator, "upgrade-certificate");
+        var authentication = Assert.IsType<NodeAuthentication>(
+            await coordinator.FindActiveNodeByCertificateAsync(Sha("upgrade-certificate")));
+        var source = CreateRepository();
+        var scanner = new GitSourceScanner(source, Path.Combine(_files, "upgrade-mirror.git"), new Nodes(nodeId));
+        var scan = Assert.IsType<SourceScanResult.Snapshot>(await scanner.ScanAsync(null, CancellationToken.None));
+        var previous = await coordinator.AcceptSourceSnapshotAsync(scan.Value with
+        {
+            Targets = scan.Value.Targets.Where(target => claudeAlreadyPublished || target.TargetName != "skills/claude").ToArray()
+        });
+        var skills = Assert.IsType<AgentAssignment>((await coordinator.PollAsync(authentication, DateTimeOffset.UtcNow)).Assignment);
+        if (succeeded)
+            await coordinator.ReportAttemptAsync(authentication,
+                new(skills.AttemptId, ConvergenceState.Succeeded, null, null, DateTimeOffset.UtcNow));
+
+        // Restore the pre-upgrade schema, then apply the migration to existing data.
+        await using (var upgrade = Database())
+        {
+            await upgrade.GetService<IMigrator>().MigrateAsync("20261029120000_AddAgentUpdates");
+        }
+        await using (var upgrade = Database())
+        {
+            await upgrade.Database.MigrateAsync();
+        }
+        database.ChangeTracker.Clear();
+        Assert.Equal(1, (await database.DesiredRevisions.AsNoTracking().SingleAsync()).PublicationVersion);
+
+        // A restarted Server scans the same commit with the new target publisher.
+        var rescanned = Assert.IsType<SourceScanResult.Snapshot>(await scanner.ScanAsync(null, CancellationToken.None));
+        Assert.Equal(scan.Value.SourceRevision, rescanned.Value.SourceRevision);
+        var publication = await coordinator.AcceptSourceSnapshotAsync(rescanned.Value);
+        Assert.Equal(PublicationOutcome.Accepted, publication.Outcome);
+        Assert.NotEqual(previous.DesiredRevisionId, publication.DesiredRevisionId);
+        Assert.Equal(claudeAlreadyPublished ? 0 : 1, publication.ChangedAssignmentCount);
+        if (claudeAlreadyPublished) Assert.Null(publication.RolloutId);
+        Assert.Equal(skills.AssignmentId.Value, (await database.Assignments.AsNoTracking()
+            .SingleAsync(row => row.TargetName == "skills" && row.IsCurrent)).Id);
+        Assert.Equal(succeeded ? (int)ConvergenceState.Succeeded : (int)ConvergenceState.Pending,
+            (await database.Assignments.AsNoTracking().SingleAsync(row => row.Id == skills.AssignmentId.Value)).State);
+
+        if (!succeeded)
+            await coordinator.ReportAttemptAsync(authentication,
+                new(skills.AttemptId, ConvergenceState.Succeeded, null, null, DateTimeOffset.UtcNow));
+        var claude = Assert.IsType<AgentAssignment>((await coordinator.PollAsync(
+            authentication, DateTimeOffset.UtcNow, AgentCapabilities.ClaudeSkills)).Assignment);
+        Assert.Equal("skills/claude", claude.TargetName);
+        Assert.Equal(new TargetDescriptor("home", ".claude/skills"), claude.Target);
+        Assert.Equal(Assert.Single(skills.Skills).BundleDigest, Assert.Single(claude.Skills).BundleDigest);
+        await coordinator.ReportAttemptAsync(authentication,
+            new(claude.AttemptId, ConvergenceState.Succeeded, null, null, DateTimeOffset.UtcNow));
+        var repeated = await coordinator.AcceptSourceSnapshotAsync(rescanned.Value);
+        Assert.Equal(PublicationOutcome.Unchanged, repeated.Outcome);
+        Assert.Equal(publication.DesiredRevisionId, repeated.DesiredRevisionId);
+        Assert.Equal(2, await database.DesiredRevisions.CountAsync());
+        Assert.Equal(2, await database.Assignments.CountAsync());
+        Assert.Null((await coordinator.PollAsync(
+            authentication, DateTimeOffset.UtcNow, AgentCapabilities.ClaudeSkills)).Assignment);
     }
 
     [Theory]

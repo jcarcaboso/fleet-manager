@@ -94,7 +94,9 @@ public sealed class FleetDbContext(DbContextOptions<FleetDbContext> options) : D
         model.Entity<DesiredRevisionRow>().ToTable("desired_revisions").HasKey(x => x.Id);
         model.Entity<DesiredRevisionRow>().Property(x => x.CommitSubject).HasMaxLength(CommitMetadataRules.MaximumSubjectLength);
         model.Entity<DesiredRevisionRow>().Property(x => x.CommitAuthor).HasMaxLength(CommitMetadataRules.MaximumAuthorLength);
-        model.Entity<DesiredRevisionRow>().HasIndex(x => new { x.WorkspaceId, x.SourceRevision }).IsUnique();
+        model.Entity<DesiredRevisionRow>().Property(x => x.PublicationVersion).HasDefaultValue(1);
+        model.Entity<DesiredRevisionRow>().HasIndex(x => new { x.WorkspaceId, x.SourceRevision, x.PublicationVersion })
+            .HasDatabaseName("IX_desired_revisions_SourcePublication").IsUnique();
         model.Entity<DesiredRevisionRow>().HasIndex(x => new { x.WorkspaceId, x.AcceptedAt, x.Id });
         model.Entity<DesiredRevisionRow>().HasOne<WorkspaceRow>().WithMany().HasForeignKey(x => x.WorkspaceId).OnDelete(DeleteBehavior.Cascade);
         model.Entity<WarningRow>().ToTable("source_warnings").HasKey(x => x.Id);
@@ -239,6 +241,7 @@ public sealed class DesiredRevisionRow
     public Guid Id { get; set; }
     public Guid WorkspaceId { get; set; }
     public required string SourceRevision { get; set; }
+    public int PublicationVersion { get; set; } = 1;
     public DateTimeOffset AcceptedAt { get; set; }
     // The tip commit, read when the scan accepted the revision. Null for older revisions and when Git could not be read. No email.
     public string? CommitSubject { get; set; }
