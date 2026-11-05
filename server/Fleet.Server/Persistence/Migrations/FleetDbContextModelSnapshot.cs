@@ -377,6 +377,11 @@ namespace Fleet.Server.Persistence.Migrations
                     b.Property<DateTimeOffset?>("CommittedAt")
                         .HasColumnType("timestamp with time zone");
 
+                    b.Property<int>("PublicationVersion")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("integer")
+                        .HasDefaultValue(1);
+
                     b.Property<string>("SourceRevision")
                         .IsRequired()
                         .HasColumnType("text");
@@ -388,8 +393,9 @@ namespace Fleet.Server.Persistence.Migrations
 
                     b.HasIndex("WorkspaceId", "AcceptedAt", "Id");
 
-                    b.HasIndex("WorkspaceId", "SourceRevision")
-                        .IsUnique();
+                    b.HasIndex("WorkspaceId", "SourceRevision", "PublicationVersion")
+                        .IsUnique()
+                        .HasDatabaseName("IX_desired_revisions_SourcePublication");
 
                     b.ToTable("desired_revisions", (string)null);
                 });

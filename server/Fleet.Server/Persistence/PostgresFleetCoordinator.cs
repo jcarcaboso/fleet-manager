@@ -15,6 +15,10 @@ public sealed partial class PostgresFleetCoordinator(
     FleetCoordinationOptions options,
     ILogger<PostgresFleetCoordinator>? logger = null) : IFleetCoordinator
 {
+    // Bump when source resolution changes so a Server upgrade can publish new Targets
+    // from the same Git commit. Version 2 adds the default skills/claude Target.
+    private const int PublicationVersion = 2;
+
     public async Task<EnrollmentAuthorization> CreateEnrollmentAuthorizationAsync(
         CreateEnrollmentAuthorization command, CancellationToken cancellationToken = default)
     {
@@ -315,7 +319,8 @@ public sealed partial class PostgresFleetCoordinator(
         await EnsureWorkspace(cancellationToken);
         await db.Database.ExecuteSqlRawAsync("SELECT pg_advisory_xact_lock(1179403596)", cancellationToken);
         var existing = await db.DesiredRevisions.AsNoTracking().SingleOrDefaultAsync(
-            x => x.WorkspaceId == options.WorkspaceId.Value && x.SourceRevision == snapshot.SourceRevision, cancellationToken);
+            x => x.WorkspaceId == options.WorkspaceId.Value && x.SourceRevision == snapshot.SourceRevision &&
+                 x.PublicationVersion == PublicationVersion, cancellationToken);
         if (existing is not null)
             return new(PublicationOutcome.Unchanged, snapshot.SourceRevision, new(existing.Id), null, 0);
 
@@ -352,6 +357,7 @@ public sealed partial class PostgresFleetCoordinator(
             Id = Guid.NewGuid(),
             WorkspaceId = options.WorkspaceId.Value,
             SourceRevision = snapshot.SourceRevision,
+            PublicationVersion = PublicationVersion,
             AcceptedAt = snapshot.ObservedAt,
             CommitSubject = commit?.Subject,
             CommitAuthor = commit?.Author,

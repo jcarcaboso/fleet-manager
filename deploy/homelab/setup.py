@@ -18,8 +18,8 @@ import shlex
 import subprocess
 import uuid
 
-SERVER_IMAGE = 'skorcius/fleet-manager:0.12.3'
-DASHBOARD_IMAGE = 'skorcius/fleet-manager:dashboard-0.12.3'
+SERVER_IMAGE = 'skorcius/fleet-manager:0.13.0'
+DASHBOARD_IMAGE = 'skorcius/fleet-manager:dashboard-0.13.0'
 # Agents keep the CA they enrolled with, so a short CA lifetime protects nothing and only adds a step. Certificates stay short.
 CA_DAYS = 3650
 CERTIFICATE_DAYS = 90
