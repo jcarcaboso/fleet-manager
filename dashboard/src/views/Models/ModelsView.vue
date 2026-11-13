@@ -166,7 +166,7 @@ async function refreshModels(): Promise<void> {
     const good = all.length - bad.length;
     shared.lastRefresh = bad.length
       ? { level: 'warning', kind: 'bang', label: 'Refreshed', text: `Refreshed. ${good} catalog${good === 1 ? '' : 's'} updated; ${bad.map(c => `${hostOf(c.baseUrl)} still fails (${c.errorCode || 'refresh_failed'})`).join(', ')}.` }
-      : { level: 'good', kind: 'check', label: 'Refreshed', text: all.length ? 'Refreshed. All catalogs updated.' : 'Refreshed. No catalogs are in use yet.' };
+      : { level: 'good', kind: 'check', label: 'Refreshed', text: all.length ? 'Refreshed. All catalogs updated.' : 'Refreshed. No catalogs yet. Set cliproxy.base-url in fleet.yml and sync the repository.' };
     toasts.push(bad.length ? 'A catalog is still failing' : 'Model catalogs refreshed', { tone: bad.length ? 'warning' : 'good', text: shared.lastRefresh.text });
     if (tok?.isCurrent()) { status.value = st; await loadSelection(tok); } else reloaded = true;
   } catch (e) {
@@ -200,7 +200,7 @@ async function refreshModels(): Promise<void> {
         <StatusGlyph level="warning" kind="bang" />
         <div><b>Model sync is disabled</b><p>Configure the CLIProxy API key on the Server to fetch model catalogs.</p></div>
       </div>
-      <EmptyState v-else-if="!cats.length" icon="spark" title="No CLIProxy catalogs yet" text="Catalogs appear once an active machine is assigned an AI client that uses CLIProxy. Enable one in the repository and sync it first." />
+      <EmptyState v-else-if="!cats.length" icon="spark" title="No CLIProxy catalogs yet" text="Set cliproxy.base-url in fleet.yml and sync the repository. The catalog appears on the next refresh; no machine is needed." />
       <div v-if="cats.length" class="cols">
         <section v-for="c in cats" :key="c.baseUrl" class="panel cat" :class="{ 'cat--err': !ok(c) }">
           <header class="cat-head">
@@ -266,7 +266,7 @@ async function refreshModels(): Promise<void> {
             <ScopeButton level="operate" cls="btn-primary btn-sm" data-act="sel-save" :disabled="!isDirty(entry) || saving" @click="save()">{{ saving ? 'Saving…' : 'Save selection' }}</ScopeButton>
           </div>
         </template>
-        <div v-else-if="!selErr" class="empty-mini"><Icon name="spark" /><p>No model selections are available. Refresh models after assigning CLIProxy to an active machine.</p></div>
+        <div v-else-if="!selErr" class="empty-mini"><Icon name="spark" /><p>No model selections are available. Set cliproxy.base-url in fleet.yml, sync the repository, then refresh models.</p></div>
       </section>
     </template>
   </div>

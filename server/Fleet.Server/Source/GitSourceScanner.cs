@@ -88,7 +88,8 @@ public sealed class GitSourceScanner(
                     : [])
                 .DistinctBy(x => x.Digest, StringComparer.Ordinal).OrderBy(x => x.Digest, StringComparer.Ordinal).ToArray();
             var commit = await ReadCommitMetadataAsync(revision, scanToken);
-            return new SourceScanResult.Snapshot(new AcceptedSourceSnapshot(revision, bundles, targets, warnings, DateTimeOffset.UtcNow, commit));
+            SourceTargetPublishers.TryNormalizeCliProxyBaseUrl(manifest.CliProxy?.BaseUrl, out var cliProxyBaseUrl);
+            return new SourceScanResult.Snapshot(new AcceptedSourceSnapshot(revision, bundles, targets, warnings, DateTimeOffset.UtcNow, commit), cliProxyBaseUrl);
         }
         catch (Exception exception) when (exception is GitSourceException or IOException or UnauthorizedAccessException or DecoderFallbackException or FormatException or OverflowException)
         {

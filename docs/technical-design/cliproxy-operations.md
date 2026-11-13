@@ -42,11 +42,18 @@ needed. The endpoint must use HTTPS and end at `/v1`.
 
 The Server fetches `/v1/models?client_version=0.154.0`, which requests CLIProxy's
 Codex catalog with advertised reasoning efforts and context limits. A background
-service discovers endpoints assigned to active Nodes within 30 seconds and
+service discovers two kinds of endpoint within 30 seconds: the `cliproxy.base-url`
+of the last accepted source snapshot, and endpoints assigned to active Nodes. It
 refreshes each catalog weekly, independently of repository polling and Agent
-requests. It only calls
-CLIProxy when a key and at least one current proxy Assignment are configured.
+requests. It only calls CLIProxy when a key and at least one such endpoint are
+configured. No enrolled Node is needed: once `fleet.yml` declares the endpoint
+and the repository has synced, the dashboard lists its models and accepts a
+model selection. A catalog is dropped when neither the source nor a current
+Assignment uses its endpoint.
 The catalog is cached in memory; a Server restart triggers fresh discovery.
+The Server also keeps the source's endpoint in memory and reads it again from
+the repository scan at startup. Until that scan succeeds, only assigned
+endpoints have a catalog.
 Assigned Nodes retrieve the cached catalog from
 `GET /agent/v1/cliproxy/models` over mTLS during their normal reconciliation.
 Catalog changes do not require a YAML commit. The response includes the endpoint
@@ -209,7 +216,10 @@ The dashboard's **Problems** page, `GET issues` in the
 check current assignments and Server records. They identify missing CLIProxy
 credentials only when active Nodes require them, initial discovery still
 waiting, failed upstream refreshes, missing or failed repository sync, stale
-Node check-ins, and failed current Assignments. Each issue includes a recovery
+Node check-ins, and failed current Assignments. CLIProxy issues cover only
+endpoints with a current Assignment. A failed refresh of an endpoint that no
+Node uses yet appears on the **Models** page and in `GET cliproxy/status`, not
+as a Problem. Each issue includes a recovery
 step and the `fleet` commands that inspect or fix it. Revoked Nodes and
 historical assignment failures are excluded.
 
