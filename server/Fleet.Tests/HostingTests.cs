@@ -184,6 +184,70 @@ public sealed class HostingTests : IAsyncLifetime
     }
 
     [Fact]
+    public async Task CLIProxy_catalog_of_the_source_base_url_is_available_before_any_node_is_assigned()
+    {
+        var repository = Path.Combine(_directory, "source");
+        Directory.CreateDirectory(repository);
+        await File.WriteAllTextAsync(Path.Combine(repository, "fleet.yml"), """
+            schema: fleet/v2
+            cliproxy:
+              base-url: https://proxy.example
+            targets:
+              skills:
+                base: home
+                path: .agents/skills
+            nodes: {}
+
+            """);
+        foreach (var arguments in new string[][] { ["init", "-b", "main"], ["add", "fleet.yml"],
+                     ["-c", "user.email=fixture@example.invalid", "-c", "user.name=Fleet Fixture", "commit", "-m", "proxy without nodes"] })
+        {
+            var start = new System.Diagnostics.ProcessStartInfo("git") { WorkingDirectory = repository, RedirectStandardError = true, RedirectStandardOutput = true };
+            foreach (var argument in arguments) start.ArgumentList.Add(argument);
+            using var git = System.Diagnostics.Process.Start(start)!;
+            var error = await git.StandardError.ReadToEndAsync();
+            await git.WaitForExitAsync();
+            Assert.True(git.ExitCode == 0, error);
+        }
+        await using var factory = _factory.WithWebHostBuilder(builder => builder.ConfigureAppConfiguration((_, config) =>
+            config.AddInMemoryCollection(new Dictionary<string, string?>
+            {
+                ["Source:Remote"] = repository,
+                ["Source:MirrorPath"] = Path.Combine(_directory, "mirror.git")
+            })));
+        using var client = factory.CreateClient(new() { BaseAddress = new Uri("https://localhost") });
+        client.DefaultRequestHeaders.Authorization = new("Bearer", Token);
+        // The scan at startup may still hold the scan lock.
+        JsonElement scan;
+        do scan = await (await client.PostAsync("/operator/v1/source/rescan", null)).Content.ReadFromJsonAsync<JsonElement>();
+        while (scan.GetProperty("outcome").ToString() == "already_running");
+        Assert.DoesNotContain(scan.GetProperty("outcome").ToString(), new[] { "invalid", "failed", "disabled" });
+
+        (await client.PostAsync("/operator/v1/cliproxy/refresh", null)).EnsureSuccessStatusCode();
+        var status = await client.GetFromJsonAsync<JsonElement>("/operator/v1/cliproxy/status");
+        var catalog = Assert.Single(status.GetProperty("catalogs").EnumerateArray());
+        Assert.Equal("https://proxy.example/v1", catalog.GetProperty("baseUrl").GetString());
+        Assert.Equal("succeeded", catalog.GetProperty("outcome").GetString());
+        var selection = await client.GetFromJsonAsync<JsonElement>("/operator/v1/cliproxy/selection");
+        var entry = Assert.Single(selection.GetProperty("catalogs").EnumerateArray());
+        Assert.Equal("one", Assert.Single(entry.GetProperty("models").EnumerateArray()).GetProperty("id").GetString());
+        (await client.PostAsJsonAsync("/operator/v1/cliproxy/selection", new
+        {
+            baseUrl = "https://proxy.example/v1",
+            version = 0,
+            policy = new { includeNew = false, enabledFamilies = new[] { "one" }, disabledFamilies = Array.Empty<string>(), modelOverrides = new { } }
+        })).EnsureSuccessStatusCode();
+
+        // A failing proxy that no Node uses is shown on the Models page, not as a Problem.
+        _proxyHandler.Status = HttpStatusCode.ServiceUnavailable;
+        (await client.PostAsync("/operator/v1/cliproxy/refresh", null)).EnsureSuccessStatusCode();
+        status = await client.GetFromJsonAsync<JsonElement>("/operator/v1/cliproxy/status");
+        Assert.Equal("upstream_http_503", Assert.Single(status.GetProperty("catalogs").EnumerateArray()).GetProperty("errorCode").GetString());
+        var issues = await client.GetFromJsonAsync<JsonElement>("/operator/v1/issues");
+        Assert.DoesNotContain(issues.GetProperty("items").EnumerateArray(), issue => issue.GetProperty("code").GetString()!.StartsWith("cliproxy_"));
+    }
+
+    [Fact]
     public async Task Dashboard_sessions_require_csrf_and_cannot_authenticate_as_operators_or_nodes()
     {
         using var browser = _factory.CreateClient(new() { BaseAddress = new Uri("https://localhost") });

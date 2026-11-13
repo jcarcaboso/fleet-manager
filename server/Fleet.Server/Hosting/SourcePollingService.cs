@@ -31,6 +31,10 @@ public sealed class SourcePollingService(
 {
     private readonly SemaphoreSlim _scan = new(1, 1);
     private string? _lastObserved;
+    private volatile string? _cliProxyBaseUrl;
+
+    /// <summary>The normalized <c>cliproxy.base-url</c> of the last accepted source snapshot since the Server started.</summary>
+    public string? CliProxyBaseUrl => _cliProxyBaseUrl;
 
     public Task<object> ScanNowAsync(CancellationToken cancellationToken) => ScanNowAsync(null, cancellationToken);
 
@@ -92,6 +96,7 @@ public sealed class SourcePollingService(
                 case SourceScanResult.Snapshot snapshot:
                     var publication = await coordinator.AcceptSourceSnapshotAsync(snapshot.Value, cancellationToken);
                     _lastObserved = snapshot.Value.SourceRevision;
+                    _cliProxyBaseUrl = snapshot.CliProxyBaseUrl;
                     if (requestedBy is not null)
                     {
                         try

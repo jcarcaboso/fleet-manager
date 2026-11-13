@@ -8,7 +8,8 @@ public abstract record SourceScanResult
 
     public sealed record Unchanged(string SourceRevision) : SourceScanResult;
     public sealed record Invalid(string? SourceRevision, IReadOnlyList<SourceDiagnostic> Diagnostics) : SourceScanResult;
-    public sealed record Snapshot(AcceptedSourceSnapshot Value) : SourceScanResult;
+    /// <summary><c>CliProxyBaseUrl</c> is the manifest's normalized <c>cliproxy.base-url</c>, also when no Node uses it yet.</summary>
+    public sealed record Snapshot(AcceptedSourceSnapshot Value, string? CliProxyBaseUrl = null) : SourceScanResult;
 }
 
 public sealed record SourceDiagnostic(string Code, string Message, string? Path = null);

@@ -244,7 +244,9 @@ Node's current name as the mapping key. Certificate identities do not change.
 For a `cliproxy` Assignment, the Agent retrieves the credential over its
 existing mTLS session and stores it only in its private state directory. The
 Server discovers models and advertised reasoning efforts from CLIProxy and
-serves the catalog only to Nodes with a current proxy Assignment. Discovery runs
+serves the catalog only to Nodes with a current proxy Assignment. Discovery
+covers the declared `cliproxy.base-url` even before a Node uses it, so Operators
+can select models first. Discovery runs
 on a separate configurable Server schedule, weekly by default, with a manual
 refresh action. It does not publish a new desired revision or require Git changes.
 Agents fetch

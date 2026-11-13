@@ -6,7 +6,7 @@ using Microsoft.Extensions.Options;
 
 namespace Fleet.Server.Hosting;
 
-public sealed class CliProxySyncService(IServiceScopeFactory scopes, CliProxyCatalog catalog,
+public sealed class CliProxySyncService(IServiceScopeFactory scopes, CliProxyCatalog catalog, SourcePollingService source,
     IOptions<FleetOptions> options, TimeProvider clock, ILogger<CliProxySyncService> logger) : BackgroundService
 {
     public async Task<object> SyncNowAsync(bool force, CancellationToken ct)
@@ -22,6 +22,8 @@ public sealed class CliProxySyncService(IServiceScopeFactory scopes, CliProxyCat
                           where assignment.IsCurrent && client.Mode == "cliproxy" && client.BaseUrl != null &&
                                 node.WorkspaceId == options.Value.WorkspaceId && node.RevokedAt == null
                           select client.BaseUrl!).Distinct().ToArrayAsync(ct);
+            // The source's proxy has a catalog before any Node uses it, so models can be selected first.
+            if (source.CliProxyBaseUrl is { } declared) urls = [.. urls, declared];
         }
         await catalog.SyncAsync(urls, force, ct);
         return catalog.Status();
@@ -29,7 +31,7 @@ public sealed class CliProxySyncService(IServiceScopeFactory scopes, CliProxyCat
 
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
     {
-        // Check for newly assigned proxies promptly; each catalog has its own refresh deadline.
+        // Check for newly declared or assigned proxies promptly; each catalog has its own refresh deadline.
         using var timer = new PeriodicTimer(TimeSpan.FromSeconds(Math.Min(30, options.Value.CliProxySyncIntervalSeconds)), clock);
         do
         {

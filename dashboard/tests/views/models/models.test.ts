@@ -82,7 +82,7 @@ describe('Models page: catalogs', () => {
     };
     await app.go('/models');
     expect(w().find('.empty h2').text()).toBe('No CLIProxy catalogs yet');
-    expect(w().find('.panel .empty-mini p').text()).toBe('No model selections are available. Refresh models after assigning CLIProxy to an active machine.');
+    expect(w().find('.panel .empty-mini p').text()).toBe('No model selections are available. Set cliproxy.base-url in fleet.yml, sync the repository, then refresh models.');
     expect(w().find('.sel-bar').exists()).toBe(false);
   });
 
@@ -368,7 +368,7 @@ describe('Models page: Refresh models (modelsRefreshStale)', () => {
       return path === 'cliproxy/refresh' ? { ...r, catalogs: [] } : r;
     };
     await w().find('[data-act=refresh-models]').trigger('click');
-    await waitFor(() => /Refreshed\. No catalogs are in use yet\./.test(toasts()));
+    await waitFor(() => /Refreshed\. No catalogs yet\. Set cliproxy\.base-url in fleet\.yml and sync the repository\./.test(toasts()));
   });
 
   it('a refresh that cannot be confirmed is explained', async () => {
