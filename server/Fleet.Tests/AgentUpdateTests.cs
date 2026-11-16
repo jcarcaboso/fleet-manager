@@ -9,7 +9,7 @@ using System.Text;
 using System.Text.Json;
 using System.Text.Json.Nodes;
 using Fleet.Core.Coordination;
-using Fleet.Server.Hosting;
+using Fleet.Server.AgentReleases;
 using Fleet.Server.Persistence;
 using Fleet.Server.Security;
 using Fleet.Server.Transport;

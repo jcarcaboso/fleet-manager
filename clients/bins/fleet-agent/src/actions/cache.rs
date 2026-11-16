@@ -25,9 +25,6 @@ pub fn verify_skill(skill: &protocol::AssignmentSkill, bytes: &[u8]) -> bool {
 }
 
 pub fn verify_file(file: &protocol::AssignmentFile, bytes: &[u8]) -> bool {
-    let mut digest = Sha256::new();
-    digest.update(b"fleet.file/v1\0");
-    digest.update(bytes);
     file.schema.as_deref() == Some("fleet.file/v1")
         && file
             .size
@@ -35,7 +32,7 @@ pub fn verify_file(file: &protocol::AssignmentFile, bytes: &[u8]) -> bool {
         && file
             .bundle_digest
             .as_ref()
-            .is_some_and(|expected| format!("sha256:{:x}", digest.finalize()) == *expected)
+            .is_some_and(|expected| fleet_reconcile::file_digest(bytes) == *expected)
 }
 
 pub fn valid_entry(destination: &Path, verify: impl FnOnce(&[u8]) -> bool) -> Result<bool> {
@@ -44,9 +41,9 @@ pub fn valid_entry(destination: &Path, verify: impl FnOnce(&[u8]) -> bool) -> Re
             if !metadata.is_file() || metadata.file_type().is_symlink() {
                 bail!("unsafe Bundle cache entry");
             }
-            if metadata.len() <= 16 * 1024 * 1024
-                && verify(&state::read_bytes(destination, 16 * 1024 * 1024)?)
-            {
+            // An entry is a Bundle or a managed file's content.
+            let limit = protocol::MAX_CONTENT_BYTES as u64;
+            if metadata.len() <= limit && verify(&state::read_bytes(destination, limit)?) {
                 Ok(true)
             } else {
                 std::fs::remove_file(destination)?;

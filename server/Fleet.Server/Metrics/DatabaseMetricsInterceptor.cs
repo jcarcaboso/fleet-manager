@@ -1,7 +1,7 @@
 using System.Data.Common;
 using Microsoft.EntityFrameworkCore.Diagnostics;
 
-namespace Fleet.Server.Hosting;
+namespace Fleet.Server.Metrics;
 
 public sealed class DatabaseMetricsInterceptor(FleetMetrics metrics) : DbCommandInterceptor
 {

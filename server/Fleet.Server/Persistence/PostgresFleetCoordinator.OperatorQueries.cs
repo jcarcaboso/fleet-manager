@@ -1,10 +1,12 @@
-using System.Data;
+using System.Text.Json;
 using Fleet.Core.Coordination;
 using Microsoft.EntityFrameworkCore;
 
 namespace Fleet.Server.Persistence;
 
-// Phase 4 of the device dashboard: what a revision changes, rollout progress per Node, drift reports and issue states.
+// Operator read models (IOperatorQueries) other than Nodes: desired revisions, rollouts, Attempts, warnings, source scans,
+// enrollment links, audit events and issue states. Lists added for the device dashboard page newest first with an opaque
+// (time, id) cursor and accept 1 to 100 items.
 public sealed partial class PostgresFleetCoordinator
 {
     /// <summary>The most Nodes <c>GET rollouts/{id}</c> lists.</summary>
@@ -12,6 +14,26 @@ public sealed partial class PostgresFleetCoordinator
 
     /// <summary>The most Skill names each of the added, changed and removed lists of a revision holds.</summary>
     public const int MaximumSkillChanges = 200;
+
+    public async Task<Page<DesiredRevisionSummary>> GetDesiredRevisionsAsync(PageRequest page, CancellationToken cancellationToken = default)
+    {
+        await EnsureWorkspace(cancellationToken);
+        if (page.Order == PageOrder.Newest)
+        {
+            var (newestLimit, after) = OperatorPageArgs(page);
+            var query = db.DesiredRevisions.AsNoTracking().Where(x => x.WorkspaceId == options.WorkspaceId.Value);
+            if (after is var (at, cursorId))
+                query = query.Where(x => x.AcceptedAt < at || x.AcceptedAt == at && x.Id.CompareTo(cursorId) < 0);
+            var newest = await query.OrderByDescending(x => x.AcceptedAt).ThenByDescending(x => x.Id).Take(newestLimit + 1)
+                .ToListAsync(cancellationToken);
+            return MakeTimePage(newest, newestLimit, x => x.AcceptedAt, x => x.Id,
+                x => new DesiredRevisionSummary(new(x.Id), x.SourceRevision, x.AcceptedAt, CommitOf(x)));
+        }
+        var (limit, cursor) = PageArgs(page);
+        var rows = await db.DesiredRevisions.AsNoTracking().Where(x => x.Id.CompareTo(cursor) > 0).OrderBy(x => x.Id)
+            .Take(limit + 1).ToListAsync(cancellationToken);
+        return MakePage(rows, limit, x => x.Id, x => new DesiredRevisionSummary(new(x.Id), x.SourceRevision, x.AcceptedAt, CommitOf(x)));
+    }
 
     private static CommitMetadata? CommitOf(DesiredRevisionRow row) =>
         row.CommitSubject is null && row.CommitAuthor is null && row.CommittedAt is null
@@ -100,6 +122,40 @@ public sealed partial class PostgresFleetCoordinator
             Bounded(older.Keys.Where(x => !newer.ContainsKey(x))));
     }
 
+    public async Task<Page<RolloutStatus>> GetRolloutsAsync(PageRequest page, CancellationToken cancellationToken = default)
+    {
+        await EnsureWorkspace(cancellationToken);
+        var newest = page.Order == PageOrder.Newest;
+        int limit;
+        List<RolloutRow> rows;
+        if (newest)
+        {
+            var (newestLimit, after) = OperatorPageArgs(page);
+            limit = newestLimit;
+            var query = db.Rollouts.AsNoTracking();
+            if (after is var (at, cursorId))
+                query = query.Where(x => x.CreatedAt < at || x.CreatedAt == at && x.Id.CompareTo(cursorId) < 0);
+            rows = await query.OrderByDescending(x => x.CreatedAt).ThenByDescending(x => x.Id).Take(limit + 1).ToListAsync(cancellationToken);
+        }
+        else
+        {
+            var (idLimit, cursor) = PageArgs(page);
+            limit = idLimit;
+            rows = await db.Rollouts.AsNoTracking().Where(x => x.Id.CompareTo(cursor) > 0).OrderBy(x => x.Id)
+                .Take(limit + 1).ToListAsync(cancellationToken);
+        }
+        var ids = rows.Take(limit).Select(x => x.Id).ToArray();
+        var counts = await db.Assignments.Where(x => ids.Contains(x.RolloutId)).GroupBy(x => new { x.RolloutId, x.State })
+            .Select(x => new { x.Key.RolloutId, x.Key.State, Count = x.Count() }).ToListAsync(cancellationToken);
+        RolloutStatus Map(RolloutRow x)
+        {
+            var count = StateCounts(counts.Where(c => c.RolloutId == x.Id).Select(c => (c.State, c.Count)));
+            return new(new(x.Id), new(x.DesiredRevisionId), x.CreatedAt, count.Pending, count.Applying, count.Succeeded, count.Failed,
+                count.Superseded);
+        }
+        return newest ? MakeTimePage(rows, limit, x => x.CreatedAt, x => x.Id, Map) : MakePage(rows, limit, x => x.Id, Map);
+    }
+
     private sealed record RolloutTargetRow(Guid NodeId, string TargetName, int State, DateTimeOffset CreatedAt, RolloutLatestAttempt? Latest);
 
     private sealed record RolloutLatestAttempt(string? ErrorCode, DateTimeOffset UpdatedAt);
@@ -145,86 +201,123 @@ public sealed partial class PostgresFleetCoordinator
             var seen = times.GetValueOrDefault(node.Id);
             return new RolloutNodeProgress(new(node.Id), node.Name, WorstFirst[state], seen?.First, seen?.Last, targets);
         }).ToList();
-        int Count(ConvergenceState state) => counts.FirstOrDefault(x => x.State == (int)state)?.Count ?? 0;
         return new(new(rollout.Id), new(rollout.DesiredRevisionId), rollout.SourceRevision, rollout.CreatedAt,
-            new(Count(ConvergenceState.Pending), Count(ConvergenceState.Applying), Count(ConvergenceState.Succeeded),
-                Count(ConvergenceState.Failed), Count(ConvergenceState.Superseded)), items);
+            StateCounts(counts.Select(x => (x.State, x.Count))), items);
     }
 
-    public async Task RecordDriftAsync(NodeAuthentication authentication, DriftReport report, CancellationToken cancellationToken = default)
+    public async Task<Page<AttemptStatus>> GetAttemptsAsync(RolloutId rolloutId, PageRequest page, CancellationToken cancellationToken = default)
     {
-        DriftRules.Validate(report);
-        await Authenticate(authentication, clock.GetUtcNow(), false, cancellationToken);
-        var nodeId = authentication.NodeId.Value;
-        await using var transaction = await db.Database.BeginTransactionAsync(IsolationLevel.ReadCommitted, cancellationToken);
-        // The Node row lock serializes the reports of one Node, so the pruning below always sees all earlier events, and a Node
-        // removed in the meantime cannot violate the foreign key.
-        var node = await db.Nodes.FromSqlInterpolated($"SELECT * FROM nodes WHERE \"Id\" = {nodeId} FOR UPDATE").AsNoTracking()
-            .SingleOrDefaultAsync(cancellationToken);
-        if (node is null || node.RevokedAt is not null) throw Error("node_unauthorized", "Node credential is not active.");
-        var target = report.Target;
-        if (!await db.Assignments.AnyAsync(x => x.NodeId == nodeId && x.IsCurrent && x.TargetName == target, cancellationToken))
-            throw Error("invalid_request", "target is not an assigned Target of this Node.");
-        db.NodeDriftEvents.Add(new NodeDriftEventRow
-        {
-            Id = Guid.CreateVersion7(),
-            NodeId = nodeId,
-            Target = target,
-            Files = [.. report.Files],
-            DetectedAt = TruncateToMicroseconds(clock.GetUtcNow())
-        });
-        await db.SaveChangesAsync(cancellationToken);
-        var keep = DriftRules.MaximumEvents;
-        await db.Database.ExecuteSqlInterpolatedAsync($$"""
-            DELETE FROM node_drift_events WHERE "NodeId" = {{nodeId}} AND "Id" IN (
-                SELECT "Id" FROM node_drift_events WHERE "NodeId" = {{nodeId}} ORDER BY "DetectedAt" DESC, "Id" DESC OFFSET {{keep}})
-            """, cancellationToken);
-        await transaction.CommitAsync(cancellationToken);
+        await EnsureWorkspace(cancellationToken);
+        var (limit, cursor) = PageArgs(page);
+        var rows = await db.Attempts.AsNoTracking().Where(x => x.RolloutId == rolloutId.Value && x.Id.CompareTo(cursor) > 0)
+            .OrderBy(x => x.Id).Take(limit + 1).ToListAsync(cancellationToken);
+        return MakePage(rows, limit, x => x.Id, x => new AttemptStatus(new(x.Id), new(x.AssignmentId),
+            (ConvergenceState)x.State, x.ErrorCode, x.Diagnostic, x.FailurePath, x.FailureStep, x.UpdatedAt));
     }
 
-    public async Task RecordRepairFailuresAsync(NodeAuthentication authentication, RepairFailureReport report,
+    public async Task<Page<WarningStatus>> GetWarningsAsync(PageRequest page, CancellationToken cancellationToken = default)
+    {
+        await EnsureWorkspace(cancellationToken);
+        var (limit, cursor) = PageArgs(page);
+        var rows = await db.Warnings.AsNoTracking().Where(x => x.Id.CompareTo(cursor) > 0).OrderBy(x => x.Id)
+            .Take(limit + 1).ToListAsync(cancellationToken);
+        return MakePage(rows, limit, x => x.Id, x => new WarningStatus(new(x.DesiredRevisionId), x.Code, x.Message,
+            JsonSerializer.Deserialize<string[]>(x.SourceLocations) ?? []));
+    }
+
+    public async Task<SourceScanStatus?> GetLatestSourceScanAsync(CancellationToken cancellationToken = default)
+    {
+        await EnsureWorkspace(cancellationToken);
+        var row = await db.SourceScans.AsNoTracking().Where(x => x.WorkspaceId == options.WorkspaceId.Value)
+            .OrderByDescending(x => x.ObservedAt).ThenByDescending(x => x.Id).FirstOrDefaultAsync(cancellationToken);
+        return row is null ? null : new(row.SourceRevision, (SourceScanOutcome)row.Outcome, row.Code,
+            row.Diagnostic, row.ObservedAt, row.RequestedBy);
+    }
+
+    public async Task<Page<SourceScanEntry>> GetSourceScansAsync(PageRequest page, CancellationToken cancellationToken = default)
+    {
+        await EnsureWorkspace(cancellationToken);
+        var (limit, after) = OperatorPageArgs(page);
+        var query = db.SourceScans.AsNoTracking().Where(x => x.WorkspaceId == options.WorkspaceId.Value);
+        if (after is var (at, cursorId))
+            query = query.Where(x => x.ObservedAt < at || x.ObservedAt == at && x.Id.CompareTo(cursorId) < 0);
+        var rows = await query.OrderByDescending(x => x.ObservedAt).ThenByDescending(x => x.Id).Take(limit + 1).ToListAsync(cancellationToken);
+        return MakeTimePage(rows, limit, x => x.ObservedAt, x => x.Id, x => new SourceScanEntry(x.Id, x.SourceRevision,
+            (SourceScanOutcome)x.Outcome, x.Code, x.Diagnostic, x.ObservedAt, x.RequestedBy));
+    }
+
+    public async Task<Page<EnrollmentLinkStatus>> GetEnrollmentLinksAsync(PageRequest page, DateTimeOffset now,
         CancellationToken cancellationToken = default)
     {
-        var clean = RepairFailureRules.Sanitize(report);
-        await Authenticate(authentication, clock.GetUtcNow(), false, cancellationToken);
-        var nodeId = authentication.NodeId.Value;
-        await using var transaction = await db.Database.BeginTransactionAsync(IsolationLevel.ReadCommitted, cancellationToken);
-        // The Node row lock serializes the reports of one Node, so the replacement below always starts from the latest stored set,
-        // and a Node removed in the meantime cannot violate the foreign key.
-        var node = await db.Nodes.FromSqlInterpolated($"SELECT * FROM nodes WHERE \"Id\" = {nodeId} FOR UPDATE").AsNoTracking()
-            .SingleOrDefaultAsync(cancellationToken);
-        if (node is null || node.RevokedAt is not null) throw Error("node_unauthorized", "Node credential is not active.");
-        var targets = clean.Failures.Select(x => x.Target).ToArray();
-        var current = targets.Length == 0 ? new Dictionary<string, Guid>() : await db.Assignments.AsNoTracking()
-            .Where(x => x.NodeId == nodeId && x.IsCurrent && targets.Contains(x.TargetName))
-            .ToDictionaryAsync(x => x.TargetName, x => x.Id, StringComparer.Ordinal, cancellationToken);
-        // A failure of an Assignment that is no longer current is a normal race with a new Assignment and is skipped.
-        var accepted = clean.Failures.Where(x => current.GetValueOrDefault(x.Target) == x.AssignmentId.Value)
-            .ToDictionary(x => x.Target, StringComparer.Ordinal);
-        var stored = await db.NodeRepairFailures.Where(x => x.NodeId == nodeId).ToListAsync(cancellationToken);
-        var now = TruncateToMicroseconds(clock.GetUtcNow());
-        foreach (var row in stored.Where(x => !accepted.ContainsKey(x.Target))) db.NodeRepairFailures.Remove(row);
-        foreach (var failure in accepted.Values)
-        {
-            var row = stored.SingleOrDefault(x => x.Target == failure.Target);
-            if (row is null)
-            {
-                row = new NodeRepairFailureRow { NodeId = nodeId, Target = failure.Target, ErrorCode = failure.ErrorCode, Diagnostic = failure.Diagnostic };
-                db.NodeRepairFailures.Add(row);
-            }
-            // The same failure of the same Assignment keeps the time it started; anything else is a new failure.
-            if (row.FailedSince == default || row.AssignmentId != failure.AssignmentId.Value || row.ErrorCode != failure.ErrorCode)
-                row.FailedSince = now;
-            row.AssignmentId = failure.AssignmentId.Value;
-            row.ErrorCode = failure.ErrorCode;
-            row.Diagnostic = failure.Diagnostic;
-            row.Path = failure.Path;
-            row.Step = failure.Step;
-            row.ReportedAt = now;
-        }
-        await db.SaveChangesAsync(cancellationToken);
-        await transaction.CommitAsync(cancellationToken);
+        await EnsureWorkspace(cancellationToken);
+        var (limit, after) = OperatorPageArgs(page);
+        var query = db.Enrollments.AsNoTracking().Where(x => x.WorkspaceId == options.WorkspaceId.Value);
+        if (after is var (at, cursorId))
+            query = query.Where(x => x.ExpiresAt < at || x.ExpiresAt == at && x.Id.CompareTo(cursorId) < 0);
+        var rows = await EnrollmentLinkRows(query.OrderByDescending(x => x.ExpiresAt).ThenByDescending(x => x.Id).Take(limit + 1))
+            .ToListAsync(cancellationToken);
+        return MakeTimePage(rows, limit, x => x.ExpiresAt, x => x.Id, x => ToLink(x, now));
     }
+
+    public async Task<EnrollmentLinkStatus> GetEnrollmentLinkAsync(Guid id, DateTimeOffset now, CancellationToken cancellationToken = default)
+    {
+        await EnsureWorkspace(cancellationToken);
+        var row = await EnrollmentLinkRows(db.Enrollments.AsNoTracking().Where(x => x.WorkspaceId == options.WorkspaceId.Value && x.Id == id))
+            .FirstOrDefaultAsync(cancellationToken);
+        return row is null ? throw Error("enrollment_link_not_found", "Enrollment link was not found.") : ToLink(row, now);
+    }
+
+    // The token digest and delivery payload are never selected.
+    private static IQueryable<EnrollmentLinkRow> EnrollmentLinkRows(IQueryable<EnrollmentRow> query) => query
+        .Select(x => new EnrollmentLinkRow(x.Id, x.BoundAlias, x.ExpiresAt, x.ConsumedAt, x.RevokedAt, x.RevokedBy, x.NodeId));
+
+    private sealed record EnrollmentLinkRow(Guid Id, string? BoundAlias, DateTimeOffset ExpiresAt, DateTimeOffset? ConsumedAt,
+        DateTimeOffset? RevokedAt, string? RevokedBy, Guid? NodeId);
+
+    private static EnrollmentLinkStatus ToLink(EnrollmentLinkRow x, DateTimeOffset now) => new(x.Id, x.BoundAlias, x.ExpiresAt,
+        x.ConsumedAt, x.RevokedAt, x.RevokedBy, x.NodeId is Guid node ? new NodeId(node) : null,
+        x.ConsumedAt is not null ? EnrollmentLinkState.Consumed : x.RevokedAt is not null ? EnrollmentLinkState.Revoked :
+        x.ExpiresAt <= now ? EnrollmentLinkState.Expired : EnrollmentLinkState.Active);
+
+    public async Task<Page<AuditEventStatus>> GetAuditEventsAsync(PageRequest page, NodeId? node = null,
+        CancellationToken cancellationToken = default)
+    {
+        await EnsureWorkspace(cancellationToken);
+        var newest = page.Order == PageOrder.Newest;
+        var query = db.AuditEvents.AsNoTracking().Where(x => x.WorkspaceId == options.WorkspaceId.Value);
+        if (node is { } filter)
+        {
+            var nodeId = filter.Value;
+            query = query.Where(x => x.NodeId == nodeId);
+        }
+        int limit;
+        if (newest)
+        {
+            var (newestLimit, after) = OperatorPageArgs(page);
+            limit = newestLimit;
+            if (after is var (at, cursorId))
+                query = query.Where(x => x.RecordedAt < at || x.RecordedAt == at && x.Id.CompareTo(cursorId) < 0);
+            query = query.OrderByDescending(x => x.RecordedAt).ThenByDescending(x => x.Id);
+        }
+        else
+        {
+            var (idLimit, cursor) = PageArgs(page);
+            limit = idLimit;
+            query = query.Where(x => x.Id.CompareTo(cursor) > 0).OrderBy(x => x.Id);
+        }
+        var rows = await query.Take(limit + 1)
+            .Select(x => new AuditRowWithName(x, db.Nodes.Where(n => n.Id == x.NodeId).Select(n => n.Name).FirstOrDefault()))
+            .ToListAsync(cancellationToken);
+        return newest
+            ? MakeTimePage(rows, limit, x => x.Event.RecordedAt, x => x.Event.Id, ToAuditStatus)
+            : MakePage(rows, limit, x => x.Event.Id, ToAuditStatus);
+    }
+
+    private sealed record AuditRowWithName(AuditEventRow Event, string? NodeName);
+
+    private static AuditEventStatus ToAuditStatus(AuditRowWithName x) => new(x.Event.RecordedAt, x.Event.Action, x.Event.Actor,
+        x.Event.NodeId is Guid nodeId ? new NodeId(nodeId) : null,
+        x.Event.CredentialId is Guid credential ? new CredentialId(credential) : null, x.NodeName, x.Event.Account, x.Event.Detail);
 
     public async Task<IReadOnlyDictionary<string, IssueStateEntry>> GetIssueStatesAsync(IReadOnlyCollection<string> issueIds,
         CancellationToken cancellationToken = default)
@@ -235,51 +328,5 @@ public sealed partial class PostgresFleetCoordinator
         var ids = issueIds.ToArray();
         return (await db.IssueStates.AsNoTracking().Where(x => x.WorkspaceId == workspaceId && ids.Contains(x.IssueId)).ToListAsync(cancellationToken))
             .ToDictionary(x => x.IssueId, x => new IssueStateEntry(x.IssueId, x.State, x.Since, x.SnoozedUntil, x.Actor, x.At), StringComparer.Ordinal);
-    }
-
-    public async Task<IssueStateEntry?> ChangeIssueStateAsync(ChangeIssueState command, CancellationToken cancellationToken = default)
-    {
-        if (string.IsNullOrEmpty(command.IssueId) || command.IssueId.Length > IssueStateRules.MaximumIdLength)
-            throw Error("invalid_request", $"id is required, at most {IssueStateRules.MaximumIdLength} characters.");
-        IssueStateRules.ValidateHours(command.Action, command.Hours);
-        var actor = Required(command.Actor, 200, "actor");
-        await EnsureWorkspace(cancellationToken);
-        var workspaceId = options.WorkspaceId.Value;
-        var issueId = command.IssueId;
-        var current = command.CurrentIssueIds.ToArray();
-        await using var transaction = await db.Database.BeginTransactionAsync(IsolationLevel.ReadCommitted, cancellationToken);
-        var now = TruncateToMicroseconds(clock.GetUtcNow());
-        // Lazy cleanup: snoozes that ran out, and acknowledgements of issues that are no longer current (their occurrence is over).
-        await db.Database.ExecuteSqlInterpolatedAsync($$"""
-            DELETE FROM issue_states WHERE "WorkspaceId" = {{workspaceId}} AND "IssueId" <> {{issueId}} AND (
-                ("State" = 'snoozed' AND "SnoozedUntil" <= {{now}}) OR ("State" = 'acknowledged' AND "IssueId" <> ALL({{current}})))
-            """, cancellationToken);
-        IssueStateEntry? entry = null;
-        DateTimeOffset? since = command.Since is { } value ? TruncateToMicroseconds(value) : null;
-        if (command.Action == IssueStateAction.Reopen)
-            await db.Database.ExecuteSqlInterpolatedAsync(
-                $"DELETE FROM issue_states WHERE \"WorkspaceId\" = {workspaceId} AND \"IssueId\" = {issueId}", cancellationToken);
-        else
-        {
-            var snooze = command.Action == IssueStateAction.Snooze;
-            var state = snooze ? IssueStateNames.Snoozed : IssueStateNames.Acknowledged;
-            DateTimeOffset? until = snooze ? now.AddHours(command.Hours!.Value) : null;
-            await db.Database.ExecuteSqlInterpolatedAsync($$"""
-                INSERT INTO issue_states ("WorkspaceId", "IssueId", "State", "Since", "SnoozedUntil", "Actor", "At")
-                VALUES ({{workspaceId}}, {{issueId}}, {{state}}, {{since}}, {{until}}, {{actor}}, {{now}})
-                ON CONFLICT ("WorkspaceId", "IssueId") DO UPDATE SET "State" = EXCLUDED."State", "Since" = EXCLUDED."Since",
-                    "SnoozedUntil" = EXCLUDED."SnoozedUntil", "Actor" = EXCLUDED."Actor", "At" = EXCLUDED."At"
-                """, cancellationToken);
-            entry = new(issueId, state, since, until, actor, now);
-        }
-        db.AuditEvents.Add(Audit(command.Action switch
-        {
-            IssueStateAction.Acknowledge => "issue.acknowledged",
-            IssueStateAction.Snooze => "issue.snoozed",
-            _ => "issue.reopened"
-        }, actor, now, command.NodeId));
-        await db.SaveChangesAsync(cancellationToken);
-        await transaction.CommitAsync(cancellationToken);
-        return entry;
     }
 }

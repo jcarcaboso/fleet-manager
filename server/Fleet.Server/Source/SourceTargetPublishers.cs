@@ -1,25 +1,16 @@
-using System.Security.Cryptography;
-using System.Text;
 using Fleet.Core.Coordination;
 
 namespace Fleet.Server.Source;
 
 internal static class SourceTargetPublishers
 {
+    // Where each client keeps its agent instruction file and its AI client configuration. The keys are CliProxyRules.AiClients.
     internal static readonly IReadOnlyDictionary<string, AgentClient> AgentClients =
         new Dictionary<string, AgentClient>(StringComparer.Ordinal)
         {
             ["codex"] = new(".codex", "AGENTS.md"),
             ["opencode"] = new(".config/opencode", "AGENTS.md"),
             ["claude"] = new(".claude", "CLAUDE.md"),
-        };
-
-    internal static readonly IReadOnlyDictionary<string, string> AiClientPaths =
-        new Dictionary<string, string>(StringComparer.Ordinal)
-        {
-            ["codex"] = ".codex",
-            ["opencode"] = ".config/opencode",
-            ["claude"] = ".claude",
         };
 
     internal static readonly SnapshotBundle EmptyAgentInstructions = AgentInstructionsBundle([]);
@@ -36,32 +27,13 @@ internal static class SourceTargetPublishers
     internal static SnapshotTarget[] Publish(TargetPublication publication) =>
         Publishers.SelectMany(publisher => publisher(publication)).ToArray();
 
-    internal static SnapshotBundle AgentInstructionsBundle(byte[] content)
-    {
-        var digestInput = Encoding.UTF8.GetBytes("fleet.file/v1\0").Concat(content).ToArray();
-        var digest = $"sha256:{Convert.ToHexStringLower(SHA256.HashData(digestInput))}";
-        return new SnapshotBundle(digest, "fleet.file/v1", content.LongLength, content);
-    }
+    internal static SnapshotBundle AgentInstructionsBundle(byte[] content) =>
+        new(BundleDigests.FileDigest(content), BundleDigests.FileSchema, content.LongLength, content);
 
     internal static IEnumerable<string> SelectedGroups(
         ManifestTarget target,
         IReadOnlyDictionary<string, Dictionary<string, BuiltSkill>> groups) =>
         target.Groups is { Count: > 0 } ? target.Groups : groups.Keys.Order(StringComparer.Ordinal);
-
-    internal static bool TryNormalizeCliProxyBaseUrl(string? value, out string? normalized)
-    {
-        normalized = null;
-        if (!Uri.TryCreate(value, UriKind.Absolute, out var uri) || uri.Scheme != Uri.UriSchemeHttps ||
-            string.IsNullOrEmpty(uri.Host) || !string.IsNullOrEmpty(uri.UserInfo) ||
-            !string.IsNullOrEmpty(uri.Query) || !string.IsNullOrEmpty(uri.Fragment) ||
-            uri.AbsolutePath.TrimEnd('/') is not ("" or "/v1"))
-            return false;
-        normalized = new UriBuilder(uri) { Path = "/v1", Query = "", Fragment = "" }.Uri.AbsoluteUri.TrimEnd('/');
-        return true;
-    }
-
-    internal static bool IsValidModelId(string value) => value.Length is > 0 and <= 200 &&
-        value.All(character => character is >= '!' and <= '~');
 
     private static IEnumerable<SnapshotTarget> BuildSkillTargets(TargetPublication publication)
     {
@@ -115,7 +87,7 @@ internal static class SourceTargetPublishers
 
     private static IEnumerable<SnapshotTarget> BuildAiClientTargets(TargetPublication publication)
     {
-        TryNormalizeCliProxyBaseUrl(publication.Manifest.CliProxy?.BaseUrl, out var baseUrl);
+        CliProxyRules.TryNormalizeBaseUrl(publication.Manifest.CliProxy?.BaseUrl, out var baseUrl);
         foreach (var node in publication.Manifest.Nodes.OrderBy(x => x.Key, StringComparer.Ordinal))
         {
             var configuredClients = node.Value.Targets.AiClients ?? new Dictionary<string, ManifestAiClientTarget>();
@@ -123,8 +95,8 @@ internal static class SourceTargetPublishers
             {
                 var desired = configured.Value;
                 yield return new SnapshotTarget(publication.NodeAliases[node.Key], $"ai-client/{configured.Key}",
-                    new TargetDescriptor("home", AiClientPaths[configured.Key]), [],
-                    AiClient: new AiClientAssignment("fleet.ai-client/v1", configured.Key, desired.Mode!,
+                    new TargetDescriptor("home", AgentClients[configured.Key].TargetPath), [],
+                    AiClient: new AiClientAssignment(CliProxyRules.AiClientSchema, configured.Key, desired.Mode!,
                         desired.Mode == "cliproxy" ? baseUrl : null,
                         desired.Mode == "cliproxy" ? desired.Model : null));
             }

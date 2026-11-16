@@ -1,4 +1,4 @@
-using System.Text;
+using static Fleet.Core.Coordination.RuleText;
 
 namespace Fleet.Core.Coordination;
 
@@ -17,11 +17,11 @@ public static class AttemptDetailRules
     /// <summary>Returns the stripped and validated detail, or throws <c>invalid_request</c>.</summary>
     public static AttemptDetail Sanitize(AttemptDetail detail)
     {
-        var diagnostic = Strip(detail.Diagnostic, keepLineBreaks: true);
+        var diagnostic = StripControl(detail.Diagnostic, keepLineBreaks: true);
         if (string.IsNullOrEmpty(diagnostic) || diagnostic.Length > MaximumDiagnosticLength)
             throw Invalid($"diagnostic is required and at most {MaximumDiagnosticLength} characters.");
 
-        var path = Strip(detail.Path, keepLineBreaks: false);
+        var path = StripControl(detail.Path, keepLineBreaks: false);
         if (string.IsNullOrEmpty(path)) path = null;
         else if (path.Length > MaximumPathLength || !IsRelative(path))
             throw Invalid($"path must be relative to the Target base, without '..' segments, and at most {MaximumPathLength} characters.");
@@ -32,22 +32,5 @@ public static class AttemptDetailRules
         return new(diagnostic, path, step);
     }
 
-    // Control characters (C0, DEL and C1) are removed; only \n and \t survive, and only where the field allows them.
-    private static string? Strip(string? value, bool keepLineBreaks)
-    {
-        if (value is null) return null;
-        var builder = new StringBuilder(value.Length);
-        foreach (var character in value)
-            if (!char.IsControl(character) || keepLineBreaks && character is '\n' or '\t') builder.Append(character);
-        return builder.ToString();
-    }
-
-    private static bool IsRelative(string path)
-    {
-        if (path[0] is '/' or '\\') return false;
-        if (path.Length >= 2 && path[1] == ':' && char.IsAsciiLetter(path[0])) return false;
-        return !path.Split('/', '\\').Contains("..", StringComparer.Ordinal);
-    }
-
-    private static CoordinationException Invalid(string message) => new("invalid_request", message);
+    private static bool IsRelative(string path) => !IsRooted(path) && !HasParentSegment(path);
 }

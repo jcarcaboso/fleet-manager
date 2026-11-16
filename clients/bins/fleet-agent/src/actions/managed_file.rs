@@ -9,6 +9,9 @@ use std::{
     path::{Path, PathBuf},
 };
 
+/// Largest managed file, in the type of the size an Assignment states.
+const MAX_FILE_SIZE: i64 = fleet_reconcile::MAX_FILE_BYTES as i64;
+
 pub fn validate(assignment: &Assignment) -> Result<()> {
     let Some(file) = &assignment.file else {
         bail!("managed-file Target has no file");
@@ -23,7 +26,7 @@ pub fn validate(assignment: &Assignment) -> Result<()> {
                 file.size,
                 file.schema.as_deref(),
             ),
-            (None, None, None) | (Some(_), Some(0..=16_777_216), Some("fleet.file/v1"))
+            (None, None, None) | (Some(_), Some(0..=MAX_FILE_SIZE), Some("fleet.file/v1"))
         )
     {
         bail!("unsupported Target descriptor");
@@ -47,7 +50,7 @@ pub async fn prepare(api: &Api, assignment: &Assignment, cache_root: &Path) -> R
         return Ok(());
     };
     let size = file.size.context("managed file size is missing")?;
-    if !(0..=16 * 1024 * 1024).contains(&size) || file.schema.as_deref() != Some("fleet.file/v1") {
+    if !(0..=MAX_FILE_SIZE).contains(&size) || file.schema.as_deref() != Some("fleet.file/v1") {
         bail!("unsupported managed file size or schema");
     }
     let destination = cache::path(cache_root, digest)?;
@@ -109,7 +112,10 @@ fn local_assignment(
         .as_ref()
         .context("managed-file Target has no file")?;
     let content = match &file.bundle_digest {
-        Some(digest) => state::read_bytes(&cache::path(cache_root, digest)?, 16 * 1024 * 1024)?,
+        Some(digest) => state::read_bytes(
+            &cache::path(cache_root, digest)?,
+            fleet_reconcile::MAX_FILE_BYTES as u64,
+        )?,
         None => Vec::new(),
     };
     Ok(fleet_reconcile::FileAssignment {

@@ -1,14 +1,32 @@
 using System.Collections.Concurrent;
 using System.Net.Http.Headers;
 using System.Text.Json;
+using System.Text.Json.Serialization;
+using Fleet.Core.Coordination;
+using Fleet.Server.Persistence;
 using Fleet.Server.Security;
-using Fleet.Server.Source;
+using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Options;
 
-namespace Fleet.Server.Transport;
+namespace Fleet.Server.CliProxy;
 
 public sealed record CliProxyModel(string Id, IReadOnlyList<string> ReasoningLevels,
     long? ContextWindow = null, long? MaxContextWindow = null, long? AutoCompactTokenLimit = null);
+
+// The body of GET cliproxy/status. The JSON names are fixed so the shape is the same under any serializer options.
+public sealed record CliProxyStatus(
+    [property: JsonPropertyName("enabled")] bool Enabled,
+    [property: JsonPropertyName("intervalSeconds")] int IntervalSeconds,
+    [property: JsonPropertyName("errorCode")] string? ErrorCode,
+    [property: JsonPropertyName("catalogs")] IReadOnlyList<CliProxyCatalogStatus> Catalogs);
+
+public sealed record CliProxyCatalogStatus(
+    [property: JsonPropertyName("baseUrl")] string BaseUrl,
+    [property: JsonPropertyName("modelCount")] int ModelCount,
+    [property: JsonPropertyName("lastSuccess")] DateTimeOffset? LastSuccess,
+    [property: JsonPropertyName("nextRefresh")] DateTimeOffset NextRefresh,
+    [property: JsonPropertyName("outcome")] string Outcome,
+    [property: JsonPropertyName("errorCode")] string? ErrorCode);
 
 public sealed class CliProxyCatalog(IHttpClientFactory clients, IOptions<FleetOptions> options, TimeProvider clock)
 {
@@ -31,21 +49,26 @@ public sealed class CliProxyCatalog(IHttpClientFactory clients, IOptions<FleetOp
     // Stable throughout one outage, cleared by recovery. A later outage must not inherit its acknowledgement.
     public DateTimeOffset? FailureSince(string baseUrl) => entries.TryGetValue(baseUrl, out var entry) ? entry.FailureSince : null;
 
-    public object Status() => new
-    {
-        enabled = options.Value.CliProxyApiKey.Length > 0,
-        intervalSeconds = options.Value.CliProxySyncIntervalSeconds,
-        errorCode = options.Value.CliProxyApiKey.Length == 0 ? "credential_unavailable" : null,
-        catalogs = entries.OrderBy(pair => pair.Key, StringComparer.Ordinal).Select(pair => new
-        {
-            baseUrl = pair.Key,
-            modelCount = pair.Value.Models?.Count ?? 0,
-            lastSuccess = pair.Value.LastSuccess,
-            nextRefresh = pair.Value.NextRefresh,
-            outcome = pair.Value.Outcome,
-            errorCode = pair.Value.ErrorCode
-        }).ToArray()
-    };
+    public CliProxyStatus Status() => new(
+        options.Value.CliProxyApiKey.Length > 0,
+        options.Value.CliProxySyncIntervalSeconds,
+        options.Value.CliProxyApiKey.Length == 0 ? "credential_unavailable" : null,
+        entries.OrderBy(pair => pair.Key, StringComparer.Ordinal).Select(pair => new CliProxyCatalogStatus(
+            pair.Key,
+            pair.Value.Models?.Count ?? 0,
+            pair.Value.LastSuccess,
+            pair.Value.NextRefresh,
+            pair.Value.Outcome,
+            pair.Value.ErrorCode)).ToArray());
+
+    /// <summary>The distinct CLIProxy base URLs of current AI client Assignments of the Workspace's Nodes that are not revoked.</summary>
+    public static Task<string[]> AssignedBaseUrlsAsync(FleetDbContext db, Guid workspaceId, CancellationToken ct) =>
+        (from assignment in db.Assignments.AsNoTracking()
+         join client in db.AssignmentAiClients on assignment.Id equals client.AssignmentId
+         join node in db.Nodes on assignment.NodeId equals node.Id
+         where assignment.IsCurrent && client.Mode == "cliproxy" && client.BaseUrl != null &&
+               node.WorkspaceId == workspaceId && node.RevokedAt == null
+         select client.BaseUrl!).Distinct().ToArrayAsync(ct);
 
     public async Task SyncAsync(IEnumerable<string> baseUrls, bool force, CancellationToken ct)
     {
@@ -53,7 +76,7 @@ public sealed class CliProxyCatalog(IHttpClientFactory clients, IOptions<FleetOp
         try
         {
             var active = options.Value.CliProxyApiKey.Length == 0 ? [] : baseUrls
-                .Where(url => SourceTargetPublishers.TryNormalizeCliProxyBaseUrl(url, out var normalized) && normalized == url)
+                .Where(url => CliProxyRules.TryNormalizeBaseUrl(url, out var normalized) && normalized == url)
                 .ToHashSet(StringComparer.Ordinal);
             foreach (var url in entries.Keys.Where(url => !active.Contains(url)))
                 entries.TryRemove(url, out _);
@@ -121,7 +144,7 @@ public sealed class CliProxyCatalog(IHttpClientFactory clients, IOptions<FleetOp
         var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
         void Add(string? id, JsonElement item)
         {
-            if (id is null || !SourceTargetPublishers.IsValidModelId(id) || !seen.Add(id)) return;
+            if (id is null || !CliProxyRules.IsValidModelId(id) || !seen.Add(id)) return;
             var efforts = new List<string>();
             if (item.ValueKind == JsonValueKind.Object)
             {

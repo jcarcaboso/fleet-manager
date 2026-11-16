@@ -28,6 +28,15 @@ Move enrollment-link parsing and enrollment execution into an `enrollment` modul
 
 Checks for any later move must preserve clap forms, prompt text, stdout JSON, retry delays, report ordering, state JSON field names, migration of legacy run state, and certificate renewal timing.
 
+### Outcome
+
+`main.rs` grew to about 1,800 lines holding the CLI, enrollment, run state,
+the poll loop and every side report, so the split happened. The modules are
+`cli`, `enroll`, `run_state` and `agent_loop`; disk, telemetry and detail own
+their report steps. The [module map](../technical-design/extending-fleet.md#module-map)
+lists what each module may use. Clap output is byte-identical to the previous
+build, and `run.json` keeps its schema and legacy migration.
+
 ## Compatibility constraints
 
 - No changes to `/operator/v1` or agent protocol routes, request bodies, response limits, timeouts, TLS rules, or redirect policy.
@@ -46,3 +55,9 @@ Do not introduce traits for the operator API, action registry, or run loop with 
 Implemented phases 1 and 2. The operator CLI now separates transport from command parsing and dispatch. AI client configuration uses an explicit adapter registry with Codex and OpenCode code in separate modules. The action registry and shared recovery transaction remain unchanged.
 
 Validation on Rust 1.95.0 runs 62 workspace tests. Workspace formatting, clippy with warnings denied, and a locked `fleet` binary build also pass.
+
+`fleet-reconcile` was later split anyway, once `lib.rs` passed 3,000 lines and
+its lock and state-file reads existed four times each. The split follows the
+invariants instead of cutting across them: `fsx` holds every filesystem safety
+check, and `skills` and `managed_file` each keep a whole transaction with its
+journal, recovery and receipt.

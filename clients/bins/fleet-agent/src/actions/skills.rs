@@ -4,6 +4,7 @@ use crate::{
     state,
 };
 use anyhow::{Context, Result, bail};
+use fleet_reconcile::{MAX_ASSIGNMENT_BYTES, MAX_BUNDLE_BYTES};
 use std::{
     collections::HashSet,
     path::{Path, PathBuf},
@@ -23,7 +24,7 @@ pub fn validate(assignment: &Assignment) -> Result<()> {
             .ok()
             .and_then(|size| sum.checked_add(size))
     });
-    if total.is_none_or(|bytes| bytes > 256 * 1024 * 1024) {
+    if total.is_none_or(|bytes| bytes > MAX_ASSIGNMENT_BYTES) {
         bail!("Assignment exceeds the supported size budget");
     }
     Ok(())
@@ -41,7 +42,9 @@ pub async fn prepare(api: &Api, assignment: &Assignment, cache_root: &Path) -> R
         total = total
             .checked_add(size)
             .context("Assignment size overflow")?;
-        if size > 16 * 1024 * 1024 || total > 256 * 1024 * 1024 || skill.schema != "fleet.bundle/v1"
+        if size > MAX_BUNDLE_BYTES as u64
+            || total > MAX_ASSIGNMENT_BYTES
+            || skill.schema != "fleet.bundle/v1"
         {
             bail!("unsupported Bundle size or schema");
         }
@@ -100,13 +103,13 @@ fn local_assignment(
     let mut total = 0u64;
     let mut skills = Vec::new();
     for skill in &assignment.skills {
-        if skill.size < 0 || skill.size > 16 * 1024 * 1024 {
+        if skill.size < 0 || skill.size > MAX_BUNDLE_BYTES as i64 {
             bail!("Bundle exceeds 16 MiB");
         }
         total = total
             .checked_add(skill.size as u64)
             .context("Assignment size overflow")?;
-        if total > 256 * 1024 * 1024 {
+        if total > MAX_ASSIGNMENT_BYTES {
             bail!("Assignment exceeds 256 MiB");
         }
         skills.push(fleet_reconcile::DesiredSkill {
@@ -116,7 +119,7 @@ fn local_assignment(
             schema: skill.schema.clone(),
             bundle: state::read_bytes(
                 &cache::path(cache_root, &skill.bundle_digest)?,
-                16 * 1024 * 1024,
+                MAX_BUNDLE_BYTES as u64,
             )?,
         });
     }

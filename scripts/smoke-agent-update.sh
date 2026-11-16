@@ -111,13 +111,15 @@ assert f'version = "{old}"' in text
 open(path, 'w').write(text.replace(f'version = "{old}"', f'version = "{new}"', 1))
 PY
 done
-python3 - "$work/crash/clients/bins/fleet-agent/src/main.rs" <<'PY'
+python3 - "$work/crash/clients/bins/fleet-agent/src/agent_loop.rs" <<'PY'
 import sys
 path = sys.argv[1]
 text = open(path).read()
-anchor = "            let self_updater = updater::Updater::new(&directory);\n"
-assert anchor in text
-open(path, "w").write(text.replace(anchor, anchor + '            panic!("smoke test: this version crashes after its startup check");\n'))
+# Right after the startup update check (Session::start) and before the loop's work.
+anchor = "    let self_updater = updater::Updater::new(directory);\n"
+if text.count(anchor) != 1:
+    sys.exit(f"smoke test: the crash patch anchor is not exactly once in {path}")
+open(path, "w").write(text.replace(anchor, anchor + '    panic!("smoke test: this version crashes after its startup check");\n'))
 PY
 mkdir -p "$work/out"
 # Release builds: debug executables exceed the 64 MiB a release may hold.

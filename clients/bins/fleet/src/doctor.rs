@@ -4,13 +4,6 @@ use crate::error::CliError;
 use serde_json::{Map, Value, json};
 use std::collections::HashMap;
 
-fn invalid_response() -> CliError {
-    CliError::transport(
-        "invalid_response",
-        "Fleet Server response had an unexpected shape",
-    )
-}
-
 /// The state of an issue: `open`, `acknowledged` or `snoozed`. A Server before phase 4 sends none, and a state this CLI does not
 /// know is treated as open, so an issue is never hidden by a word it cannot read.
 fn state_of(issue: &Map<String, Value>) -> &'static str {
@@ -37,13 +30,13 @@ pub(crate) fn report(
     let items = issues
         .get("items")
         .and_then(Value::as_array)
-        .ok_or_else(invalid_response)?;
+        .ok_or_else(CliError::invalid_response)?;
     let mut entries: HashMap<&str, &Value> = HashMap::new();
     if !items.is_empty() {
         for entry in catalog
             .get("items")
             .and_then(Value::as_array)
-            .ok_or_else(invalid_response)?
+            .ok_or_else(CliError::invalid_response)?
         {
             if let Some(code) = entry.get("code").and_then(Value::as_str) {
                 entries.entry(code).or_insert(entry);
@@ -54,7 +47,10 @@ pub(crate) fn report(
     let (mut open, mut acknowledged, mut snoozed) = (0_u64, 0_u64, 0_u64);
     let mut out = Vec::with_capacity(items.len());
     for item in items {
-        let mut issue: Map<String, Value> = item.as_object().ok_or_else(invalid_response)?.clone();
+        let mut issue: Map<String, Value> = item
+            .as_object()
+            .ok_or_else(CliError::invalid_response)?
+            .clone();
         let state = state_of(&issue);
         match state {
             "acknowledged" => acknowledged += 1,

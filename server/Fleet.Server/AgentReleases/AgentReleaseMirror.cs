@@ -6,11 +6,11 @@ using System.Security.Cryptography;
 using System.Text.Json;
 using System.Text.RegularExpressions;
 using Fleet.Core.Coordination;
+using Fleet.Server.Http;
 using Fleet.Server.Security;
-using Fleet.Server.Transport;
 using Microsoft.Extensions.Options;
 
-namespace Fleet.Server.Hosting;
+namespace Fleet.Server.AgentReleases;
 
 /// <summary>Where the Server gets signed Agent releases, bound from <c>Fleet:AgentReleases</c>.</summary>
 public sealed class AgentReleaseOptions

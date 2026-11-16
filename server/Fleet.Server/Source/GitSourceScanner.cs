@@ -11,10 +11,12 @@ public sealed class GitSourceScanner(
     string mirrorPath,
     IEnrolledNodeSource nodes,
     SourceLimits? limits = null,
-    ILogger? logger = null) : ISourceScanner
+    ILogger? logger = null,
+    TimeProvider? clock = null)
 {
     private const int CoordinationWarningMessageChars = 2_048;
     private readonly SourceLimits _limits = limits ?? new();
+    private readonly TimeProvider _clock = clock ?? TimeProvider.System;
     private readonly GitProcess _git = new();
     private static readonly UTF8Encoding StrictUtf8 = new(false, true);
     private static readonly StringComparer PortableComparer = StringComparer.OrdinalIgnoreCase;
@@ -88,8 +90,8 @@ public sealed class GitSourceScanner(
                     : [])
                 .DistinctBy(x => x.Digest, StringComparer.Ordinal).OrderBy(x => x.Digest, StringComparer.Ordinal).ToArray();
             var commit = await ReadCommitMetadataAsync(revision, scanToken);
-            SourceTargetPublishers.TryNormalizeCliProxyBaseUrl(manifest.CliProxy?.BaseUrl, out var cliProxyBaseUrl);
-            return new SourceScanResult.Snapshot(new AcceptedSourceSnapshot(revision, bundles, targets, warnings, DateTimeOffset.UtcNow, commit), cliProxyBaseUrl);
+            CliProxyRules.TryNormalizeBaseUrl(manifest.CliProxy?.BaseUrl, out var cliProxyBaseUrl);
+            return new SourceScanResult.Snapshot(new AcceptedSourceSnapshot(revision, bundles, targets, warnings, _clock.GetUtcNow(), commit), cliProxyBaseUrl);
         }
         catch (Exception exception) when (exception is GitSourceException or IOException or UnauthorizedAccessException or DecoderFallbackException or FormatException or OverflowException)
         {
@@ -345,7 +347,7 @@ public sealed class GitSourceScanner(
             {
                 foreach (var (client, aiTarget) in node.Targets.AiClients)
                 {
-                    if (!SourceTargetPublishers.AiClientPaths.ContainsKey(client))
+                    if (!CliProxyRules.AiClients.Contains(client))
                     {
                         diagnostics.Add("unknown_ai_client", $"Node '{alias}' configures unknown AI client '{client}'.", "fleet.yml");
                         continue;
@@ -357,13 +359,13 @@ public sealed class GitSourceScanner(
                     }
                     if (aiTarget.Mode == "native" && aiTarget.Model is not null)
                         diagnostics.Add("invalid_ai_client_model", $"Node '{alias}' native AI client '{client}' must not configure a model.", "fleet.yml");
-                    if (aiTarget.Mode == "cliproxy" && aiTarget.Model is not null && !SourceTargetPublishers.IsValidModelId(aiTarget.Model))
+                    if (aiTarget.Mode == "cliproxy" && aiTarget.Model is not null && !CliProxyRules.IsValidModelId(aiTarget.Model))
                         diagnostics.Add("invalid_ai_client_model", $"Node '{alias}' AI client '{client}' has an invalid model.", "fleet.yml");
                 }
             }
         }
         var usesCliProxy = manifest.Nodes.Values.Any(node => node?.Targets?.AiClients?.Values.Any(target => target?.Mode == "cliproxy") == true);
-        if (usesCliProxy && !SourceTargetPublishers.TryNormalizeCliProxyBaseUrl(manifest.CliProxy?.BaseUrl, out _))
+        if (usesCliProxy && !CliProxyRules.TryNormalizeBaseUrl(manifest.CliProxy?.BaseUrl, out _))
             diagnostics.Add("invalid_cliproxy_base_url", "cliproxy.base-url must be an HTTPS origin or its /v1 endpoint, without credentials, query, or fragment.", "fleet.yml");
     }
 

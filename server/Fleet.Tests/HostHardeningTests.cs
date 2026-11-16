@@ -1,6 +1,7 @@
 using System.Security.Cryptography;
 using System.Text;
 using Fleet.Server.Hosting;
+using Fleet.Server.Metrics;
 using Fleet.Server.Security;
 using Microsoft.Extensions.Configuration;
 

@@ -6,6 +6,7 @@ using System.Text.Json;
 using System.Text.Json.Nodes;
 using System.Text.RegularExpressions;
 using Fleet.Core.Coordination;
+using Fleet.Server.Http;
 using Fleet.Server.Persistence;
 using Fleet.Server.Security;
 using Fleet.Server.Transport;

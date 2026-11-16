@@ -1,7 +1,7 @@
 using System.Net;
+using Fleet.Server.CliProxy;
 using Fleet.Server.Persistence;
 using Fleet.Server.Security;
-using Fleet.Server.Transport;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Options;
 using Testcontainers.PostgreSql;

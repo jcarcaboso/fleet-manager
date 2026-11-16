@@ -1,4 +1,6 @@
 mod adapters;
+mod catalog;
+mod config_file;
 
 use crate::{
     protocol::{AiClientAssignment, Api},
@@ -6,23 +8,31 @@ use crate::{
 };
 use anyhow::{Context, Result, bail};
 use fleet_reconcile::Step;
-use reqwest::Url;
 use serde::{Deserialize, Serialize};
-use sha2::{Digest, Sha256};
 use std::{
-    collections::{BTreeMap, HashSet},
-    fs::{self, File, OpenOptions},
-    io::{Read, Write},
-    os::unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt},
+    collections::BTreeMap,
+    fs,
+    os::unix::fs::{MetadataExt, PermissionsExt},
     path::{Path, PathBuf},
 };
-use uuid::Uuid;
 
 use adapters::Adapter;
+use catalog::{
+    MAX_MODEL_RESPONSE_BYTES, parse_server_catalog, select_model, usable_cache, valid_model_id,
+    validate_base_url,
+};
+use config_file::{
+    config_digest, ensure_config_parent, read_optional_config, remove_config, remove_state_file,
+    write_config,
+};
 
-const MAX_MODEL_RESPONSE_BYTES: usize = 4 * 1024 * 1024;
-const MAX_CLIENT_CONFIG_BYTES: u64 = 4 * 1024 * 1024;
 const PROVIDER_NAME: &str = "fleet-cliproxy";
+
+/// Whether `client` is a supported AI client whose Target is `target_path`
+/// in the home directory.
+pub fn supports(client: &str, target_path: &str) -> bool {
+    Adapter::find(client).is_ok_and(|adapter| adapter.target_path() == target_path)
+}
 
 pub struct Reconciler {
     home: PathBuf,
@@ -68,23 +78,6 @@ struct ContextLimits {
     context_window: Option<i64>,
     max_context_window: Option<i64>,
     auto_compact_token_limit: Option<i64>,
-}
-
-impl ContextLimits {
-    fn is_valid(self) -> bool {
-        [
-            self.context_window,
-            self.max_context_window,
-            self.auto_compact_token_limit,
-        ]
-        .into_iter()
-        .flatten()
-        .all(|limit| limit > 0)
-            && self
-                .context_window
-                .zip(self.max_context_window)
-                .is_none_or(|(window, maximum)| window <= maximum)
-    }
 }
 
 fn default_skip_claude_models() -> bool {
@@ -205,9 +198,9 @@ impl Reconciler {
                 let model = assignment.model.as_deref();
                 let fetch = |error| ReconcileFailure::new(error, Step::Download, None);
                 self.credential(api).await.map_err(fetch)?;
-                let models = self.models(api, base_url, model).await.map_err(fetch)?;
+                let cache = self.models(api, base_url, model).await.map_err(fetch)?;
                 let drifted = self
-                    .apply_proxy(&assignment.client, base_url, model, &models)
+                    .apply_proxy(&assignment.client, base_url, model, &cache)
                     .map_err(configure)?;
                 Ok(config_path.clone().filter(|_| drifted))
             }
@@ -261,12 +254,14 @@ impl Reconciler {
         }
     }
 
+    /// The model catalog for `base_url`: fetched and saved, or else the saved
+    /// one when it is usable. It is the one `apply_proxy` renders from.
     async fn models(
         &self,
         api: &Api,
         base_url: &str,
         selected: Option<&str>,
-    ) -> Result<Vec<String>> {
+    ) -> Result<ModelCache> {
         let cache_path = self.state.join("models.json");
         let cached = state::read_json::<ModelCache>(&cache_path)?;
         let fetched = async {
@@ -280,12 +275,12 @@ impl Reconciler {
                     .is_none_or(|selected| cache.models.iter().any(|model| model == selected)) =>
             {
                 state::write_json(&cache_path, &cache)?;
-                Ok(cache.models)
+                Ok(cache)
             }
             result => {
                 if let Some(cache) = usable_cache(cached, base_url, selected) {
                     eprintln!("CLIProxy model refresh failed; using the saved model catalog");
-                    return Ok(cache.models);
+                    return Ok(cache);
                 }
                 match result {
                     Ok(_) => bail!("selected model is not advertised by CLIProxy"),
@@ -309,7 +304,7 @@ impl Reconciler {
         client: &str,
         base_url: &str,
         model: Option<&str>,
-        models: &[String],
+        cache: &ModelCache,
     ) -> Result<bool> {
         let adapter = Adapter::find(client)?;
         let path = adapter.config_path(self);
@@ -322,7 +317,7 @@ impl Reconciler {
             previous.as_ref(),
             base_url,
             model,
-            models,
+            cache,
         )?;
         let drifted = rendered.drifted && old.as_deref() != Some(rendered.bytes.as_slice());
         self.commit(
@@ -441,136 +436,6 @@ fn read_saved_credential(path: &Path) -> Result<Vec<u8>> {
     state::read_bytes(path, 4096)
 }
 
-fn parse_server_catalog(bytes: &[u8], base_url: &str) -> Result<ModelCache> {
-    #[derive(Deserialize)]
-    #[serde(rename_all = "camelCase", deny_unknown_fields)]
-    struct Model {
-        id: String,
-        reasoning_levels: Vec<String>,
-        context_window: Option<i64>,
-        max_context_window: Option<i64>,
-        auto_compact_token_limit: Option<i64>,
-    }
-    #[derive(Deserialize)]
-    #[serde(rename_all = "camelCase", deny_unknown_fields)]
-    struct Catalog {
-        base_url: String,
-        models: Vec<Model>,
-        #[serde(default = "default_skip_claude_models")]
-        skip_claude_models_for_other_clients: bool,
-    }
-    let catalog: Catalog = serde_json::from_slice(bytes).map_err(|error| {
-        anyhow::anyhow!(
-            "invalid Server model catalog ({})",
-            state::json_location(&error)
-        )
-    })?;
-    if catalog.base_url != base_url || catalog.models.is_empty() {
-        bail!("Server model catalog does not match the assignment");
-    }
-    let mut models = Vec::new();
-    let mut reasoning_levels = BTreeMap::new();
-    let mut context_limits = BTreeMap::new();
-    let mut seen = HashSet::new();
-    for model in catalog.models {
-        let limits = ContextLimits {
-            context_window: model.context_window,
-            max_context_window: model.max_context_window,
-            auto_compact_token_limit: model.auto_compact_token_limit,
-        };
-        if !valid_model_id(&model.id)
-            || !seen.insert(model.id.to_ascii_lowercase())
-            || !limits.is_valid()
-            || model
-                .reasoning_levels
-                .iter()
-                .any(|level| !valid_effort(level))
-        {
-            bail!("invalid Server model metadata");
-        }
-        context_limits.insert(model.id.clone(), limits);
-        reasoning_levels.insert(model.id.clone(), model.reasoning_levels);
-        models.push(model.id);
-    }
-    Ok(ModelCache {
-        version: 1,
-        base_url: base_url.to_owned(),
-        models,
-        reasoning_levels,
-        context_limits,
-        skip_claude_models_for_other_clients: catalog.skip_claude_models_for_other_clients,
-    })
-}
-
-fn select_model<'a>(
-    configured: Option<&'a str>,
-    current: Option<&'a str>,
-    models: &'a [String],
-) -> Result<&'a str> {
-    if let Some(configured) = configured {
-        if !models.iter().any(|model| model == configured) {
-            bail!("selected model is not advertised by CLIProxy");
-        }
-        return Ok(configured);
-    }
-    current
-        .filter(|current| models.iter().any(|model| model == current))
-        .or_else(|| models.first().map(String::as_str))
-        .context("CLIProxy model catalog is empty")
-}
-
-fn valid_effort(value: &str) -> bool {
-    matches!(
-        value,
-        "none" | "minimal" | "low" | "medium" | "high" | "xhigh" | "max" | "ultra"
-    )
-}
-
-fn validate_base_url(value: &str) -> Result<Url> {
-    let mut url = Url::parse(value).context("invalid CLIProxy URL")?;
-    if url.scheme() != "https"
-        || !url.username().is_empty()
-        || url.password().is_some()
-        || url.query().is_some()
-        || url.fragment().is_some()
-        || url.path().trim_end_matches('/') != "/v1"
-    {
-        bail!("CLIProxy URL must be an HTTPS /v1 endpoint without credentials, query, or fragment");
-    }
-    url.set_path("/v1/");
-    Ok(url)
-}
-
-fn valid_model_id(value: &str) -> bool {
-    !value.is_empty()
-        && value.len() <= 200
-        && value.trim() == value
-        && value.bytes().all(|byte| byte.is_ascii_graphic())
-}
-
-fn usable_cache(
-    cache: Option<ModelCache>,
-    base_url: &str,
-    selected: Option<&str>,
-) -> Option<ModelCache> {
-    cache.filter(|cache| {
-        cache.version == 1
-            && cache.base_url == base_url
-            && !cache.models.is_empty()
-            && cache.models.iter().all(|model| valid_model_id(model))
-            && selected.is_none_or(|selected| cache.models.iter().any(|model| model == selected))
-            && cache
-                .reasoning_levels
-                .values()
-                .flatten()
-                .all(|level| valid_effort(level))
-            && cache
-                .context_limits
-                .values()
-                .all(|limits| limits.is_valid())
-    })
-}
-
 fn validate_receipt(receipt: &Receipt, client: &str) -> Result<()> {
     if receipt.version != 1 || receipt.client != client {
         bail!("invalid AI client receipt");
@@ -582,113 +447,12 @@ fn validate_client(client: &str) -> Result<()> {
     Adapter::find(client).map(|_| ())
 }
 
-fn read_optional_config(path: &Path) -> Result<Option<Vec<u8>>> {
-    match fs::symlink_metadata(path) {
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
-        Err(error) => Err(error.into()),
-        Ok(metadata)
-            if metadata.is_file()
-                && !metadata.file_type().is_symlink()
-                && metadata.nlink() == 1
-                && metadata.len() <= MAX_CLIENT_CONFIG_BYTES =>
-        {
-            let mut bytes = Vec::new();
-            File::open(path)?
-                .take(MAX_CLIENT_CONFIG_BYTES + 1)
-                .read_to_end(&mut bytes)?;
-            if bytes.len() as u64 > MAX_CLIENT_CONFIG_BYTES {
-                bail!("AI client configuration exceeds 4 MiB");
-            }
-            Ok(Some(bytes))
-        }
-        Ok(_) => bail!("AI client configuration is not a safe regular file"),
-    }
-}
-
-fn ensure_config_parent(home: &Path, path: &Path) -> Result<()> {
-    let parent = path
-        .parent()
-        .context("AI client configuration requires parent")?;
-    let relative = parent
-        .strip_prefix(home)
-        .context("AI client configuration escaped home")?;
-    let mut current = home.to_owned();
-    for component in relative.components() {
-        current.push(component);
-        match fs::symlink_metadata(&current) {
-            Ok(metadata) if metadata.is_dir() && !metadata.file_type().is_symlink() => {}
-            Ok(_) => bail!("AI client path contains a link or non-directory"),
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-                fs::create_dir(&current)?;
-                fs::set_permissions(&current, fs::Permissions::from_mode(0o700))?;
-            }
-            Err(error) => return Err(error.into()),
-        }
-    }
-    Ok(())
-}
-
-fn write_config(path: &Path, expected: Option<&[u8]>, bytes: &[u8]) -> Result<()> {
-    if read_optional_config(path)?.as_deref() != expected {
-        bail!("AI client configuration changed concurrently");
-    }
-    let parent = path.parent().unwrap();
-    let temporary = parent.join(format!(".fleet-write-{}", Uuid::new_v4()));
-    let mode = fs::metadata(path)
-        .map(|metadata| metadata.permissions().mode() & 0o777)
-        .unwrap_or(0o600);
-    let result = (|| -> Result<()> {
-        let mut file = OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .mode(mode)
-            .open(&temporary)?;
-        file.write_all(bytes)?;
-        file.sync_all()?;
-        fs::rename(&temporary, path)?;
-        File::open(parent)?.sync_all()?;
-        Ok(())
-    })();
-    if result.is_err() {
-        let _ = fs::remove_file(temporary);
-    }
-    result
-}
-
-fn remove_config(path: &Path, expected: Option<&[u8]>) -> Result<()> {
-    if read_optional_config(path)?.as_deref() != expected {
-        bail!("AI client configuration changed concurrently");
-    }
-    if expected.is_some() {
-        fs::remove_file(path)?;
-        File::open(path.parent().unwrap())?.sync_all()?;
-    }
-    Ok(())
-}
-
-fn config_digest(bytes: Option<&[u8]>) -> String {
-    match bytes {
-        Some(bytes) => format!("sha256:{:x}", Sha256::digest(bytes)),
-        None => "missing".to_owned(),
-    }
-}
-
-fn remove_state_file(path: &Path) -> Result<()> {
-    match fs::remove_file(path) {
-        Ok(()) => {
-            File::open(path.parent().unwrap())?.sync_all()?;
-            Ok(())
-        }
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
-        Err(error) => Err(error.into()),
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use serde_json::Value;
     use std::os::unix::fs::symlink;
+    use uuid::Uuid;
 
     fn temp_root() -> PathBuf {
         let root = std::env::temp_dir()
@@ -708,32 +472,6 @@ mod tests {
     }
 
     #[test]
-    fn server_catalog_preserves_efforts_and_rejects_wrong_endpoint() {
-        let bytes = br#"{"baseUrl":"https://proxy.example/v1","models":[{"id":"one","reasoningLevels":["low","high"]},{"id":"two","reasoningLevels":[]}]}"#;
-        let cache = parse_server_catalog(bytes, "https://proxy.example/v1").unwrap();
-        assert_eq!(cache.models, ["one", "two"]);
-        assert_eq!(cache.reasoning_levels["one"], ["low", "high"]);
-        assert!(cache.skip_claude_models_for_other_clients);
-        assert!(parse_server_catalog(bytes, "https://other.example/v1").is_err());
-        assert!(
-            parse_server_catalog(
-                br#"{"baseUrl":"https://proxy.example/v1","models":[]}"#,
-                "https://proxy.example/v1"
-            )
-            .is_err()
-        );
-        assert_eq!(
-            select_model(None, Some("two"), &cache.models).unwrap(),
-            "two"
-        );
-        assert_eq!(
-            select_model(None, Some("removed"), &cache.models).unwrap(),
-            "one"
-        );
-        assert!(select_model(Some("removed"), None, &cache.models).is_err());
-    }
-
-    #[test]
     fn codex_catalog_preserves_context_limits_through_cache_and_refresh() {
         let root = temp_root();
         let reconciler = disk_reconciler(&root);
@@ -749,7 +487,7 @@ mod tests {
         state::write_json(&cache_path, &cache).unwrap();
         let cached = usable_cache(state::read_json(&cache_path).unwrap(), base_url, None).unwrap();
         reconciler
-            .apply_proxy("codex", base_url, None, &cached.models)
+            .apply_proxy("codex", base_url, None, &cached)
             .unwrap();
         let catalog_path = reconciler.state.join("codex-model-catalog.json");
         let catalog: Value = serde_json::from_slice(&fs::read(&catalog_path).unwrap()).unwrap();
@@ -774,7 +512,7 @@ mod tests {
         .unwrap();
         state::write_json(&cache_path, &refreshed).unwrap();
         reconciler
-            .apply_proxy("codex", base_url, None, &refreshed.models)
+            .apply_proxy("codex", base_url, None, &refreshed)
             .unwrap();
         let updated: Value = serde_json::from_slice(&fs::read(&catalog_path).unwrap()).unwrap();
         assert_eq!(updated["models"][0]["context_window"], 256000);
@@ -789,7 +527,7 @@ mod tests {
         let previous_catalog = fs::read(&catalog_path).unwrap();
         assert!(
             reconciler
-                .apply_proxy("codex", base_url, None, &invalid.models)
+                .apply_proxy("codex", base_url, None, &invalid)
                 .is_err()
         );
         assert_eq!(fs::read(&catalog_path).unwrap(), previous_catalog);
@@ -798,51 +536,13 @@ mod tests {
         other_endpoint.base_url = "https://other.example/v1".to_owned();
         state::write_json(&cache_path, &other_endpoint).unwrap();
         reconciler
-            .apply_proxy("codex", base_url, None, &refreshed.models)
+            .apply_proxy("codex", base_url, None, &other_endpoint)
             .unwrap();
         let isolated: Value = serde_json::from_slice(&fs::read(&catalog_path).unwrap()).unwrap();
         assert!(isolated["models"][0]["context_window"].is_null());
         reconciler.restore_native("codex").unwrap();
         assert!(!catalog_path.exists());
         fs::remove_dir_all(root).unwrap();
-    }
-
-    #[test]
-    fn server_catalog_rejects_invalid_context_limits() {
-        for field in ["contextWindow", "maxContextWindow", "autoCompactTokenLimit"] {
-            for value in [
-                serde_json::json!(0),
-                serde_json::json!(-1),
-                serde_json::json!(1.5),
-                serde_json::json!("272000"),
-                serde_json::json!(true),
-                serde_json::json!(i64::MAX as u64 + 1),
-            ] {
-                let bytes = serde_json::to_vec(&serde_json::json!({
-                    "baseUrl": "https://proxy.example/v1",
-                    "models": [{"id": "one", "reasoningLevels": [], field: value}]
-                }))
-                .unwrap();
-                assert!(parse_server_catalog(&bytes, "https://proxy.example/v1").is_err());
-            }
-        }
-        assert!(
-            parse_server_catalog(
-                br#"{"baseUrl":"https://proxy.example/v1","models":[{"id":"one","reasoningLevels":[],"contextWindow":872000,"maxContextWindow":272000}]}"#,
-                "https://proxy.example/v1",
-            )
-            .is_err()
-        );
-    }
-
-    #[test]
-    fn legacy_model_cache_remains_usable() {
-        let cache: ModelCache = serde_json::from_slice(
-            br#"{"version":1,"baseUrl":"https://proxy.example/v1","models":["one"],"reasoningLevels":{"one":["medium"]}}"#,
-        )
-        .unwrap();
-        assert!(cache.context_limits.is_empty());
-        assert!(usable_cache(Some(cache), "https://proxy.example/v1", None).is_some());
     }
 
     #[test]
@@ -854,7 +554,7 @@ mod tests {
             let cache = parse_server_catalog(br#"{"baseUrl":"https://proxy.example/v1","models":[{"id":"one","reasoningLevels":["low","high"]},{"id":"two","reasoningLevels":[]}]}"#, base_url).unwrap();
             state::write_json(&reconciler.state.join("models.json"), &cache).unwrap();
             reconciler
-                .apply_proxy(client, base_url, None, &cache.models)
+                .apply_proxy(client, base_url, None, &cache)
                 .unwrap();
             let path = reconciler.config_path(client).unwrap();
             let original = fs::read_to_string(&path).unwrap();
@@ -874,7 +574,7 @@ mod tests {
             };
             fs::write(&path, &changed).unwrap();
             reconciler
-                .apply_proxy(client, base_url, None, &cache.models)
+                .apply_proxy(client, base_url, None, &cache)
                 .unwrap();
             assert_eq!(fs::read_to_string(&path).unwrap(), changed);
             let mut refreshed = cache.clone();
@@ -883,7 +583,7 @@ mod tests {
                 .insert("one".to_owned(), vec!["medium".to_owned()]);
             state::write_json(&reconciler.state.join("models.json"), &refreshed).unwrap();
             reconciler
-                .apply_proxy(client, base_url, None, &refreshed.models)
+                .apply_proxy(client, base_url, None, &refreshed)
                 .unwrap();
             reconciler.restore_native(client).unwrap();
             assert!(!path.exists());
@@ -931,7 +631,7 @@ mod tests {
                     client,
                     "https://proxy.example/v1",
                     None,
-                    &["proxy-model".to_owned()],
+                    &uncached(&["proxy-model".to_owned()]),
                 )
                 .unwrap();
             reconciler.restore_native(client).unwrap();
@@ -952,7 +652,7 @@ mod tests {
                 "claude",
                 "https://proxy.example/v1",
                 None,
-                &["claude-one".to_owned()],
+                &uncached(&["claude-one".to_owned()]),
             )
             .unwrap();
         let path = reconciler.config_path("claude").unwrap();
@@ -980,7 +680,7 @@ mod tests {
             let root = temp_root();
             let reconciler = disk_reconciler(&root);
             reconciler
-                .apply_proxy(client, "https://proxy.example/v1", None, &models)
+                .apply_proxy(client, "https://proxy.example/v1", None, &uncached(&models))
                 .unwrap();
             let receipt = state::read_json::<Receipt>(&reconciler.receipt_path(client).unwrap())
                 .unwrap()
@@ -1014,7 +714,7 @@ mod tests {
                     client,
                     "https://proxy.example/v1",
                     None,
-                    &["gpt-one".to_owned()],
+                    &uncached(&["gpt-one".to_owned()]),
                 )
                 .unwrap();
             let path = reconciler.config_path(client).unwrap();
@@ -1030,7 +730,7 @@ mod tests {
                             client,
                             "https://proxy.example/v1",
                             pinned,
-                            &["claude-one".to_owned()]
+                            &uncached(&["claude-one".to_owned()])
                         )
                         .is_err()
                 );
@@ -1041,7 +741,7 @@ mod tests {
                         client,
                         "https://proxy.example/v1",
                         Some("claude-one"),
-                        &["claude-one".to_owned(), "gpt-one".to_owned()]
+                        &uncached(&["claude-one".to_owned(), "gpt-one".to_owned()])
                     )
                     .is_err()
             );
@@ -1065,7 +765,7 @@ mod tests {
             // Recreate the reconciler to use the persisted policy, as during offline fallback.
             let reconciler = Reconciler::new(&reconciler.home, root.join("state")).unwrap();
             reconciler
-                .apply_proxy(client, base_url, None, &cache.models)
+                .apply_proxy(client, base_url, None, &cache)
                 .unwrap();
             let receipt_path = reconciler.receipt_path(client).unwrap();
             let receipt = state::read_json::<Receipt>(&receipt_path).unwrap().unwrap();
@@ -1074,7 +774,7 @@ mod tests {
             cache.skip_claude_models_for_other_clients = true;
             state::write_json(&reconciler.state.join("models.json"), &cache).unwrap();
             reconciler
-                .apply_proxy(client, base_url, None, &cache.models)
+                .apply_proxy(client, base_url, None, &cache)
                 .unwrap();
             let receipt = state::read_json::<Receipt>(&receipt_path).unwrap().unwrap();
             assert_eq!(receipt.expected_model, "gpt-one");
@@ -1082,59 +782,6 @@ mod tests {
             reconciler.restore_native(client).unwrap();
             fs::remove_dir_all(root).unwrap();
         }
-    }
-
-    #[test]
-    fn url_and_cache_validation_fail_closed() {
-        for url in [
-            "http://proxy.example/v1",
-            "https://user:secret@proxy.example/v1",
-            "https://proxy.example/v1?key=secret",
-            "https://proxy.example/not-v1",
-        ] {
-            assert!(validate_base_url(url).is_err(), "accepted {url}");
-        }
-        let cache = ModelCache {
-            version: 1,
-            base_url: "https://proxy.example/v1".to_owned(),
-            models: vec!["gpt-6-astra".to_owned()],
-            reasoning_levels: BTreeMap::new(),
-            context_limits: BTreeMap::new(),
-            skip_claude_models_for_other_clients: true,
-        };
-        assert!(
-            usable_cache(
-                Some(cache.clone()),
-                "https://proxy.example/v1",
-                Some("gpt-6-astra")
-            )
-            .is_some()
-        );
-        assert!(
-            usable_cache(
-                Some(cache.clone()),
-                "https://other.example/v1",
-                Some("gpt-6-astra")
-            )
-            .is_none()
-        );
-        let mut invalid = cache.clone();
-        invalid.context_limits.insert(
-            "gpt-6-astra".to_owned(),
-            ContextLimits {
-                context_window: Some(0),
-                ..Default::default()
-            },
-        );
-        assert!(usable_cache(Some(invalid), "https://proxy.example/v1", None).is_none());
-        assert!(
-            usable_cache(
-                Some(cache),
-                "https://proxy.example/v1",
-                Some("missing-model")
-            )
-            .is_none()
-        );
     }
 
     #[test]
@@ -1155,7 +802,7 @@ mod tests {
                 "codex",
                 "https://proxy.example/v1",
                 Some("gpt-6-astra"),
-                &initial_models,
+                &uncached(&initial_models),
             )
             .unwrap();
         let applied = fs::read(&config_path).unwrap();
@@ -1189,7 +836,7 @@ mod tests {
                 "codex",
                 "https://proxy.example/v1",
                 Some("gpt-6-astra"),
-                &initial_models,
+                &uncached(&initial_models),
             )
             .unwrap();
         assert_eq!(fs::read(&config_path).unwrap(), applied);
@@ -1200,7 +847,7 @@ mod tests {
                 "codex",
                 "https://proxy.example/v1",
                 Some("gpt-6-astra"),
-                &refreshed_models,
+                &uncached(&refreshed_models),
             )
             .unwrap();
         let refreshed: Value = serde_json::from_slice(&fs::read(&catalog_path).unwrap()).unwrap();
@@ -1226,7 +873,12 @@ mod tests {
         let reconciler = disk_reconciler(&root);
         let models = ["one".to_owned()];
         reconciler
-            .apply_proxy("opencode", "https://proxy.example/v1", None, &models)
+            .apply_proxy(
+                "opencode",
+                "https://proxy.example/v1",
+                None,
+                &uncached(&models),
+            )
             .unwrap();
         let json = reconciler.config_path("opencode").unwrap();
         let managed = fs::read(&json).unwrap();
@@ -1235,7 +887,12 @@ mod tests {
         fs::write(&jsonc, local).unwrap();
         assert!(
             reconciler
-                .apply_proxy("opencode", "https://proxy.example/v1", None, &models)
+                .apply_proxy(
+                    "opencode",
+                    "https://proxy.example/v1",
+                    None,
+                    &uncached(&models)
+                )
                 .is_err()
         );
         assert!(reconciler.restore_native("opencode").is_err());
@@ -1265,7 +922,7 @@ mod tests {
                 "opencode",
                 "https://proxy.example/v1",
                 None,
-                &["one".to_owned()],
+                &uncached(&["one".to_owned()]),
             )
             .unwrap();
         let applied = fs::read_to_string(&jsonc).unwrap();
@@ -1278,7 +935,7 @@ mod tests {
                 "opencode",
                 "https://proxy.example/v1",
                 None,
-                &["two".to_owned()],
+                &uncached(&["two".to_owned()]),
             )
             .unwrap();
         assert!(
@@ -1357,7 +1014,7 @@ mod tests {
                 "codex",
                 "https://proxy.example/v1",
                 Some("gpt-6-astra"),
-                &["gpt-6-astra".to_owned()],
+                &uncached(&["gpt-6-astra".to_owned()]),
             )
             .unwrap();
         let config_path = reconciler.config_path("codex").unwrap();
@@ -1382,7 +1039,7 @@ mod tests {
                     "codex",
                     "https://proxy.example/v1",
                     Some("gpt-6-astra"),
-                    &["gpt-6-astra".to_owned()],
+                    &uncached(&["gpt-6-astra".to_owned()]),
                 )
                 .unwrap()
         );
@@ -1392,6 +1049,19 @@ mod tests {
     }
 
     const PROXY: &str = "https://proxy.example/v1";
+
+    /// The cache for `models` at [`PROXY`] without per-model metadata, as
+    /// the adapters saw it before any catalog was cached.
+    fn uncached(models: &[String]) -> ModelCache {
+        ModelCache {
+            version: 1,
+            base_url: PROXY.to_owned(),
+            models: models.to_vec(),
+            reasoning_levels: BTreeMap::new(),
+            context_limits: BTreeMap::new(),
+            skip_claude_models_for_other_clients: true,
+        }
+    }
 
     fn codex_models() -> Vec<String> {
         vec!["gpt-6-astra".to_owned(), "gpt-6-mini".to_owned()]
@@ -1407,7 +1077,12 @@ mod tests {
         let path = reconciler.config_path("codex").unwrap();
         fs::write(&path, NATIVE_CODEX).unwrap();
         reconciler
-            .apply_proxy("codex", PROXY, Some("gpt-6-astra"), &codex_models())
+            .apply_proxy(
+                "codex",
+                PROXY,
+                Some("gpt-6-astra"),
+                &uncached(&codex_models()),
+            )
             .unwrap();
         (root, reconciler, path)
     }
@@ -1470,7 +1145,12 @@ mod tests {
         .unwrap();
         assert!(
             reconciler
-                .apply_proxy("codex", PROXY, Some("gpt-6-astra"), &codex_models())
+                .apply_proxy(
+                    "codex",
+                    PROXY,
+                    Some("gpt-6-astra"),
+                    &uncached(&codex_models())
+                )
                 .unwrap()
         );
         assert_eq!(fs::read_to_string(&path).unwrap(), applied);
@@ -1488,13 +1168,23 @@ mod tests {
         type Step = fn(&Reconciler) -> Result<bool>;
         let steps: [(&str, Step); 4] = [
             ("same settings", |r| {
-                r.apply_proxy("codex", PROXY, Some("gpt-6-astra"), &codex_models())
+                r.apply_proxy(
+                    "codex",
+                    PROXY,
+                    Some("gpt-6-astra"),
+                    &uncached(&codex_models()),
+                )
             }),
             ("new model", |r| {
-                r.apply_proxy("codex", PROXY, Some("gpt-6-mini"), &codex_models())
+                r.apply_proxy(
+                    "codex",
+                    PROXY,
+                    Some("gpt-6-mini"),
+                    &uncached(&codex_models()),
+                )
             }),
             ("automatic model", |r| {
-                r.apply_proxy("codex", PROXY, None, &codex_models())
+                r.apply_proxy("codex", PROXY, None, &uncached(&codex_models()))
             }),
             ("native", |r| r.restore_native("codex").map(|()| true)),
         ];
@@ -1534,7 +1224,7 @@ mod tests {
                 "gpt-one"
             };
             reconciler
-                .apply_proxy(client, PROXY, Some(model), &models)
+                .apply_proxy(client, PROXY, Some(model), &uncached(&models))
                 .unwrap();
             let path = reconciler.config_path(client).unwrap();
             let applied = fs::read(&path).unwrap();
@@ -1542,7 +1232,7 @@ mod tests {
             fs::remove_file(&path).unwrap();
             assert!(
                 reconciler
-                    .apply_proxy(client, PROXY, Some(model), &models)
+                    .apply_proxy(client, PROXY, Some(model), &uncached(&models))
                     .unwrap(),
                 "{client}"
             );
@@ -1575,7 +1265,12 @@ mod tests {
         let (root, reconciler, path) = codex_on_proxy();
         remove_state_file(&reconciler.receipt_path("codex").unwrap()).unwrap();
         reconciler
-            .apply_proxy("codex", PROXY, Some("gpt-6-mini"), &codex_models())
+            .apply_proxy(
+                "codex",
+                PROXY,
+                Some("gpt-6-mini"),
+                &uncached(&codex_models()),
+            )
             .unwrap();
         let receipt = codex_receipt(&reconciler);
         assert_eq!(receipt.original_model, None);
@@ -1597,7 +1292,7 @@ mod tests {
         fs::write(&path, document.to_string()).unwrap();
         remove_state_file(&reconciler.receipt_path("codex").unwrap()).unwrap();
         reconciler
-            .apply_proxy("codex", PROXY, None, &codex_models())
+            .apply_proxy("codex", PROXY, None, &uncached(&codex_models()))
             .unwrap();
         let receipt = codex_receipt(&reconciler);
         assert_eq!(receipt.original_provider.as_deref(), Some("openai"));
@@ -1629,7 +1324,7 @@ mod tests {
                 "gpt-one"
             };
             reconciler
-                .apply_proxy(client, PROXY, Some(model), &models)
+                .apply_proxy(client, PROXY, Some(model), &uncached(&models))
                 .unwrap();
             remove_state_file(&reconciler.receipt_path(client).unwrap()).unwrap();
             reconciler.restore_native(client).unwrap();
@@ -1668,7 +1363,7 @@ mod tests {
                 "one"
             };
             reconciler
-                .apply_proxy(client, PROXY, Some(model), &models)
+                .apply_proxy(client, PROXY, Some(model), &uncached(&models))
                 .unwrap();
             // The user selects another model and Fleet's provider disappears.
             let mut value: Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
@@ -1678,7 +1373,7 @@ mod tests {
             fs::write(&path, serde_json::to_vec(&value).unwrap()).unwrap();
             assert!(
                 reconciler
-                    .apply_proxy(client, PROXY, Some(model), &models)
+                    .apply_proxy(client, PROXY, Some(model), &uncached(&models))
                     .unwrap(),
                 "{client}"
             );
@@ -1705,7 +1400,7 @@ mod tests {
                 "opencode",
                 "https://proxy.example/v1",
                 Some("gpt-6-astra"),
-                &["gpt-6-astra".to_owned()],
+                &uncached(&["gpt-6-astra".to_owned()]),
             )
             .unwrap();
         let receipt_path = reconciler.receipt_path("opencode").unwrap();
@@ -1744,7 +1439,7 @@ mod tests {
                     "codex",
                     "https://proxy.example/v1",
                     Some("gpt-6-astra"),
-                    &["gpt-6-astra".to_owned()],
+                    &uncached(&["gpt-6-astra".to_owned()]),
                 )
                 .is_err()
         );
@@ -1793,7 +1488,7 @@ mod tests {
                     None,
                     "https://proxy.example/v1",
                     None,
-                    &models,
+                    &uncached(&models),
                 )
                 .unwrap_err();
             let text = chain(&error);
@@ -1815,7 +1510,7 @@ mod tests {
                 None,
                 "https://proxy.example/v1",
                 None,
-                &["m".to_owned()],
+                &uncached(&["m".to_owned()]),
             )
             .unwrap_err();
         assert_eq!(error.to_string(), "invalid Codex TOML at line 2 column 9");

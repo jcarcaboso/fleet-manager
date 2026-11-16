@@ -5,31 +5,22 @@
 //! means the volume is left out of the report.
 //!
 //! Those calls can block for ever in the kernel on a hung network or FUSE
-//! home, so they never run on the Agent's own loop. A [`Worker`] runs them on
-//! one lazily started, detached thread, one request at a time. The machine
-//! information report reuses the same worker for its own local reads.
+//! home, so they never run on the Agent's own loop but on a
+//! [`Worker`](crate::worker::Worker) thread.
 
 use std::{
     io,
     path::{Path, PathBuf},
-    sync::mpsc::{self, Receiver, SyncSender, TryRecvError},
     time::{Duration, Instant},
 };
 
-use crate::protocol::{DiskUsageReport, DiskVolume};
+use crate::{
+    protocol::{Api, DiskUsageReport, DiskVolume},
+    worker::{DEFAULT_STUCK, DEFAULT_WAIT, Style, Worker},
+};
 
 /// Time between scheduled reports, counted from the last attempt.
 pub const REPORT_INTERVAL: Duration = Duration::from_secs(4 * 60 * 60);
-
-/// Longest a request waits for its own measurement. A normal call takes
-/// microseconds; a slower one is picked up by a later cycle instead.
-const MEASURE_WAIT: Duration = Duration::from_secs(2);
-
-/// An unfinished measurement older than this means the worker is stuck.
-const STUCK_AFTER: Duration = Duration::from_secs(60);
-
-/// Pause between checks while waiting for a result.
-const WAIT_STEP: Duration = Duration::from_millis(10);
 
 /// Stack of the measurement thread: it only calls `statvfs` and `eprintln`.
 const WORKER_STACK_BYTES: usize = 256 * 1024;
@@ -68,19 +59,11 @@ fn measure_volume(label: &'static str, path: &Path) -> Option<DiskVolume> {
 
 /// True unless both paths are known to be on the same device.
 fn different_device(home: &Path, state: &Path) -> bool {
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::MetadataExt;
-        match (std::fs::metadata(home), std::fs::metadata(state)) {
-            (Ok(home), Ok(state)) => home.dev() != state.dev(),
-            (Err(_), Ok(_)) => true,
-            _ => false,
-        }
-    }
-    #[cfg(not(unix))]
-    {
-        let _ = (home, state);
-        false
+    use std::os::unix::fs::MetadataExt;
+    match (std::fs::metadata(home), std::fs::metadata(state)) {
+        (Ok(home), Ok(state)) => home.dev() != state.dev(),
+        (Err(_), Ok(_)) => true,
+        _ => false,
     }
 }
 
@@ -163,176 +146,22 @@ fn c_path(path: &Path) -> io::Result<std::ffi::CString> {
         .map_err(|_| io::Error::from(io::ErrorKind::InvalidInput))
 }
 
-pub type Measurer<T = DiskUsageReport> = Box<dyn Fn() -> Option<T> + Send + 'static>;
-
-/// The thread and its two single-purpose channels. Dropping this lets a
-/// worker that ever returns exit; one that never returns is left behind.
-struct Link<T> {
-    requests: SyncSender<()>,
-    results: Receiver<Option<T>>,
-}
-
-/// How a worker presents itself: the thread name, what it measures in log
-/// messages, and the thread's stack.
-#[derive(Debug, Clone, Copy)]
-pub struct Style {
-    pub thread: &'static str,
-    pub what: &'static str,
-    pub stack_bytes: usize,
-}
-
-const DISK_STYLE: Style = Style {
+/// The disk usage worker's thread. It only calls `statvfs` and `eprintln`, so
+/// it gets a small stack.
+pub const STYLE: Style = Style {
     thread: "fleet-disk",
     what: "disk usage measurement",
     stack_bytes: WORKER_STACK_BYTES,
 };
 
-/// Runs measurements off the Agent loop. At most one is outstanding, on at most
-/// one thread, for the life of the process. If a measurement stays unfinished
-/// for [`STUCK_AFTER`], measuring is disabled instead of starting another
-/// thread behind it. The thread is detached, so it can never block exit.
-pub struct Worker<T = DiskUsageReport> {
-    /// Taken by the thread when it starts.
-    measurer: Option<Measurer<T>>,
-    link: Option<Link<T>>,
-    style: Style,
-    outstanding: Option<Instant>,
-    disabled: bool,
-    wait: Duration,
-    stuck_after: Duration,
-}
-
-impl Worker {
-    pub fn new(home: PathBuf, state: PathBuf) -> Self {
-        Self::with_measurer(
-            Box::new(move || measure(&home, &state)),
-            MEASURE_WAIT,
-            STUCK_AFTER,
-        )
-    }
-
-    pub fn with_measurer(measurer: Measurer, wait: Duration, stuck_after: Duration) -> Self {
-        Self::styled(measurer, wait, stuck_after, DISK_STYLE)
-    }
-}
-
-impl<T: Send + 'static> Worker<T> {
-    /// A worker with the standard bounds for any kind of result.
-    pub fn standard(measurer: Measurer<T>, style: Style) -> Self {
-        Self::styled(measurer, MEASURE_WAIT, STUCK_AFTER, style)
-    }
-
-    pub fn styled(
-        measurer: Measurer<T>,
-        wait: Duration,
-        stuck_after: Duration,
-        style: Style,
-    ) -> Self {
-        Self {
-            measurer: Some(measurer),
-            link: None,
-            style,
-            outstanding: None,
-            disabled: false,
-            wait,
-            stuck_after,
-        }
-    }
-
-    /// True when a new measurement may be requested.
-    pub fn is_idle(&self) -> bool {
-        !self.disabled && self.outstanding.is_none()
-    }
-
-    /// Takes the result of an earlier request without blocking. A request
-    /// unfinished after the stuck threshold disables the worker.
-    pub fn collect(&mut self, now: Instant) -> Option<T> {
-        let since = self.outstanding?;
-        match self.link.as_ref()?.results.try_recv() {
-            Ok(result) => {
-                self.outstanding = None;
-                result
-            }
-            Err(TryRecvError::Empty) => {
-                if now.saturating_duration_since(since) >= self.stuck_after {
-                    self.disable("a measurement did not finish");
-                }
-                None
-            }
-            Err(TryRecvError::Disconnected) => {
-                self.disable("the measurement thread stopped");
-                None
-            }
-        }
-    }
-
-    /// Requests a measurement, starting the thread on first use, and waits at
-    /// most the configured bound for it. `None` means no result yet: it is
-    /// picked up by [`Worker::collect`] in a later cycle. Call only when idle.
-    pub async fn measure(&mut self, now: Instant) -> Option<T> {
-        if !self.is_idle() || !self.request(now) {
-            return None;
-        }
-        let deadline = Instant::now() + self.wait;
-        loop {
-            let result = self.collect(now);
-            if self.outstanding.is_none() {
-                return result;
-            }
-            let left = deadline.saturating_duration_since(Instant::now());
-            if left.is_zero() {
-                return None;
-            }
-            tokio::time::sleep(left.min(WAIT_STEP)).await;
-        }
-    }
-
-    fn request(&mut self, now: Instant) -> bool {
-        if self.link.is_none() {
-            let Some(measurer) = self.measurer.take() else {
-                self.disable("the measurement thread could not be started");
-                return false;
-            };
-            let (requests, request_rx) = mpsc::sync_channel::<()>(1);
-            let (result_tx, results) = mpsc::channel();
-            let started = std::thread::Builder::new()
-                .name(self.style.thread.to_owned())
-                .stack_size(self.style.stack_bytes)
-                .spawn(move || {
-                    while request_rx.recv().is_ok() {
-                        if result_tx.send(measurer()).is_err() {
-                            break;
-                        }
-                    }
-                });
-            if let Err(error) = started {
-                eprintln!("could not start the {} thread: {error}", self.style.thread);
-                self.disable("the measurement thread could not be started");
-                return false;
-            }
-            self.link = Some(Link { requests, results });
-        }
-        let sent = self
-            .link
-            .as_ref()
-            .is_some_and(|link| link.requests.try_send(()).is_ok());
-        if !sent {
-            self.disable("the measurement thread stopped");
-            return false;
-        }
-        self.outstanding = Some(now);
-        true
-    }
-
-    fn disable(&mut self, reason: &str) {
-        eprintln!(
-            "{} is off until the Agent restarts: {reason}",
-            self.style.what
-        );
-        self.disabled = true;
-        self.outstanding = None;
-        self.link = None;
-    }
+/// The disk usage worker of the Agent loop and the `disk` command.
+pub fn worker(home: PathBuf, state: PathBuf) -> Worker<DiskUsageReport> {
+    Worker::new(
+        Box::new(move || measure(&home, &state)),
+        STYLE,
+        DEFAULT_WAIT,
+        DEFAULT_STUCK,
+    )
 }
 
 /// When to report, kept in memory only. Every method takes the current
@@ -376,9 +205,52 @@ impl Schedule {
     }
 }
 
+/// One cycle's disk work. The measurement runs on the [`Worker`] thread
+/// and the report is a side task, so neither can delay the next poll beyond
+/// the worker's short bounded wait. At most one report is in flight; a report
+/// that finds another still running is dropped, and the schedule tries again
+/// at the next slot or request.
+pub async fn step<F, Fut>(
+    schedule: &mut Schedule,
+    worker: &mut Worker<DiskUsageReport>,
+    in_flight: &mut Option<tokio::task::JoinHandle<()>>,
+    send: F,
+) where
+    F: FnOnce(DiskUsageReport) -> Fut,
+    Fut: std::future::Future<Output = ()> + Send + 'static,
+{
+    let now = Instant::now();
+    // A measurement requested in an earlier cycle may have finished since.
+    let mut report = worker.collect(now);
+    if report.is_none() && worker.is_idle() && schedule.is_due(now) {
+        schedule.attempted(now);
+        report = worker.measure(now).await;
+    }
+    let Some(report) = report else {
+        return;
+    };
+    if in_flight.as_ref().is_some_and(|task| !task.is_finished()) {
+        eprintln!("skipped a disk usage report: the previous one is still being sent");
+        return;
+    }
+    *in_flight = Some(tokio::spawn(send(report)));
+}
+
+/// Sends one report. Like attempt detail it is best effort: a failure is
+/// logged, and the schedule has already recorded the attempt, so it waits for
+/// the next slot or the next Server request instead of being retried.
+pub async fn deliver(client: &Api, report: &DiskUsageReport) {
+    if let Err(error) = client.disk_usage(report).await {
+        eprintln!("could not send disk usage; will retry later: {error}");
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::{state, test_support::MockServer};
+    use std::fs;
+    use uuid::Uuid;
 
     const GIB: u64 = 1 << 30;
 
@@ -564,143 +436,6 @@ mod tests {
         assert!(schedule.is_due(start + Duration::from_secs(60)));
     }
 
-    // Worker tests. Bounds are tens of milliseconds so they stay fast.
-    use std::{
-        collections::HashSet,
-        sync::{
-            Arc, Mutex,
-            atomic::{AtomicUsize, Ordering},
-        },
-    };
-
-    fn report() -> DiskUsageReport {
-        DiskUsageReport {
-            volumes: vec![DiskVolume {
-                label: "home",
-                total_bytes: 10,
-                used_bytes: 4,
-                available_bytes: 6,
-            }],
-        }
-    }
-
-    #[tokio::test]
-    async fn the_worker_runs_one_measurement_at_a_time_on_one_thread() {
-        let running = Arc::new(AtomicUsize::new(0));
-        let peak = Arc::new(AtomicUsize::new(0));
-        let calls = Arc::new(AtomicUsize::new(0));
-        let threads = Arc::new(Mutex::new(HashSet::new()));
-        let measurer: Measurer = {
-            let (running, peak, calls, threads) = (
-                running.clone(),
-                peak.clone(),
-                calls.clone(),
-                threads.clone(),
-            );
-            Box::new(move || {
-                let now = running.fetch_add(1, Ordering::SeqCst) + 1;
-                peak.fetch_max(now, Ordering::SeqCst);
-                calls.fetch_add(1, Ordering::SeqCst);
-                let thread = std::thread::current();
-                assert_eq!(thread.name(), Some("fleet-disk"));
-                threads.lock().unwrap().insert(thread.id());
-                std::thread::sleep(Duration::from_millis(5));
-                running.fetch_sub(1, Ordering::SeqCst);
-                Some(report())
-            })
-        };
-        let mut worker =
-            Worker::with_measurer(measurer, Duration::from_secs(5), Duration::from_secs(60));
-        for _ in 0..10 {
-            assert!(worker.is_idle());
-            assert_eq!(worker.measure(Instant::now()).await, Some(report()));
-        }
-        assert_eq!(calls.load(Ordering::SeqCst), 10);
-        assert_eq!(peak.load(Ordering::SeqCst), 1);
-        assert_eq!(threads.lock().unwrap().len(), 1);
-    }
-
-    #[tokio::test]
-    async fn an_outstanding_request_is_never_doubled() {
-        let (release, blocked) = mpsc::channel::<()>();
-        let calls = Arc::new(AtomicUsize::new(0));
-        let measurer: Measurer = {
-            let calls = calls.clone();
-            let blocked = Mutex::new(blocked);
-            Box::new(move || {
-                calls.fetch_add(1, Ordering::SeqCst);
-                let _ = blocked.lock().unwrap().recv();
-                Some(report())
-            })
-        };
-        let mut worker =
-            Worker::with_measurer(measurer, Duration::from_millis(30), Duration::from_secs(60));
-        let start = Instant::now();
-        assert_eq!(worker.measure(start).await, None);
-        assert!(!worker.is_idle());
-        assert_eq!(worker.measure(start).await, None);
-        assert_eq!(calls.load(Ordering::SeqCst), 1);
-        // The late result is handed over by a later cycle.
-        release.send(()).unwrap();
-        let mut late = None;
-        for _ in 0..200 {
-            late = worker.collect(start);
-            if late.is_some() {
-                break;
-            }
-            tokio::time::sleep(Duration::from_millis(5)).await;
-        }
-        assert_eq!(late, Some(report()));
-        assert!(worker.is_idle());
-    }
-
-    #[tokio::test]
-    async fn a_stuck_measurement_is_bounded_and_disables_the_worker() {
-        let (release, blocked) = mpsc::channel::<()>();
-        let calls = Arc::new(AtomicUsize::new(0));
-        let threads = Arc::new(Mutex::new(HashSet::new()));
-        let measurer: Measurer = {
-            let (calls, threads) = (calls.clone(), threads.clone());
-            let blocked = Mutex::new(blocked);
-            Box::new(move || {
-                calls.fetch_add(1, Ordering::SeqCst);
-                threads.lock().unwrap().insert(std::thread::current().id());
-                let _ = blocked.lock().unwrap().recv();
-                Some(report())
-            })
-        };
-        let stuck_after = Duration::from_millis(100);
-        let mut worker = Worker::with_measurer(measurer, Duration::from_millis(30), stuck_after);
-        let start = Instant::now();
-        let began = Instant::now();
-        assert_eq!(worker.measure(start).await, None);
-        assert!(began.elapsed() < Duration::from_secs(2), "bounded wait");
-
-        // Not stuck yet: still outstanding, nothing else is started.
-        assert_eq!(worker.collect(start + stuck_after / 2), None);
-        assert!(!worker.is_idle());
-
-        // Stuck: disabled for good, and no further request starts a thread.
-        assert_eq!(worker.collect(start + stuck_after), None);
-        assert!(!worker.is_idle());
-        for _ in 0..3 {
-            assert_eq!(worker.measure(start + stuck_after).await, None);
-        }
-        assert_eq!(calls.load(Ordering::SeqCst), 1);
-        assert_eq!(threads.lock().unwrap().len(), 1);
-        drop(release);
-    }
-
-    #[tokio::test]
-    async fn a_panicking_measurement_disables_the_worker() {
-        let measurer: Measurer = Box::new(|| panic!("measurement failed"));
-        let mut worker =
-            Worker::with_measurer(measurer, Duration::from_secs(5), Duration::from_secs(60));
-        assert_eq!(worker.measure(Instant::now()).await, None);
-        assert!(!worker.is_idle());
-    }
-
-    #[cfg(unix)]
     #[test]
     fn measures_the_real_home_directory() {
         let home = dirs::home_dir().unwrap_or_else(std::env::temp_dir);
@@ -715,7 +450,6 @@ mod tests {
         assert!(report.volumes.iter().all(|v| v.label != "state") || report.volumes.len() == 2);
     }
 
-    #[cfg(unix)]
     #[test]
     fn same_device_state_directory_is_not_reported_twice() {
         let dir = std::env::temp_dir();
@@ -724,7 +458,6 @@ mod tests {
         assert_eq!(report.volumes[0].label, "home");
     }
 
-    #[cfg(unix)]
     #[test]
     fn unmeasurable_volumes_are_skipped() {
         let missing = Path::new("/definitely/not/a/real/path");
@@ -732,5 +465,159 @@ mod tests {
         let state_only = measure(missing, &std::env::temp_dir()).unwrap();
         assert_eq!(state_only.volumes.len(), 1);
         assert_eq!(state_only.volumes[0].label, "state");
+    }
+
+    // One cycle's disk work, as the Agent loop runs it.
+    fn test_directory() -> PathBuf {
+        let path = std::env::temp_dir()
+            .canonicalize()
+            .unwrap()
+            .join(format!("fleet-main-{}", Uuid::new_v4()));
+        state::private_directory(&path).unwrap();
+        path
+    }
+
+    #[tokio::test]
+    async fn disk_usage_is_sent_best_effort_and_never_retried_in_a_loop() {
+        let directory = test_directory();
+        let server = MockServer::start(vec![(404, ""), (204, "")]);
+        let client = Api::for_loopback_test(&server.url());
+        let report = measure(&directory, &directory).expect("measurable");
+
+        // An older Server answers 404: logged, nothing returned, one request.
+        deliver(&client, &report).await;
+        assert_eq!(server.requests().len(), 1);
+        deliver(&client, &report).await;
+
+        let requests = server.requests();
+        assert_eq!(requests.len(), 2);
+        assert!(
+            requests
+                .iter()
+                .all(|r| r.method == "PUT" && r.path == "/agent/v1/disk-usage")
+        );
+        let body: serde_json::Value = serde_json::from_str(&requests[1].body).unwrap();
+        let volumes = body["volumes"].as_array().unwrap();
+        assert_eq!(volumes.len(), 1, "state directory shares the home device");
+        assert_eq!(volumes[0]["label"], "home");
+        assert!(volumes[0]["totalBytes"].as_u64().unwrap() > 0);
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    fn sample_disk_report() -> DiskUsageReport {
+        DiskUsageReport {
+            volumes: vec![DiskVolume {
+                label: "home",
+                total_bytes: 10,
+                used_bytes: 4,
+                available_bytes: 6,
+            }],
+        }
+    }
+
+    fn fake_worker(
+        measure: impl Fn() -> Option<DiskUsageReport> + Send + 'static,
+    ) -> Worker<DiskUsageReport> {
+        Worker::new(
+            Box::new(measure),
+            STYLE,
+            Duration::from_secs(5),
+            Duration::from_secs(60),
+        )
+    }
+
+    #[tokio::test]
+    async fn the_report_is_a_side_task_and_one_is_in_flight_at_most() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        let sent = std::sync::Arc::new(AtomicUsize::new(0));
+        let mut schedule = Schedule::default();
+        let mut worker = fake_worker(|| Some(sample_disk_report()));
+        let mut in_flight = None;
+        let slow_send = |sent: std::sync::Arc<AtomicUsize>| {
+            move |_report: DiskUsageReport| async move {
+                sent.fetch_add(1, Ordering::SeqCst);
+                tokio::time::sleep(Duration::from_secs(30)).await;
+            }
+        };
+
+        // Not due before the first successful poll: nothing happens.
+        step(
+            &mut schedule,
+            &mut worker,
+            &mut in_flight,
+            slow_send(sent.clone()),
+        )
+        .await;
+        assert!(in_flight.is_none());
+
+        // Due: the cycle returns while the 30 s send is still running.
+        schedule.poll_succeeded(false);
+        let began = Instant::now();
+        step(
+            &mut schedule,
+            &mut worker,
+            &mut in_flight,
+            slow_send(sent.clone()),
+        )
+        .await;
+        assert!(began.elapsed() < Duration::from_secs(2));
+        assert!(in_flight.as_ref().is_some_and(|task| !task.is_finished()));
+        tokio::task::yield_now().await;
+        assert_eq!(sent.load(Ordering::SeqCst), 1);
+
+        // Asked again while that report is still being sent: dropped.
+        schedule.poll_succeeded(true);
+        step(
+            &mut schedule,
+            &mut worker,
+            &mut in_flight,
+            slow_send(sent.clone()),
+        )
+        .await;
+        tokio::task::yield_now().await;
+        assert_eq!(sent.load(Ordering::SeqCst), 1);
+        in_flight.take().unwrap().abort();
+    }
+
+    #[tokio::test]
+    async fn nothing_is_sent_when_no_volume_can_be_measured() {
+        let mut schedule = Schedule::default();
+        schedule.poll_succeeded(false);
+        let mut worker = fake_worker(|| None);
+        let mut in_flight = None;
+        step(&mut schedule, &mut worker, &mut in_flight, |_| async {
+            panic!("no report to send");
+        })
+        .await;
+        assert!(in_flight.is_none());
+        // The attempt counts: no new try before the next slot.
+        assert!(!schedule.is_due(Instant::now()));
+    }
+
+    #[tokio::test]
+    async fn a_stuck_measurement_never_stalls_the_cycle() {
+        let (release, blocked) = std::sync::mpsc::channel::<()>();
+        let blocked = std::sync::Mutex::new(blocked);
+        let mut schedule = Schedule::default();
+        schedule.poll_succeeded(false);
+        let mut worker = Worker::new(
+            Box::new(move || {
+                let _ = blocked.lock().unwrap().recv();
+                None
+            }),
+            STYLE,
+            Duration::from_millis(30),
+            Duration::from_millis(60),
+        );
+        let mut in_flight = None;
+        let began = Instant::now();
+        step(&mut schedule, &mut worker, &mut in_flight, |_| async {
+            panic!("no report to send");
+        })
+        .await;
+        assert!(began.elapsed() < Duration::from_secs(2));
+        assert!(!worker.is_idle());
+        assert!(in_flight.is_none());
+        drop(release);
     }
 }

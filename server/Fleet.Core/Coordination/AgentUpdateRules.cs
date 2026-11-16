@@ -1,32 +1,7 @@
 using System.Text.RegularExpressions;
+using static Fleet.Core.Coordination.RuleText;
 
 namespace Fleet.Core.Coordination;
-
-/// <summary>Optional features an Agent announces in <c>X-Fleet-Agent-Capabilities</c> on each poll.</summary>
-[Flags]
-public enum AgentCapabilities
-{
-    None = 0,
-    DiskUsage = 1,
-    AgentUpdate = 2,
-    ClaudeSkills = 4,
-}
-
-/// <summary>
-/// The update of one Node's Agent to <c>TargetVersion</c>, as the Operator API shows it. <c>FromVersion</c> is the version the Agent
-/// reported when the update was requested, or null without a report. <c>ErrorCode</c> is set for failed updates.
-/// </summary>
-public sealed record AgentUpdateStatus(string? FromVersion, string TargetVersion, string State, string? ErrorCode, string RequestedBy,
-    DateTimeOffset RequestedAt, DateTimeOffset UpdatedAt, DateTimeOffset? FinishedAt);
-
-/// <summary>
-/// What an Agent reports about an update: the request it answers (<c>UpdateId</c> from the poll), the target version, the new state
-/// and, for <c>failed</c>, an error code.
-/// </summary>
-public sealed record AgentUpdateReport(Guid UpdateId, string Version, string State, string? ErrorCode);
-
-/// <summary>The update a poll asks the Agent to apply. <c>UpdateId</c> identifies this request in the Agent's reports.</summary>
-public sealed record AgentUpdateInstruction(string Version, Guid UpdateId);
 
 /// <summary>States, transitions and limits of Agent updates, shared by the Server routes and the coordinator.</summary>
 public static partial class AgentUpdateRules
@@ -89,6 +64,4 @@ public static partial class AgentUpdateRules
             throw Invalid("errorCode is allowed only with state failed.");
         return report;
     }
-
-    private static CoordinationException Invalid(string message) => new("invalid_request", message);
 }

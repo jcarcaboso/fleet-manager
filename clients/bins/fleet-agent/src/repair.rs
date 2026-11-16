@@ -20,26 +20,15 @@ use crate::{
     protocol::{Api, ProtocolError},
 };
 use reqwest::StatusCode;
-use serde::Serialize;
 use std::{collections::BTreeMap, future::Future};
 use uuid::Uuid;
 
+/// One Target the Agent failed to repair, and the body of
+/// `PUT agent/v1/repair-failures`; defined with the other wire types.
+pub use crate::protocol::{RepairFailure as Failure, RepairFailuresReport as Report};
+
 /// Most Targets in one report.
 pub const MAX_FAILURES: usize = 50;
-
-/// One Target the Agent failed to repair.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct Failure {
-    pub target: String,
-    pub assignment_id: Uuid,
-    pub error_code: String,
-    pub diagnostic: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub path: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub step: Option<fleet_reconcile::Step>,
-}
 
 impl Failure {
     pub fn new(
@@ -58,12 +47,6 @@ impl Failure {
             step: detail.step,
         }
     }
-}
-
-/// Body of `PUT agent/v1/repair-failures`.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
-pub struct Report {
-    pub failures: Vec<Failure>,
 }
 
 /// Whether the Server needs to see the same list again.
@@ -155,7 +138,7 @@ pub async fn deliver(client: &Api, report: &Report) -> Delivery {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::detail::testing::MockServer;
+    use crate::test_support::MockServer;
     use std::path::{Path, PathBuf};
 
     fn failure(target: &str, message: &str) -> Failure {

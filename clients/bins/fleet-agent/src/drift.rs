@@ -7,18 +7,13 @@
 //! most, and a failure (including 404 from an older Server) is only logged.
 
 use crate::protocol::Api;
-use serde::Serialize;
 use std::{future::Future, path::Path};
+
+/// Body of `POST agent/v1/drift`; defined with the other wire types.
+pub use crate::protocol::DriftReport as Report;
 
 /// Most files in one report.
 pub const MAX_FILES: usize = fleet_reconcile::MAX_REPAIRED_PATHS;
-
-/// Body of `POST agent/v1/drift`.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
-pub struct Report {
-    pub target: String,
-    pub files: Vec<String>,
-}
 
 impl Report {
     /// The report for the files repaired in `target`: only safe relative
@@ -75,7 +70,7 @@ pub async fn deliver(client: &Api, report: &Report) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::detail::testing::MockServer;
+    use crate::test_support::MockServer;
     use std::{
         sync::{
             Arc,

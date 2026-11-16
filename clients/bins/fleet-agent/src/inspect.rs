@@ -19,9 +19,12 @@ use serde_json::{Value, json};
 use time::{OffsetDateTime, format_description::well_known::Rfc3339};
 
 use crate::{
-    RunState,
-    credentials::{CredentialStore, StoredIdentity},
-    detail, disk, managed, service, state,
+    credentials::load_identity,
+    detail, disk, managed,
+    protocol::{Assignment, DiskUsageReport},
+    run_state::{self, RunState},
+    service, state,
+    worker::{DEFAULT_STUCK, Style, Worker},
 };
 
 /// A certificate expiring sooner than this is reported as a warning.
@@ -49,24 +52,8 @@ fn load_config(directory: &Path) -> Result<state::Config> {
         .context("Agent is not configured")
 }
 
-fn load_identity(directory: &Path) -> std::io::Result<Option<StoredIdentity>> {
-    match CredentialStore::open_read_only(directory.join("credentials"))? {
-        Some(store) => store.load_identity(),
-        None => Ok(None),
-    }
-}
-
-/// Whether the state directory holds a configured and enrolled Agent.
-pub fn enrolled(directory: &Path) -> Result<bool> {
-    Ok(state::existing_private_directory(directory)?
-        && state::read_json::<state::Config>(&directory.join("config.json"))?.is_some()
-        && load_identity(directory)?.is_some())
-}
-
 fn load_run(directory: &Path) -> Result<RunState> {
-    let mut run = state::read_json::<RunState>(&directory.join("run.json"))?.unwrap_or_default();
-    crate::migrate_run_state(&mut run);
-    Ok(run)
+    run_state::load(&directory.join("run.json"))
 }
 
 pub fn status(directory: &Path) -> Result<Value> {
@@ -131,7 +118,7 @@ fn service_hint() -> &'static str {
     }
 }
 
-fn assignment_summary(assignment: &crate::Assignment) -> Value {
+fn assignment_summary(assignment: &Assignment) -> Value {
     json!({"assignmentId":assignment.assignment_id,"attemptId":assignment.attempt_id,
         "revision":assignment.desired_revision_id,
         "target":{"base":assignment.target.base,"path":assignment.target.path}})
@@ -354,16 +341,16 @@ pub async fn diagnose(directory: &Path, home_wait: Duration) -> Report {
 /// Whether `home` is a directory, asked on the bounded worker thread because a
 /// hung network mount can block a `stat` for ever. `None` means no answer.
 async fn home_exists(home: std::path::PathBuf, wait: Duration) -> Option<bool> {
-    let style = disk::Style {
+    let style = Style {
         thread: "fleet-check",
         what: "home directory check",
         stack_bytes: 256 * 1024,
     };
-    let mut worker = disk::Worker::<bool>::styled(
+    let mut worker = Worker::<bool>::new(
         Box::new(move || Some(home.is_dir())),
-        wait,
-        Duration::from_secs(60),
         style,
+        wait,
+        DEFAULT_STUCK,
     );
     worker.measure(Instant::now()).await
 }
@@ -371,13 +358,13 @@ async fn home_exists(home: std::path::PathBuf, wait: Duration) -> Option<bool> {
 pub async fn disk(directory: &Path) -> Result<Value> {
     require_directory(directory)?;
     let config = load_config(directory)?;
-    let mut worker = disk::Worker::new(config.home, directory.to_path_buf());
+    let mut worker = disk::worker(config.home, directory.to_path_buf());
     Ok(measure_once(&mut worker).await)
 }
 
 /// One measurement with the worker's bounded wait. A measurement that is still
 /// running afterwards is left on its detached thread, which never delays exit.
-pub async fn measure_once(worker: &mut disk::Worker) -> Value {
+pub async fn measure_once(worker: &mut Worker<DiskUsageReport>) -> Value {
     let usage = worker.measure(Instant::now()).await;
     json!({"diskUsage":usage,"timedOut":usage.is_none() && !worker.is_idle()})
 }
@@ -386,8 +373,9 @@ pub async fn measure_once(worker: &mut disk::Worker) -> Value {
 mod tests {
     use super::*;
     use crate::{
-        PendingReport, TargetRunState,
-        protocol::{Assignment, DiskUsageReport, DiskVolume, EnrollmentResponse},
+        credentials::CredentialStore,
+        protocol::{DiskVolume, EnrollmentResponse},
+        run_state::{PendingReport, TargetRunState},
     };
     use std::{
         fs,
@@ -860,8 +848,9 @@ mod tests {
 
     #[tokio::test]
     async fn disk_prints_the_measurement() {
-        let mut worker = disk::Worker::with_measurer(
+        let mut worker = Worker::new(
             Box::new(|| Some(report())),
+            disk::STYLE,
             Duration::from_secs(5),
             Duration::from_secs(60),
         );
@@ -874,11 +863,12 @@ mod tests {
     async fn a_stuck_disk_measurement_times_out_without_waiting_for_the_thread() {
         let (release, blocked) = mpsc::channel::<()>();
         let blocked = Mutex::new(blocked);
-        let mut worker = disk::Worker::with_measurer(
+        let mut worker = Worker::new(
             Box::new(move || {
                 let _ = blocked.lock().unwrap().recv();
                 Some(report())
             }),
+            disk::STYLE,
             Duration::from_millis(50),
             Duration::from_secs(60),
         );
@@ -891,8 +881,9 @@ mod tests {
 
     #[tokio::test]
     async fn an_unmeasurable_disk_is_null_but_not_a_timeout() {
-        let mut worker = disk::Worker::with_measurer(
+        let mut worker = Worker::new(
             Box::new(|| None),
+            disk::STYLE,
             Duration::from_secs(5),
             Duration::from_secs(60),
         );

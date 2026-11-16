@@ -11,10 +11,6 @@ public sealed partial class PostgresFleetCoordinator
 {
     private const int MaximumOutdatedNodes = 500;
 
-    public Task<PollResult> PollAsync(NodeAuthentication authentication, DateTimeOffset contactedAt, AgentCapabilities capabilities,
-        CancellationToken cancellationToken = default) =>
-        PollInternal(authentication, contactedAt, null, capabilities, cancellationToken);
-
     public async Task<AgentUpdateStatus> RequestAgentUpdateAsync(NodeId nodeId, SemanticVersion targetVersion, string requestedBy,
         bool checkOnly = false, CancellationToken cancellationToken = default)
     {
@@ -24,8 +20,7 @@ public sealed partial class PostgresFleetCoordinator
         var id = nodeId.Value;
         var node = checkOnly
             ? await db.Nodes.AsNoTracking().SingleOrDefaultAsync(x => x.Id == id, cancellationToken)
-            : await db.Nodes.FromSqlInterpolated($"SELECT * FROM nodes WHERE \"Id\" = {id} FOR UPDATE").AsNoTracking()
-                .SingleOrDefaultAsync(cancellationToken);
+            : await NodeForUpdate(id).AsNoTracking().SingleOrDefaultAsync(cancellationToken);
         if (node is null || node.WorkspaceId != options.WorkspaceId.Value) throw Error("node_not_found", "Node was not found.");
         if (node.RevokedAt is not null) throw Error("node_revoked", "A revoked Node cannot be updated.");
         if (!node.AgentSelfUpdate)
@@ -74,9 +69,7 @@ public sealed partial class PostgresFleetCoordinator
         await EnsureWorkspace(cancellationToken);
         await using var transaction = await db.Database.BeginTransactionAsync(IsolationLevel.ReadCommitted, cancellationToken);
         var id = nodeId.Value;
-        var node = await db.Nodes.FromSqlInterpolated($"SELECT * FROM nodes WHERE \"Id\" = {id} FOR UPDATE").AsNoTracking()
-            .SingleOrDefaultAsync(cancellationToken);
-        if (node is null || node.WorkspaceId != options.WorkspaceId.Value) throw Error("node_not_found", "Node was not found.");
+        await LockNodeAsync(id, cancellationToken, tracked: false);
         var row = await db.AgentUpdates.FromSqlInterpolated($"SELECT * FROM agent_updates WHERE \"NodeId\" = {id} FOR UPDATE")
             .SingleOrDefaultAsync(cancellationToken);
         if (row is null || row.State != AgentUpdateRules.Requested)

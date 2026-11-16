@@ -200,12 +200,12 @@ public sealed class OperatorAccountTests(OperatorApiFixture fixture) : IClassFix
 
         await db.OperatorAccounts.Where(x => x.Id == racer.Id)
             .ExecuteUpdateAsync(x => x.SetProperty(a => a.Scope, "read").SetProperty(a => a.SecurityStamp, Guid.NewGuid()));
-        var stale = await Assert.ThrowsAsync<Fleet.Server.Transport.OperatorApiException>(() =>
+        var stale = await Assert.ThrowsAsync<Fleet.Server.Http.OperatorApiException>(() =>
             store.SetScopeAsync(signedIn, "racing-admin", "admin", CancellationToken.None));
         Assert.Equal(401, stale.Status);
 
         var demoted = await db.OperatorAccounts.AsNoTracking().SingleAsync(x => x.Id == racer.Id);
-        var denied = await Assert.ThrowsAsync<Fleet.Server.Transport.OperatorApiException>(() =>
+        var denied = await Assert.ThrowsAsync<Fleet.Server.Http.OperatorApiException>(() =>
             store.SetScopeAsync(new AccountActor(demoted.Id, demoted.SecurityStamp), "racing-admin", "admin", CancellationToken.None));
         Assert.Equal(403, denied.Status);
         Assert.Equal("read", (await db.OperatorAccounts.AsNoTracking().SingleAsync(x => x.Id == racer.Id)).Scope);

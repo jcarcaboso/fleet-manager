@@ -1,11 +1,11 @@
 using Fleet.Core.Coordination;
 using Fleet.Server.Persistence;
 using Fleet.Server.Security;
-using Fleet.Server.Source;
+using Fleet.Server.Metrics;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Options;
 
-namespace Fleet.Server.Hosting;
+namespace Fleet.Server.Source;
 
 public sealed class RegisteredNodeSource(IServiceScopeFactory scopes) : IEnrolledNodeSource
 {
@@ -27,8 +27,11 @@ public sealed class SourcePollingService(
     IConfiguration configuration,
     IEnrolledNodeSource nodes,
     FleetMetrics metrics,
-    ILogger<SourcePollingService> logger) : BackgroundService
+    ILogger<SourcePollingService> logger,
+    TimeProvider? clock = null) : BackgroundService
 {
+    private readonly TimeProvider _clock = clock ?? TimeProvider.System;
+    private readonly SourceSettings _settings = new(configuration);
     private readonly SemaphoreSlim _scan = new(1, 1);
     private string? _lastObserved;
     private volatile string? _cliProxyBaseUrl;
@@ -36,11 +39,9 @@ public sealed class SourcePollingService(
     /// <summary>The normalized <c>cliproxy.base-url</c> of the last accepted source snapshot since the Server started.</summary>
     public string? CliProxyBaseUrl => _cliProxyBaseUrl;
 
-    public Task<object> ScanNowAsync(CancellationToken cancellationToken) => ScanNowAsync(null, cancellationToken);
-
     public async Task<object> ScanNowAsync(string? requestedBy = null, CancellationToken cancellationToken = default)
     {
-        var remote = configuration["Source:Remote"];
+        var remote = _settings.Remote;
         if (string.IsNullOrWhiteSpace(remote))
         {
             metrics.RecordSourceScan("disabled");
@@ -53,26 +54,19 @@ public sealed class SourcePollingService(
         }
         try
         {
-            var defaults = new SourceLimits();
-            var limits = defaults with
-            {
-                MaxMirrorBytes = configuration.GetValue("Source:MaxMirrorBytes", defaults.MaxMirrorBytes),
-                MaxMirrorEntries = configuration.GetValue("Source:MaxMirrorEntries", defaults.MaxMirrorEntries),
-                ScanTimeoutSeconds = configuration.GetValue("Source:ScanTimeoutSeconds", defaults.ScanTimeoutSeconds),
-                GitCommandTimeoutSeconds = configuration.GetValue("Source:GitCommandTimeoutSeconds", defaults.GitCommandTimeoutSeconds),
-            };
-            var scanner = new GitSourceScanner(remote, configuration["Source:MirrorPath"] ?? ".local/source.git", nodes, limits, logger);
+            var limits = _settings.Limits();
+            var scanner = new GitSourceScanner(remote, _settings.MirrorPath, nodes, limits, logger, _clock);
             // Operator scans re-read the same commit because registry changes can make a
             // previously invalid Node alias valid without a new Git commit.
             var result = await scanner.ScanAsync(requestedBy is null ? _lastObserved : null, cancellationToken);
             using var scope = scopes.CreateScope();
-            var coordinator = scope.ServiceProvider.GetRequiredService<IFleetCoordinator>();
+            var coordinator = scope.ServiceProvider.GetRequiredService<ISourcePublication>();
             switch (result)
             {
                 case SourceScanResult.Unchanged unchanged:
                     _lastObserved = unchanged.SourceRevision;
                     await coordinator.RecordSourceScanAsync(new RecordSourceScan(unchanged.SourceRevision,
-                        SourceScanOutcome.Unchanged, null, null, DateTimeOffset.UtcNow, requestedBy), cancellationToken);
+                        SourceScanOutcome.Unchanged, null, null, _clock.GetUtcNow(), requestedBy), cancellationToken);
                     metrics.RecordSourceScan("unchanged");
                     return new { outcome = "unchanged", sourceRevision = unchanged.SourceRevision };
                 case SourceScanResult.Invalid invalid:
@@ -90,7 +84,7 @@ public sealed class SourcePollingService(
                     var first = invalid.Diagnostics.FirstOrDefault();
                     await coordinator.RecordSourceScanAsync(new RecordSourceScan(invalid.SourceRevision,
                         first?.Code == "git_source_failure" ? SourceScanOutcome.Failed : SourceScanOutcome.Invalid,
-                        first?.Code, first?.Message, DateTimeOffset.UtcNow, requestedBy), cancellationToken);
+                        first?.Code, first?.Message, _clock.GetUtcNow(), requestedBy), cancellationToken);
                     metrics.RecordSourceScan(first?.Code == "git_source_failure" ? "failed" : "invalid");
                     return new { outcome = "invalid", sourceRevision = invalid.SourceRevision, diagnostics = invalid.Diagnostics };
                 case SourceScanResult.Snapshot snapshot:
@@ -103,7 +97,7 @@ public sealed class SourcePollingService(
                         {
                             await coordinator.RecordSourceScanAsync(new RecordSourceScan(snapshot.Value.SourceRevision,
                                 publication.Outcome == PublicationOutcome.Accepted ? SourceScanOutcome.Accepted : SourceScanOutcome.Unchanged,
-                                null, null, DateTimeOffset.UtcNow, requestedBy), cancellationToken);
+                                null, null, _clock.GetUtcNow(), requestedBy), cancellationToken);
                         }
                         catch (Exception) when (!cancellationToken.IsCancellationRequested)
                         {
@@ -128,9 +122,9 @@ public sealed class SourcePollingService(
             try
             {
                 using var scope = scopes.CreateScope();
-                var coordinator = scope.ServiceProvider.GetRequiredService<IFleetCoordinator>();
+                var coordinator = scope.ServiceProvider.GetRequiredService<ISourcePublication>();
                 await coordinator.RecordSourceScanAsync(new RecordSourceScan(null, SourceScanOutcome.Failed,
-                    "source_scan_failed", "Source scanning failed before validation completed.", DateTimeOffset.UtcNow, requestedBy), cancellationToken);
+                    "source_scan_failed", "Source scanning failed before validation completed.", _clock.GetUtcNow(), requestedBy), cancellationToken);
             }
             catch (Exception) when (!cancellationToken.IsCancellationRequested)
             {
@@ -143,12 +137,12 @@ public sealed class SourcePollingService(
 
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
     {
-        var seconds = configuration.GetValue("Source:PollIntervalSeconds", 1800);
+        var seconds = _settings.PollIntervalSeconds;
         if (seconds is < 10 or > 86400) throw new InvalidOperationException("Source polling interval must be between 10 and 86400 seconds.");
         using var timer = new PeriodicTimer(TimeSpan.FromSeconds(seconds));
         do
         {
-            try { await ScanNowAsync(stoppingToken); }
+            try { await ScanNowAsync(null, stoppingToken); }
             catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested) { break; }
             catch (Exception)
             {
@@ -157,9 +151,9 @@ public sealed class SourcePollingService(
                 try
                 {
                     using var scope = scopes.CreateScope();
-                    var coordinator = scope.ServiceProvider.GetRequiredService<IFleetCoordinator>();
+                    var coordinator = scope.ServiceProvider.GetRequiredService<ISourcePublication>();
                     await coordinator.RecordSourceScanAsync(new RecordSourceScan(null, SourceScanOutcome.Failed,
-                        "source_scan_failed", "Source scanning failed before validation completed.", DateTimeOffset.UtcNow), stoppingToken);
+                        "source_scan_failed", "Source scanning failed before validation completed.", _clock.GetUtcNow()), stoppingToken);
                 }
                 catch (Exception) when (!stoppingToken.IsCancellationRequested)
                 {

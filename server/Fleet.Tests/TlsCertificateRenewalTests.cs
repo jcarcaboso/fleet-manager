@@ -6,7 +6,7 @@ using System.Runtime.Versioning;
 using System.Security.Cryptography;
 using System.Security.Cryptography.X509Certificates;
 using System.Text.Json;
-using Fleet.Server.Hosting;
+using Fleet.Server.Metrics;
 using Fleet.Server.Security;
 using Microsoft.AspNetCore.Hosting;
 using Microsoft.AspNetCore.Hosting.Server;

@@ -1,5 +1,6 @@
 using System.ComponentModel.DataAnnotations;
 using Fleet.Core.Coordination;
+using Fleet.Server.Metrics;
 using Microsoft.Extensions.Options;
 
 namespace Fleet.Server.Hosting;
@@ -25,7 +26,7 @@ public sealed class MaintenanceService(IServiceScopeFactory scopes, IOptions<Mai
             try
             {
                 using var scope = scopes.CreateScope();
-                var result = await scope.ServiceProvider.GetRequiredService<IFleetCoordinator>().MaintainPersistenceAsync(new(
+                var result = await scope.ServiceProvider.GetRequiredService<IPersistenceMaintenance>().MaintainPersistenceAsync(new(
                     settings.AuditRetentionDays is int audit ? TimeSpan.FromDays(audit) : null,
                     settings.SourceScanRetentionDays is int scans ? TimeSpan.FromDays(scans) : null, settings.BatchSize), stoppingToken);
                 metrics.RecordMaintenance(result.EnrollmentPayloadsScrubbed, result.AuditEventsDeleted, result.SourceScansDeleted);

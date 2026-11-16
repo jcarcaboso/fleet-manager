@@ -59,3 +59,21 @@ Verification completed with .NET SDK 10.0.302:
 - `dotnet build server/Fleet.Tests/Fleet.Tests.csproj --no-restore`: no warnings or errors
 - `dotnet test server/Fleet.Tests/Fleet.Tests.csproj --no-restore`: 92 passed, 0 failed, 0 skipped, including Docker-backed PostgreSQL and backup/restore tests
 - Candidate-image HTTPS smoke: readiness, enrollment retry, mTLS, alias change, credential renewal, credential isolation, and revocation passed
+
+## Follow-up: folders by feature
+
+A later pass removed the dependencies that pointed the wrong way. The error
+types that `Security` and the release mirror throw moved from `Transport` to
+`Http`. `SourcePollingService` moved to `Source`, the release mirror to
+`AgentReleases`, the CLIProxy catalog, selections and sync to `CliProxy`, and
+the metrics types to `Metrics`. `Hosting` keeps composition, the listener
+policy and maintenance. `PostgresFleetCoordinator` is still one class with its
+transactions intact; its partial files now follow the role interfaces that
+`IFleetCoordinator` inherits. The
+[module map](../technical-design/extending-fleet.md#module-map) is the current
+reference.
+
+Moving a class changes its `ILogger` category, for example
+`Fleet.Server.Hosting.SourcePollingService` became
+`Fleet.Server.Source.SourcePollingService`. Update any log filter that names
+the old category.
