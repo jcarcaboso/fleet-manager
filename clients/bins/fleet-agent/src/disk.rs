@@ -146,8 +146,8 @@ fn c_path(path: &Path) -> io::Result<std::ffi::CString> {
         .map_err(|_| io::Error::from(io::ErrorKind::InvalidInput))
 }
 
-/// Starts the thread that measures, on first use. It only calls `statvfs`
-/// and `eprintln`, so it gets a small stack.
+/// The disk usage worker's thread. It only calls `statvfs` and `eprintln`, so
+/// it gets a small stack.
 pub const STYLE: Style = Style {
     thread: "fleet-disk",
     what: "disk usage measurement",

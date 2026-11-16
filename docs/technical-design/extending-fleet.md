@@ -21,9 +21,13 @@ the safety-critical code deliberately left together.
 ## Module map
 
 Read the row for the module you are changing. A module may use the modules in
-its last column and nothing else, so a change stays inside one folder plus the
-files it names. Neither the Server namespaces nor the Agent modules form a
-cycle; keep it that way.
+its last column and nothing else in the same project, so a change stays inside
+one folder plus the files it names. `Fleet.Core` on the Server and the
+`fleet-reconcile` crate on the Agent are open to every module. Neither the
+Server namespaces nor the Agent's production modules form a cycle; keep it that
+way. `ModuleBoundaryTests` fails when a Server folder uses a namespace its row
+does not list. Some Agent tests borrow fixtures across modules, which the table
+does not count.
 
 ### Server (`server/Fleet.Server`)
 
@@ -60,16 +64,17 @@ roles, and shared validation lives in the `*Rules` classes.
 | `credentials` | Node key, certificate, stored identity | `protocol`, `state` |
 | `run_state` | `run.json` and its legacy migration | `protocol`, `state` |
 | `ai_client` (`catalog`, `config_file`, `adapters`) | AI client connection transactions | `protocol`, `state` |
-| `actions` | Assignment action registry (Skills, Managed files, AI clients) | `ai_client`, `protocol`, `state`, `fleet-reconcile` |
+| `actions` | Assignment action registry (Skills, Managed files, AI clients) | `ai_client`, `protocol`, `state` |
 | `detail` (`detail/redact.rs`) | Failure detail, redaction, pending detail | `actions`, `protocol`, `state` |
 | `drift`, `repair` | Drift and repair-failure reports | `protocol` (`repair` also `actions`, `detail`) |
 | `disk`, `telemetry` | Measurements and their report steps | `protocol`, `worker` (`telemetry` also `disk`, `managed`, `state`) |
 | `updater` | Self-update, signature checks, rollback | `managed`, `protocol`, `state` |
 | `service` | systemd and launchd service management | `credentials`, `managed`, `updater` |
-| `enroll`, `cli` | Enrollment command and clap types | `credentials`, `protocol`, `state`, `service` |
+| `cli` | clap types | `service` |
+| `enroll` | Enrollment command and link parsing | `cli`, `credentials`, `protocol`, `state` |
 | `inspect` | Read-only `status` and `check` | most modules, read-only |
 | `agent_loop` | Poll loop, cycle, side-report order | most modules |
-| `main` | Module list, argument parsing, dispatch | `agent_loop`, `cli`, `enroll`, `inspect`, `service` |
+| `main` | Module list, argument parsing, dispatch, the `alias` command | `agent_loop`, `cli`, `credentials`, `enroll`, `inspect`, `service`, `state`, `updater` |
 
 `clients/crates/fleet-reconcile` keeps its public API and error table in
 `lib.rs`. `bundle` parses and validates Bundles, `observe` digests trees,
