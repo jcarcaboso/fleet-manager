@@ -1,4 +1,4 @@
-use super::{Receipt, Reconciler};
+use super::{ModelCache, Receipt, Reconciler};
 use anyhow::{Result, bail};
 use std::path::{Path, PathBuf};
 
@@ -40,12 +40,22 @@ impl Adapter {
         }
     }
 
-    pub(super) fn config_path(self, reconciler: &Reconciler) -> PathBuf {
+    /// The Target path of the client's configuration, relative to the home
+    /// directory, as Assignments name it.
+    pub(super) const fn target_path(self) -> &'static str {
         match self {
-            Self::Codex => reconciler.home.join(".codex/config.toml"),
-            Self::Claude => reconciler.home.join(".claude/settings.json"),
+            Self::Codex => ".codex",
+            Self::OpenCode => ".config/opencode",
+            Self::Claude => ".claude",
+        }
+    }
+
+    pub(super) fn config_path(self, reconciler: &Reconciler) -> PathBuf {
+        let directory = reconciler.home.join(self.target_path());
+        match self {
+            Self::Codex => directory.join("config.toml"),
+            Self::Claude => directory.join("settings.json"),
             Self::OpenCode => {
-                let directory = reconciler.home.join(".config/opencode");
                 let jsonc = directory.join("opencode.jsonc");
                 // OpenCode loads JSONC after JSON, so update the overriding file.
                 if jsonc.symlink_metadata().is_ok() {
@@ -64,15 +74,13 @@ impl Adapter {
         previous: Option<&Receipt>,
         base_url: &str,
         model: Option<&str>,
-        models: &[String],
+        cache: &ModelCache,
     ) -> Result<Rendered> {
-        let cache =
-            crate::state::read_json::<super::ModelCache>(&reconciler.state.join("models.json"))?;
-        let skip_claude = cache
-            .as_ref()
-            .filter(|cache| cache.base_url == base_url)
-            .is_none_or(|cache| cache.skip_claude_models_for_other_clients);
-        let allowed_models: Vec<String> = models
+        // Per-model metadata is only used for the endpoint it was cached for.
+        let metadata = Some(cache).filter(|cache| cache.base_url == base_url);
+        let skip_claude = metadata.is_none_or(|cache| cache.skip_claude_models_for_other_clients);
+        let allowed_models: Vec<String> = cache
+            .models
             .iter()
             .filter(|model| {
                 !skip_claude
@@ -91,9 +99,8 @@ impl Adapter {
         if model.is_some_and(|selected| !models.iter().any(|model| model == selected)) {
             bail!("selected CLIProxy model is not allowed for {}", self.name());
         }
-        let (efforts, context_limits) = cache
-            .filter(|cache| cache.base_url == base_url)
-            .map(|cache| (cache.reasoning_levels, cache.context_limits))
+        let (efforts, context_limits) = metadata
+            .map(|cache| (cache.reasoning_levels.clone(), cache.context_limits.clone()))
             .unwrap_or_default();
         let key_path = reconciler.state.join("api-key");
         match self {
@@ -136,7 +143,7 @@ impl Adapter {
             path.with_extension("jsonc")
         };
         let has_provider = |path: &Path| -> Result<bool> {
-            super::read_optional_config(path)?
+            super::config_file::read_optional_config(path)?
                 .map_or(Ok(false), |bytes| opencode::has_fleet_provider(&bytes))
         };
         if other.starts_with(&reconciler.home) && !has_provider(path)? && has_provider(&other)? {
@@ -193,9 +200,9 @@ impl Adapter {
 
     pub(super) fn remove_auxiliary_state(self, reconciler: &Reconciler) -> Result<()> {
         match self {
-            Self::Codex => {
-                super::remove_state_file(&reconciler.state.join("codex-model-catalog.json"))
-            }
+            Self::Codex => super::config_file::remove_state_file(
+                &reconciler.state.join("codex-model-catalog.json"),
+            ),
             Self::OpenCode | Self::Claude => Ok(()),
         }
     }
@@ -215,5 +222,14 @@ mod tests {
             REGISTERED.map(Adapter::name),
             ["codex", "opencode", "claude"]
         );
+    }
+
+    #[test]
+    fn supported_clients_pair_with_their_target_paths() {
+        assert!(crate::ai_client::supports("codex", ".codex"));
+        assert!(crate::ai_client::supports("opencode", ".config/opencode"));
+        assert!(crate::ai_client::supports("claude", ".claude"));
+        assert!(!crate::ai_client::supports("codex", ".claude"));
+        assert!(!crate::ai_client::supports("unknown", ".codex"));
     }
 }

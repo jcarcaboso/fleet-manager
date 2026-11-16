@@ -1,5 +1,6 @@
 use std::{
     fs, io,
+    os::unix::fs::PermissionsExt,
     path::{Path, PathBuf},
 };
 
@@ -7,7 +8,10 @@ use rcgen::{CertificateParams, DistinguishedName, DnType, KeyPair, PKCS_ECDSA_P2
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
-use crate::protocol::{EnrollmentResponse, RenewalResponse};
+use crate::{
+    protocol::{EnrollmentResponse, RenewalResponse},
+    state::{atomic_write, sync_dir},
+};
 
 const PENDING_FILE: &str = "pending.json";
 const IDENTITY_FILE: &str = "identity.json";
@@ -65,7 +69,7 @@ impl CredentialStore {
             }
             Err(error) => return Err(error),
         }
-        set_private_permissions(&directory, true)?;
+        fs::set_permissions(&directory, fs::Permissions::from_mode(0o700))?;
         Ok(Self { directory })
     }
 
@@ -122,7 +126,11 @@ impl CredentialStore {
             private_key_pem,
             csr_pem,
         };
-        atomic_write(&pending_path, &serde_json::to_vec(&pending).map_err(other)?)?;
+        atomic_write(
+            &pending_path,
+            &serde_json::to_vec(&pending).map_err(other)?,
+            0o600,
+        )?;
         Ok(pending)
     }
 
@@ -165,12 +173,12 @@ impl CredentialStore {
             Err(e) if e.kind() == io::ErrorKind::NotFound => {}
             Err(e) => return Err(e),
         }
-        sync_directory(&self.directory)
+        sync_dir(&self.directory)
     }
 
     fn store(&self, identity: StoredIdentity) -> io::Result<StoredIdentity> {
         let json = serde_json::to_vec(&identity).map_err(other)?;
-        atomic_write(&self.directory.join(IDENTITY_FILE), &json)?;
+        atomic_write(&self.directory.join(IDENTITY_FILE), &json, 0o600)?;
         self.clear_pending()?;
         Ok(identity)
     }
@@ -188,30 +196,6 @@ fn invalid_credential_file(kind: &str, error: &serde_json::Error) -> io::Error {
     )
 }
 
-fn atomic_write(path: &Path, contents: &[u8]) -> io::Result<()> {
-    let temporary = path.with_extension(format!("tmp-{}", Uuid::new_v4()));
-    let mut options = fs::OpenOptions::new();
-    options.write(true).create_new(true);
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::OpenOptionsExt;
-        options.mode(0o600);
-    }
-    let mut file = options.open(&temporary)?;
-    use std::io::Write;
-    if let Err(error) = (|| {
-        file.write_all(contents)?;
-        file.sync_all()?;
-        drop(file);
-        fs::rename(&temporary, path)?;
-        sync_directory(path.parent().unwrap())
-    })() {
-        let _ = fs::remove_file(&temporary);
-        return Err(error);
-    }
-    Ok(())
-}
-
 fn read_private_file(path: &Path) -> io::Result<Vec<u8>> {
     let metadata = fs::symlink_metadata(path)?;
     if metadata.file_type().is_symlink() || !metadata.is_file() {
@@ -226,37 +210,17 @@ fn read_private_file(path: &Path) -> io::Result<Vec<u8>> {
             "credential file is too large",
         ));
     }
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        if metadata.permissions().mode() & 0o077 != 0 {
-            return Err(io::Error::new(
-                io::ErrorKind::PermissionDenied,
-                "credential file permissions are not private",
-            ));
-        }
+    if metadata.permissions().mode() & 0o077 != 0 {
+        return Err(io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            "credential file permissions are not private",
+        ));
     }
     fs::read(path)
 }
 
-fn sync_directory(path: &Path) -> io::Result<()> {
-    fs::File::open(path)?.sync_all()
-}
 fn other(error: impl std::error::Error + Send + Sync + 'static) -> io::Error {
     io::Error::other(error)
-}
-
-#[cfg(unix)]
-fn set_private_permissions(path: &Path, directory: bool) -> io::Result<()> {
-    use std::os::unix::fs::PermissionsExt;
-    fs::set_permissions(
-        path,
-        fs::Permissions::from_mode(if directory { 0o700 } else { 0o600 }),
-    )
-}
-#[cfg(not(unix))]
-fn set_private_permissions(_path: &Path, _directory: bool) -> io::Result<()> {
-    Ok(())
 }
 
 #[cfg(test)]
@@ -312,11 +276,8 @@ mod tests {
         assert!(root.0.join(PENDING_FILE).is_file());
     }
 
-    #[cfg(unix)]
     #[test]
     fn credential_directory_and_files_are_private() {
-        use std::os::unix::fs::PermissionsExt;
-
         let root = TestDirectory::new();
         let store = CredentialStore::open(&root.0).unwrap();
         store.load_or_generate_pending().unwrap();
@@ -334,7 +295,6 @@ mod tests {
         );
     }
 
-    #[cfg(unix)]
     #[test]
     fn rejects_symlinked_directory_and_credential_file() {
         use std::os::unix::fs::symlink;
@@ -359,11 +319,8 @@ mod tests {
         );
     }
 
-    #[cfg(unix)]
     #[test]
     fn rejects_public_or_oversized_credential_files() {
-        use std::os::unix::fs::PermissionsExt;
-
         let root = TestDirectory::new();
         let store = CredentialStore::open(&root.0).unwrap();
         let identity = root.0.join(IDENTITY_FILE);
@@ -383,10 +340,9 @@ mod tests {
         );
     }
 
-    #[cfg(unix)]
     #[test]
     fn read_only_open_never_creates_or_changes_the_directory() {
-        use std::os::unix::fs::{PermissionsExt, symlink};
+        use std::os::unix::fs::symlink;
 
         let root = TestDirectory::new();
         assert!(CredentialStore::open_read_only(&root.0).unwrap().is_none());
@@ -467,11 +423,11 @@ mod tests {
             format!(r#"{{"workspaceId":"{secret}"}}"#),
             format!(r#"{{"{secret}":1}}"#),
         ] {
-            atomic_write(&dir.join(IDENTITY_FILE), content.as_bytes()).unwrap();
+            atomic_write(&dir.join(IDENTITY_FILE), content.as_bytes(), 0o600).unwrap();
             let message = store.load_identity().err().unwrap().to_string();
             assert!(message.contains("invalid identity file"), "{message}");
             assert!(!message.contains("SECRET-KEY-MATERIAL"), "{message}");
-            atomic_write(&dir.join(PENDING_FILE), content.as_bytes()).unwrap();
+            atomic_write(&dir.join(PENDING_FILE), content.as_bytes(), 0o600).unwrap();
             let message = store.load_or_generate_pending().err().unwrap().to_string();
             assert!(!message.contains("SECRET-KEY-MATERIAL"), "{message}");
         }

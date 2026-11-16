@@ -33,7 +33,7 @@ use sha2::{Digest, Sha256};
 use uuid::Uuid;
 
 use crate::{
-    managed,
+    managed::{self, compare_versions},
     protocol::{AgentUpdate, AgentUpdateState, Api, ProtocolError},
     state,
 };
@@ -262,60 +262,6 @@ pub fn verify_signature(
         })
         .then_some(())
         .ok_or(Failure::Untrusted)
-}
-
-/// Orders `MAJOR.MINOR.PATCH[-prerelease]` versions by semver precedence, or
-/// `None` when one is not such a version.
-pub fn compare_versions(left: &str, right: &str) -> Option<Ordering> {
-    fn parse(version: &str) -> Option<([u64; 3], Vec<&str>)> {
-        let (core, prerelease) = match version.split_once('-') {
-            Some((core, prerelease)) => (core, prerelease.split('.').collect::<Vec<_>>()),
-            None => (version, Vec::new()),
-        };
-        let mut numbers = [0u64; 3];
-        let mut parts = core.split('.');
-        for number in &mut numbers {
-            let part = parts.next()?;
-            if part.is_empty() || (part.len() > 1 && part.starts_with('0')) {
-                return None;
-            }
-            *number = part.parse().ok()?;
-        }
-        if parts.next().is_some()
-            || prerelease.iter().any(|identifier| {
-                identifier.is_empty()
-                    || !identifier
-                        .bytes()
-                        .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-')
-            })
-        {
-            return None;
-        }
-        Some((numbers, prerelease))
-    }
-    fn identifier(left: &str, right: &str) -> Ordering {
-        match (left.parse::<u64>(), right.parse::<u64>()) {
-            (Ok(left), Ok(right)) => left.cmp(&right),
-            (Ok(_), Err(_)) => Ordering::Less,
-            (Err(_), Ok(_)) => Ordering::Greater,
-            (Err(_), Err(_)) => left.cmp(right),
-        }
-    }
-    let (left_numbers, left_pre) = parse(left)?;
-    let (right_numbers, right_pre) = parse(right)?;
-    Some(left_numbers.cmp(&right_numbers).then_with(|| {
-        match (left_pre.is_empty(), right_pre.is_empty()) {
-            (true, true) => Ordering::Equal,
-            (true, false) => Ordering::Greater,
-            (false, true) => Ordering::Less,
-            (false, false) => left_pre
-                .iter()
-                .zip(&right_pre)
-                .map(|(left, right)| identifier(left, right))
-                .find(|order| order.is_ne())
-                .unwrap_or_else(|| left_pre.len().cmp(&right_pre.len())),
-        }
-    }))
 }
 
 /// `{os}-{arch}` as release manifests name this machine.
@@ -1592,33 +1538,6 @@ mod tests {
             (RecordState::Failed, Some("agent_update_rolled_back"))
         );
         fs::remove_dir_all(state).unwrap();
-    }
-
-    #[test]
-    fn versions_compare_by_semver_precedence() {
-        for (left, right, order) in [
-            ("0.12.0", "0.11.0", Ordering::Greater),
-            ("0.11.10", "0.11.9", Ordering::Greater),
-            ("1.0.0", "0.99.99", Ordering::Greater),
-            ("0.12.0", "0.12.0-rc.1", Ordering::Greater),
-            ("0.12.0-rc.2", "0.12.0-rc.10", Ordering::Less),
-            ("0.12.0-alpha", "0.12.0-1", Ordering::Greater),
-            ("0.12.0-rc.1", "0.12.0-rc.1.1", Ordering::Less),
-            ("0.12.0", "0.12.0", Ordering::Equal),
-        ] {
-            assert_eq!(compare_versions(left, right), Some(order), "{left} {right}");
-        }
-        for invalid in [
-            "v0.12.0",
-            "0.12",
-            "0.12.0.1",
-            "01.2.3",
-            "0.12.0-",
-            "0.12.0+build",
-            "",
-        ] {
-            assert_eq!(compare_versions(invalid, "0.1.0"), None, "{invalid}");
-        }
     }
 
     fn encode_base64(bytes: &[u8]) -> String {

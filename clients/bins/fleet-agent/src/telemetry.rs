@@ -34,11 +34,9 @@ const MAX_TEXT_UNITS: usize = 128;
 const MAX_PATH_UNITS: usize = 512;
 
 /// `getpwuid_r` buffer: starts at 1 KiB and doubles on `ERANGE` up to this.
-#[cfg(unix)]
 const MAX_PASSWD_BYTES: usize = 16 * 1024;
 
 /// Longer than any host name (`HOST_NAME_MAX` is 64 on Linux, 255 on macOS).
-#[cfg(unix)]
 const HOSTNAME_BYTES: usize = 256;
 
 /// Starts and runs the thread that collects reports. It reads files and
@@ -52,7 +50,7 @@ const STYLE: disk::Style = disk::Style {
 pub fn worker(state_directory: PathBuf, configured_home: PathBuf) -> disk::Worker<TelemetryReport> {
     disk::Worker::standard(
         Box::new(move || {
-            let homes = crate::detail::home_prefixes(&configured_home);
+            let homes = crate::state::home_prefixes(&configured_home);
             Some(collect(&state_directory, &homes))
         }),
         STYLE,
@@ -423,7 +421,6 @@ fn tilde(path: &Path, homes: &[PathBuf]) -> String {
 // ---------------------------------------------------------------------------
 // System calls. Each is one bounded libc call; a failure gives `None`.
 
-#[cfg(unix)]
 #[allow(clippy::unnecessary_cast)]
 fn c_chars_to_string(chars: &[libc::c_char]) -> String {
     let bytes: Vec<u8> = chars
@@ -435,7 +432,6 @@ fn c_chars_to_string(chars: &[libc::c_char]) -> String {
     String::from_utf8_lossy(&bytes).into_owned()
 }
 
-#[cfg(unix)]
 fn kernel_release() -> Option<String> {
     // SAFETY: a zeroed `utsname` is valid (arrays of integers), and `uname`
     // only writes inside it through a pointer that is valid for the call.
@@ -446,7 +442,6 @@ fn kernel_release() -> Option<String> {
     (code == 0).then(|| c_chars_to_string(&info.release))
 }
 
-#[cfg(unix)]
 fn hostname() -> Option<String> {
     let mut buffer = [0u8; HOSTNAME_BYTES];
     // SAFETY: the pointer and length describe `buffer`, which outlives the
@@ -461,7 +456,6 @@ fn hostname() -> Option<String> {
 }
 
 /// The login name of the effective user from the password database.
-#[cfg(unix)]
 fn login_name() -> Option<String> {
     let mut size = 1024;
     while size <= MAX_PASSWD_BYTES {
@@ -492,21 +486,6 @@ fn login_name() -> Option<String> {
         let name = unsafe { std::ffi::CStr::from_ptr(entry.pw_name) };
         return Some(name.to_string_lossy().into_owned());
     }
-    None
-}
-
-#[cfg(not(unix))]
-fn kernel_release() -> Option<String> {
-    None
-}
-
-#[cfg(not(unix))]
-fn hostname() -> Option<String> {
-    None
-}
-
-#[cfg(not(unix))]
-fn login_name() -> Option<String> {
     None
 }
 

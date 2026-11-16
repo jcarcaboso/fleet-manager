@@ -19,11 +19,7 @@ pub fn validate(assignment: &Assignment) -> Result<()> {
         || !assignment.skills.is_empty()
         || assignment.file.is_some()
         || ai.schema != "fleet.ai-client/v1"
-        || !matches!(ai.client.as_str(), "codex" | "opencode" | "claude")
-        || !matches!(
-            (ai.client.as_str(), assignment.target.path.as_str()),
-            ("codex", ".codex") | ("opencode", ".config/opencode") | ("claude", ".claude")
-        )
+        || !crate::ai_client::supports(&ai.client, &assignment.target.path)
         || !valid_mode
     {
         bail!("unsupported Target descriptor");

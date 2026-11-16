@@ -68,19 +68,11 @@ fn measure_volume(label: &'static str, path: &Path) -> Option<DiskVolume> {
 
 /// True unless both paths are known to be on the same device.
 fn different_device(home: &Path, state: &Path) -> bool {
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::MetadataExt;
-        match (std::fs::metadata(home), std::fs::metadata(state)) {
-            (Ok(home), Ok(state)) => home.dev() != state.dev(),
-            (Err(_), Ok(_)) => true,
-            _ => false,
-        }
-    }
-    #[cfg(not(unix))]
-    {
-        let _ = (home, state);
-        false
+    use std::os::unix::fs::MetadataExt;
+    match (std::fs::metadata(home), std::fs::metadata(state)) {
+        (Ok(home), Ok(state)) => home.dev() != state.dev(),
+        (Err(_), Ok(_)) => true,
+        _ => false,
     }
 }
 
@@ -700,7 +692,6 @@ mod tests {
         assert!(!worker.is_idle());
     }
 
-    #[cfg(unix)]
     #[test]
     fn measures_the_real_home_directory() {
         let home = dirs::home_dir().unwrap_or_else(std::env::temp_dir);
@@ -715,7 +706,6 @@ mod tests {
         assert!(report.volumes.iter().all(|v| v.label != "state") || report.volumes.len() == 2);
     }
 
-    #[cfg(unix)]
     #[test]
     fn same_device_state_directory_is_not_reported_twice() {
         let dir = std::env::temp_dir();
@@ -724,7 +714,6 @@ mod tests {
         assert_eq!(report.volumes[0].label, "home");
     }
 
-    #[cfg(unix)]
     #[test]
     fn unmeasurable_volumes_are_skipped() {
         let missing = Path::new("/definitely/not/a/real/path");

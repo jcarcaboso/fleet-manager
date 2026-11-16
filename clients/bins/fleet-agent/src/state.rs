@@ -242,24 +242,55 @@ pub fn write_bytes(path: &Path, bytes: &[u8]) -> Result<()> {
     {
         bail!("invalid state file destination");
     }
-    let parent = path.parent().context("state file requires parent")?;
+    path.parent().context("state file requires parent")?;
+    Ok(atomic_write(path, bytes, 0o600)?)
+}
+
+/// Replaces `path` with `bytes` so that it is never seen half-written: a new
+/// temporary file (created with `mode`) in the same directory is written and
+/// synced, renamed over `path`, and then the directory is synced. The
+/// temporary file is removed on error. The destination is not checked; callers
+/// that must refuse a link there do so first.
+pub fn atomic_write(path: &Path, bytes: &[u8], mode: u32) -> std::io::Result<()> {
+    let parent = path.parent().ok_or_else(|| {
+        std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "file requires a parent directory",
+        )
+    })?;
     let temporary = parent.join(format!(".write-{}", Uuid::new_v4()));
-    let result = (|| -> Result<()> {
-        let mut file = OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .mode(0o600)
-            .open(&temporary)?;
+    let mut file = OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(mode)
+        .open(&temporary)?;
+    let result = (|| {
         file.write_all(bytes)?;
         file.sync_all()?;
         fs::rename(&temporary, path)?;
-        File::open(parent)?.sync_all()?;
-        Ok(())
+        sync_dir(parent)
     })();
     if result.is_err() {
-        let _ = fs::remove_file(temporary);
+        let _ = fs::remove_file(&temporary);
     }
     result
+}
+
+/// Syncs a directory, so that a rename or removal in it survives a crash.
+pub fn sync_dir(path: &Path) -> std::io::Result<()> {
+    File::open(path)?.sync_all()
+}
+
+/// Home directory prefixes to hide from diagnostics: the installation home and,
+/// when it differs, the account's real home directory.
+pub fn home_prefixes(configured: &Path) -> Vec<PathBuf> {
+    let mut homes = vec![configured.to_owned()];
+    if let Some(home) = dirs::home_dir()
+        && home != configured
+    {
+        homes.push(home);
+    }
+    homes
 }
 
 #[cfg(test)]
