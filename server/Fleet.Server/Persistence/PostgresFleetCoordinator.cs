@@ -1,7 +1,6 @@
-using System.Data;
+using System.Globalization;
 using System.Security.Cryptography;
 using System.Text;
-using System.Text.Json;
 using Fleet.Core.Coordination;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Logging;
@@ -9,291 +8,14 @@ using Npgsql;
 
 namespace Fleet.Server.Persistence;
 
+// The coordinator's support code: Node certificate lookup (INodeCredentialLookup) and Node authentication, the Workspace check,
+// alias changes, paging, input checks, audit rows and time truncation. Each role interface has its own partial file.
 public sealed partial class PostgresFleetCoordinator(
     FleetDbContext db,
     TimeProvider clock,
     FleetCoordinationOptions options,
     ILogger<PostgresFleetCoordinator>? logger = null) : IFleetCoordinator
 {
-    // Bump when source resolution changes so a Server upgrade can publish new Targets
-    // from the same Git commit. Version 2 adds the default skills/claude Target.
-    private const int PublicationVersion = 2;
-
-    public async Task<EnrollmentAuthorization> CreateEnrollmentAuthorizationAsync(
-        CreateEnrollmentAuthorization command, CancellationToken cancellationToken = default)
-    {
-        var now = clock.GetUtcNow();
-        if (command.ExpiresAt <= now || command.RetryWindow <= TimeSpan.Zero)
-            throw Error("invalid_enrollment_lifetime", "Enrollment expiry and retry window must be in the future.");
-
-        await EnsureWorkspace(cancellationToken);
-        var token = Base64Url(RandomNumberGenerator.GetBytes(32));
-        var id = Guid.NewGuid();
-        var boundAlias = command.BoundAlias is null ? null : Required(command.BoundAlias, 200, "node_alias");
-        db.Enrollments.Add(new EnrollmentRow
-        {
-            Id = id,
-            WorkspaceId = options.WorkspaceId.Value,
-            TokenSha256 = TokenDigest(token),
-            CreatedBy = Required(command.CreatedBy, 200, "created_by"),
-            BoundAlias = boundAlias,
-            ExpiresAt = command.ExpiresAt,
-            RetryWindowTicks = command.RetryWindow.Ticks,
-        });
-        db.AuditEvents.Add(Audit("enrollment_authorization_created", command.CreatedBy, now));
-        await db.SaveChangesAsync(cancellationToken);
-        return new(token, command.ExpiresAt, id, boundAlias);
-    }
-
-    public async Task<EnrollmentResult> CompleteEnrollmentAsync(
-        CompleteEnrollment command, CancellationToken cancellationToken = default)
-    {
-        await EnsureWorkspace(cancellationToken);
-        ValidateSha256(command.CertificateRequestSha256, "certificate_request_sha256");
-        ValidateSha256(command.IssuedCredential.CertificateSha256, "certificate_sha256");
-        var nodeAlias = Required(command.NodeName, 200, "node_alias");
-        if (command.IssuedCredential.DeliveryPayload.Length is 0 or > 64 * 1024)
-            throw Error("invalid_delivery_payload", "Credential delivery payload must contain at most 64 KiB.");
-
-        await using var transaction = await db.Database.BeginTransactionAsync(IsolationLevel.ReadCommitted, cancellationToken);
-        var now = clock.GetUtcNow();
-        var digest = TokenDigest(command.Token);
-        var row = await db.Enrollments.FromSqlInterpolated($"SELECT * FROM enrollment_authorizations WHERE \"TokenSha256\" = {digest} FOR UPDATE")
-            .SingleOrDefaultAsync(cancellationToken)
-            ?? throw Error("invalid_enrollment", "Enrollment authorization is invalid.");
-
-        if (row.WorkspaceId != options.WorkspaceId.Value || row.RevokedAt is not null ||
-            row.BoundAlias is not null && !string.Equals(row.BoundAlias, nodeAlias, StringComparison.Ordinal))
-            throw Error("invalid_enrollment", "Enrollment authorization is invalid.");
-
-        if (row.ConsumedAt is not null)
-        {
-            if (row.CertificateRequestSha256 == command.CertificateRequestSha256 && row.RetryUntil >= now &&
-                row.NodeId is Guid nodeId && row.CredentialId is Guid credentialId && row.DeliveryPayload is not null)
-                return new(EnrollmentOutcome.Retry, new(nodeId), new(credentialId), row.DeliveryPayload);
-            throw Error("invalid_enrollment", "Enrollment authorization is invalid.");
-        }
-        if (row.ExpiresAt <= now)
-            throw Error("invalid_enrollment", "Enrollment authorization is invalid.");
-        if (command.IssuedCredential.NotAfter <= now || command.IssuedCredential.NotBefore > now)
-            throw Error("invalid_credential_lifetime", "Issued credential is not currently valid.");
-        if (command.IssuedCredential.NodeId.Value == Guid.Empty || command.IssuedCredential.CredentialId.Value == Guid.Empty)
-            throw Error("invalid_identifier", "Issued Node and credential identifiers are required.");
-
-        db.Nodes.Add(new NodeRow
-        {
-            Id = command.IssuedCredential.NodeId.Value,
-            WorkspaceId = row.WorkspaceId,
-            Name = nodeAlias,
-            Platform = Required(command.Platform, 100, "platform"),
-            EnrolledAt = now,
-        });
-        db.Credentials.Add(new CredentialRow
-        {
-            Id = command.IssuedCredential.CredentialId.Value,
-            NodeId = command.IssuedCredential.NodeId.Value,
-            CertificateSha256 = command.IssuedCredential.CertificateSha256,
-            NotBefore = command.IssuedCredential.NotBefore,
-            NotAfter = command.IssuedCredential.NotAfter,
-        });
-        row.ConsumedAt = now;
-        row.RetryUntil = now + TimeSpan.FromTicks(row.RetryWindowTicks);
-        row.CertificateRequestSha256 = command.CertificateRequestSha256;
-        row.NodeId = command.IssuedCredential.NodeId.Value;
-        row.CredentialId = command.IssuedCredential.CredentialId.Value;
-        row.DeliveryPayload = command.IssuedCredential.DeliveryPayload;
-        db.AuditEvents.Add(Audit("node_enrolled", "enrollment", now,
-            command.IssuedCredential.NodeId.Value, command.IssuedCredential.CredentialId.Value));
-        try
-        {
-            await db.SaveChangesAsync(cancellationToken);
-        }
-        catch (DbUpdateException exception) when (exception.InnerException is PostgresException
-        { SqlState: PostgresErrorCodes.UniqueViolation, ConstraintName: "IX_nodes_WorkspaceId_Name" })
-        {
-            throw Error("node_alias_in_use", "The Node alias is already registered in this Workspace.");
-        }
-        await transaction.CommitAsync(cancellationToken);
-        return new(EnrollmentOutcome.Enrolled, command.IssuedCredential.NodeId,
-            command.IssuedCredential.CredentialId, command.IssuedCredential.DeliveryPayload);
-    }
-
-    public async Task RevokeEnrollmentAuthorizationAsync(
-        Guid id, string actor, CancellationToken cancellationToken = default)
-    {
-        await EnsureWorkspace(cancellationToken);
-        var validatedActor = Required(actor, 200, "actor");
-        await using var transaction = await db.Database.BeginTransactionAsync(IsolationLevel.ReadCommitted, cancellationToken);
-        var row = await db.Enrollments.FromSqlInterpolated($"SELECT * FROM enrollment_authorizations WHERE \"Id\" = {id} FOR UPDATE")
-            .SingleOrDefaultAsync(cancellationToken);
-        if (row is null || row.WorkspaceId != options.WorkspaceId.Value)
-            throw Error("enrollment_not_found", "Enrollment authorization was not found.");
-        if (row.RevokedAt is null)
-        {
-            row.RevokedAt = clock.GetUtcNow();
-            row.RevokedBy = validatedActor;
-            db.AuditEvents.Add(Audit("enrollment_authorization_revoked", validatedActor, row.RevokedAt.Value));
-            await db.SaveChangesAsync(cancellationToken);
-        }
-        await transaction.CommitAsync(cancellationToken);
-    }
-
-    public async Task RenewCredentialAsync(RenewNodeCredential command, CancellationToken cancellationToken = default)
-    {
-        await EnsureWorkspace(cancellationToken);
-        await using var transaction = await db.Database.BeginTransactionAsync(IsolationLevel.ReadCommitted, cancellationToken);
-        var now = clock.GetUtcNow();
-        var nodeId = command.Authentication.NodeId.Value;
-        var credentialId = command.Authentication.CredentialId.Value;
-        var node = await db.Nodes.FromSqlInterpolated($"SELECT * FROM nodes WHERE \"Id\" = {nodeId} FOR UPDATE")
-            .SingleOrDefaultAsync(cancellationToken);
-        var credential = await db.Credentials.FromSqlInterpolated($"SELECT * FROM node_credentials WHERE \"Id\" = {credentialId} FOR UPDATE")
-            .SingleOrDefaultAsync(cancellationToken);
-        if (node is null || credential is null || node.WorkspaceId != options.WorkspaceId.Value || node.RevokedAt is not null ||
-            credential.NodeId != node.Id || credential.RevokedAt is not null || credential.NotBefore > now ||
-            credential.CertificateSha256 != command.Authentication.CertificateSha256)
-            throw Error("node_unauthorized", "Node credential is not active.");
-        if (command.IssuedCredential.NodeId != command.Authentication.NodeId)
-            throw Error("wrong_node", "A renewed credential must belong to the authenticated Node.");
-        ValidateSha256(command.IssuedCredential.CertificateSha256, "certificate_sha256");
-        if (command.IssuedCredential.NotBefore > now || command.IssuedCredential.NotAfter <= now ||
-            command.IssuedCredential.CredentialId.Value == Guid.Empty)
-            throw Error("invalid_credential_lifetime", "Issued credential is not currently valid.");
-        db.Credentials.Add(new CredentialRow
-        {
-            Id = command.IssuedCredential.CredentialId.Value,
-            NodeId = command.IssuedCredential.NodeId.Value,
-            CertificateSha256 = command.IssuedCredential.CertificateSha256,
-            NotBefore = command.IssuedCredential.NotBefore,
-            NotAfter = command.IssuedCredential.NotAfter,
-        });
-        db.AuditEvents.Add(Audit("node_credential_renewed", command.Authentication.NodeId.Value.ToString("D"), clock.GetUtcNow(),
-            command.Authentication.NodeId.Value, command.IssuedCredential.CredentialId.Value));
-        await db.SaveChangesAsync(cancellationToken);
-        await transaction.CommitAsync(cancellationToken);
-    }
-
-    public async Task<NodeAliasResult> RenameNodeAliasAsync(
-        RenameNodeAlias command, CancellationToken cancellationToken = default)
-    {
-        await EnsureWorkspace(cancellationToken);
-        var alias = Required(command.Alias, 200, "node_alias");
-        await using var transaction = await db.Database.BeginTransactionAsync(IsolationLevel.ReadCommitted, cancellationToken);
-        var now = clock.GetUtcNow();
-        var nodeId = command.Authentication.NodeId.Value;
-        var credentialId = command.Authentication.CredentialId.Value;
-        var node = await db.Nodes.FromSqlInterpolated($"SELECT * FROM nodes WHERE \"Id\" = {nodeId} FOR UPDATE")
-            .SingleOrDefaultAsync(cancellationToken);
-        var credential = await db.Credentials.FromSqlInterpolated($"SELECT * FROM node_credentials WHERE \"Id\" = {credentialId} FOR UPDATE")
-            .SingleOrDefaultAsync(cancellationToken);
-        if (node is null || credential is null || node.WorkspaceId != options.WorkspaceId.Value || node.RevokedAt is not null ||
-            credential.NodeId != node.Id || credential.RevokedAt is not null || credential.NotBefore > now || credential.NotAfter <= now ||
-            credential.CertificateSha256 != command.Authentication.CertificateSha256)
-            throw Error("node_unauthorized", "Node credential is not active.");
-        await ChangeNodeAlias(node, alias, node.Id.ToString("D"), credential.Id, cancellationToken);
-        await transaction.CommitAsync(cancellationToken);
-        return new(command.Authentication.NodeId, alias);
-    }
-
-    public async Task<NodeAliasResult> RenameNodeAliasAsOperatorAsync(
-        OperatorRenameNodeAlias command, CancellationToken cancellationToken = default)
-    {
-        await EnsureWorkspace(cancellationToken);
-        var currentAlias = Required(command.CurrentAlias, 200, "node_alias");
-        var alias = Required(command.Alias, 200, "node_alias");
-        var actor = Required(command.RequestedBy, 200, "requested_by");
-        var workspaceId = options.WorkspaceId.Value;
-        await using var transaction = await db.Database.BeginTransactionAsync(IsolationLevel.ReadCommitted, cancellationToken);
-        var node = await db.Nodes.FromSqlInterpolated($"SELECT * FROM nodes WHERE \"WorkspaceId\" = {workspaceId} AND \"Name\" = {currentAlias} FOR UPDATE")
-            .SingleOrDefaultAsync(cancellationToken)
-            ?? throw Error("node_not_found", "The Node alias is not registered in this Workspace.");
-        if (node.RevokedAt is not null)
-            throw Error("node_revoked", "A revoked Node cannot change its alias.");
-        await ChangeNodeAlias(node, alias, actor, null, cancellationToken);
-        await transaction.CommitAsync(cancellationToken);
-        return new(new(node.Id), alias);
-    }
-
-    private async Task ChangeNodeAlias(NodeRow node, string alias, string actor, Guid? credentialId,
-        CancellationToken cancellationToken)
-    {
-        if (node.Name == alias) return;
-        if (await db.Nodes.AnyAsync(x => x.WorkspaceId == options.WorkspaceId.Value && x.Name == alias && x.Id != node.Id,
-                cancellationToken))
-            throw Error("node_alias_in_use", "The Node alias is already registered in this Workspace.");
-        node.Name = alias;
-        db.AuditEvents.Add(Audit("node_alias_changed", actor, clock.GetUtcNow(), node.Id, credentialId));
-        try
-        {
-            await db.SaveChangesAsync(cancellationToken);
-        }
-        catch (DbUpdateException exception) when (exception.InnerException is PostgresException
-        { SqlState: PostgresErrorCodes.UniqueViolation, ConstraintName: "IX_nodes_WorkspaceId_Name" })
-        {
-            throw Error("node_alias_in_use", "The Node alias is already registered in this Workspace.");
-        }
-    }
-
-    public async Task RevokeCredentialAsync(CredentialId credentialId, string revokedBy, CancellationToken cancellationToken = default)
-    {
-        await EnsureWorkspace(cancellationToken);
-        await using var transaction = await db.Database.BeginTransactionAsync(IsolationLevel.ReadCommitted, cancellationToken);
-        var id = credentialId.Value;
-        var row = await db.Credentials.FromSqlInterpolated($"SELECT * FROM node_credentials WHERE \"Id\" = {id} FOR UPDATE")
-            .SingleOrDefaultAsync(cancellationToken)
-            ?? throw Error("credential_not_found", "Credential was not found.");
-        var belongs = await db.Nodes.AnyAsync(x => x.Id == row.NodeId && x.WorkspaceId == options.WorkspaceId.Value, cancellationToken);
-        if (!belongs) throw Error("credential_not_found", "Credential was not found.");
-        row.RevokedAt ??= clock.GetUtcNow();
-        row.RevokedBy ??= Required(revokedBy, 200, "revoked_by");
-        db.AuditEvents.Add(Audit("node_credential_revoked", revokedBy, clock.GetUtcNow(), row.NodeId, row.Id));
-        await db.SaveChangesAsync(cancellationToken);
-        await transaction.CommitAsync(cancellationToken);
-    }
-
-    public async Task RevokeNodeAsync(NodeId nodeId, string revokedBy, CancellationToken cancellationToken = default)
-    {
-        await EnsureWorkspace(cancellationToken);
-        await using var transaction = await db.Database.BeginTransactionAsync(IsolationLevel.ReadCommitted, cancellationToken);
-        var id = nodeId.Value;
-        var row = await db.Nodes.FromSqlInterpolated($"SELECT * FROM nodes WHERE \"Id\" = {id} FOR UPDATE")
-            .SingleOrDefaultAsync(cancellationToken)
-            ?? throw Error("node_not_found", "Node was not found.");
-        if (row.WorkspaceId != options.WorkspaceId.Value) throw Error("node_not_found", "Node was not found.");
-        var now = clock.GetUtcNow();
-        row.RevokedAt ??= now;
-        var actor = Required(revokedBy, 200, "revoked_by");
-        db.AuditEvents.Add(Audit("node_revoked", actor, now, nodeId.Value));
-        await db.Credentials.Where(x => x.NodeId == nodeId.Value && x.RevokedAt == null)
-            .ExecuteUpdateAsync(s => s.SetProperty(x => x.RevokedAt, now).SetProperty(x => x.RevokedBy, actor), cancellationToken);
-        await db.SaveChangesAsync(cancellationToken);
-        await transaction.CommitAsync(cancellationToken);
-    }
-
-    public async Task RemoveNodeAsync(NodeId nodeId, string expectedAlias, string removedBy, CancellationToken cancellationToken = default)
-    {
-        var alias = Required(expectedAlias, 200, "node_alias");
-        var actor = Required(removedBy, 200, "removed_by");
-        await EnsureWorkspace(cancellationToken);
-        await using var transaction = await db.Database.BeginTransactionAsync(IsolationLevel.ReadCommitted, cancellationToken);
-        // Serialize with source publication so it cannot assign work to a disappearing Node.
-        await db.Database.ExecuteSqlRawAsync("SELECT pg_advisory_xact_lock(1179403596)", cancellationToken);
-        var id = nodeId.Value;
-        var row = await db.Nodes.FromSqlInterpolated($"SELECT * FROM nodes WHERE \"Id\" = {id} FOR UPDATE")
-            .SingleOrDefaultAsync(cancellationToken)
-            ?? throw Error("node_not_found", "Node was not found.");
-        if (row.WorkspaceId != options.WorkspaceId.Value) throw Error("node_not_found", "Node was not found.");
-        if (!string.Equals(row.Name, alias, StringComparison.Ordinal))
-            throw Error("node_alias_changed", "Node alias changed; refresh before removing it.");
-        // Enrollment delivery is not a foreign key and must not replay deleted credentials.
-        await db.Enrollments.Where(x => x.WorkspaceId == row.WorkspaceId && x.NodeId == id)
-            .ExecuteDeleteAsync(cancellationToken);
-        db.Nodes.Remove(row); // FK cascades remove credentials, assignments, Skills, and attempts.
-        db.AuditEvents.Add(Audit("node_removed", actor, clock.GetUtcNow(), id));
-        await db.SaveChangesAsync(cancellationToken);
-        await transaction.CommitAsync(cancellationToken);
-    }
-
     public async Task<NodeAuthentication?> FindActiveNodeByCertificateAsync(string certificateSha256, CancellationToken cancellationToken = default, bool allowExpired = false)
     {
         await EnsureWorkspace(cancellationToken);
@@ -306,502 +28,6 @@ public sealed partial class PostgresFleetCoordinator(
                                  node.WorkspaceId == options.WorkspaceId.Value
                            select new { credential.Id, NodeId = node.Id }).SingleOrDefaultAsync(cancellationToken);
         return found is null ? null : new(new(found.NodeId), new(found.Id), certificateSha256);
-    }
-
-    public async Task<PublicationResult> AcceptSourceSnapshotAsync(AcceptedSourceSnapshot snapshot, CancellationToken cancellationToken = default)
-    {
-        Required(snapshot.SourceRevision, 500, "source_revision");
-        if (snapshot.Targets.Count > 40_000 || snapshot.Bundles.Count > 20_000 || snapshot.Warnings.Count > 1_000)
-            throw Error("snapshot_too_large", "Source snapshot exceeds a collection limit.");
-        ValidateSnapshot(snapshot);
-
-        await using var transaction = await db.Database.BeginTransactionAsync(IsolationLevel.ReadCommitted, cancellationToken);
-        await EnsureWorkspace(cancellationToken);
-        await db.Database.ExecuteSqlRawAsync("SELECT pg_advisory_xact_lock(1179403596)", cancellationToken);
-        var existing = await db.DesiredRevisions.AsNoTracking().SingleOrDefaultAsync(
-            x => x.WorkspaceId == options.WorkspaceId.Value && x.SourceRevision == snapshot.SourceRevision &&
-                 x.PublicationVersion == PublicationVersion, cancellationToken);
-        if (existing is not null)
-            return new(PublicationOutcome.Unchanged, snapshot.SourceRevision, new(existing.Id), null, 0);
-
-        var nodeIds = snapshot.Targets.Select(x => x.NodeId.Value).Distinct().ToArray();
-        var knownNodes = await db.Nodes.Where(x => nodeIds.Contains(x.Id) && x.WorkspaceId == options.WorkspaceId.Value)
-            .Select(x => x.Id).ToListAsync(cancellationToken);
-        if (knownNodes.Count != nodeIds.Length)
-            throw Error("unknown_node", "Source snapshot refers to an unknown Node.");
-        var suppliedDigests = snapshot.Bundles.Select(x => x.Digest).ToHashSet(StringComparer.Ordinal);
-        var referencedDigests = snapshot.Targets.SelectMany(x => x.Skills).Select(x => x.BundleDigest)
-            .Concat(snapshot.Targets.Select(x => x.File?.BundleDigest).OfType<string>())
-            .Where(x => !suppliedDigests.Contains(x)).Distinct().ToArray();
-        var storedDigestCount = await db.Bundles.CountAsync(x => referencedDigests.Contains(x.Digest), cancellationToken);
-        if (storedDigestCount != referencedDigests.Length)
-            throw Error("unknown_bundle", "Target refers to an unknown Bundle.");
-
-        foreach (var bundle in snapshot.Bundles)
-        {
-            if (!await db.Bundles.AnyAsync(x => x.Digest == bundle.Digest, cancellationToken))
-                db.Bundles.Add(new BundleRow
-                {
-                    Digest = bundle.Digest,
-                    Schema = bundle.Schema,
-                    Size = bundle.Size,
-                    Content = bundle.Content,
-                    CreatedAt = snapshot.ObservedAt
-                });
-        }
-
-        // Informational: sanitized again here, so whatever supplied the snapshot cannot store control characters or long text.
-        var commit = CommitMetadataRules.Sanitize(snapshot.Commit);
-        var revision = new DesiredRevisionRow
-        {
-            Id = Guid.NewGuid(),
-            WorkspaceId = options.WorkspaceId.Value,
-            SourceRevision = snapshot.SourceRevision,
-            PublicationVersion = PublicationVersion,
-            AcceptedAt = snapshot.ObservedAt,
-            CommitSubject = commit?.Subject,
-            CommitAuthor = commit?.Author,
-            CommittedAt = commit?.CommittedAt
-        };
-        db.DesiredRevisions.Add(revision);
-        db.SourceScans.Add(new SourceScanRow
-        {
-            Id = Guid.NewGuid(),
-            WorkspaceId = options.WorkspaceId.Value,
-            SourceRevision = snapshot.SourceRevision,
-            Outcome = (int)SourceScanOutcome.Accepted,
-            ObservedAt = snapshot.ObservedAt
-        });
-        foreach (var warning in snapshot.Warnings)
-            db.Warnings.Add(new WarningRow
-            {
-                Id = Guid.NewGuid(),
-                DesiredRevisionId = revision.Id,
-                Code = warning.Code,
-                Message = warning.Message,
-                SourceLocations = JsonSerializer.Serialize(warning.SourceLocations)
-            });
-
-        var targets = snapshot.Targets.ToList();
-        var desired = targets.Select(target => (target.NodeId.Value, target.TargetName)).ToHashSet();
-        var previouslyManaged = await (from assignment in db.Assignments.AsNoTracking()
-                                       join client in db.AssignmentAiClients.AsNoTracking() on assignment.Id equals client.AssignmentId
-                                       where assignment.IsCurrent && client.Mode == "cliproxy"
-                                       select new { assignment.NodeId, assignment.TargetName, assignment.TargetBase, assignment.TargetPath, client.Client })
-            .ToListAsync(cancellationToken);
-        foreach (var previous in previouslyManaged.Where(previous => !desired.Contains((previous.NodeId, previous.TargetName))))
-            targets.Add(new SnapshotTarget(new(previous.NodeId), previous.TargetName,
-                new(previous.TargetBase, previous.TargetPath), [],
-                AiClient: new("fleet.ai-client/v1", previous.Client, "native")));
-
-        var changed = new List<(SnapshotTarget Target, AssignmentRow? Current)>();
-        foreach (var target in targets)
-        {
-            var targetNodeId = target.NodeId.Value;
-            var targetName = target.TargetName;
-            var current = await db.Assignments.FromSqlInterpolated($"SELECT * FROM assignments WHERE \"NodeId\" = {targetNodeId} AND \"TargetName\" = {targetName} AND \"IsCurrent\" FOR UPDATE")
-                .SingleOrDefaultAsync(cancellationToken);
-            if (current is not null && (current.TargetBase != target.Descriptor.Base || current.TargetPath != target.Descriptor.Path))
-                throw Error("target_relocation_not_supported", "An active Target descriptor cannot be changed.");
-            if (current is null || !await SameTarget(current, target, cancellationToken)) changed.Add((target, current));
-        }
-
-        RolloutRow? rollout = null;
-        if (changed.Count > 0)
-        {
-            rollout = new() { Id = Guid.NewGuid(), DesiredRevisionId = revision.Id, CreatedAt = snapshot.ObservedAt };
-            db.Rollouts.Add(rollout);
-            foreach (var (target, current) in changed)
-            {
-                if (current is not null)
-                {
-                    current.IsCurrent = false;
-                    current.State = (int)ConvergenceState.Superseded;
-                    await db.Attempts.Where(x => x.AssignmentId == current.Id &&
-                            (x.State == (int)ConvergenceState.Pending || x.State == (int)ConvergenceState.Applying))
-                        .ExecuteUpdateAsync(s => s.SetProperty(x => x.State, (int)ConvergenceState.Superseded)
-                            .SetProperty(x => x.UpdatedAt, snapshot.ObservedAt), cancellationToken);
-                }
-                var assignment = new AssignmentRow
-                {
-                    Id = Guid.NewGuid(),
-                    RolloutId = rollout.Id,
-                    DesiredRevisionId = revision.Id,
-                    NodeId = target.NodeId.Value,
-                    TargetName = target.TargetName,
-                    TargetBase = target.Descriptor.Base,
-                    TargetPath = target.Descriptor.Path,
-                    IsCurrent = true,
-                    State = (int)ConvergenceState.Pending,
-                    CreatedAt = snapshot.ObservedAt
-                };
-                db.Assignments.Add(assignment);
-                var ordinal = 0;
-                foreach (var skill in target.Skills)
-                    db.AssignmentSkills.Add(new AssignmentSkillRow
-                    {
-                        AssignmentId = assignment.Id,
-                        Name = skill.Name,
-                        BundleDigest = skill.BundleDigest,
-                        Ordinal = ordinal++
-                    });
-                if (target.File is not null)
-                    db.AssignmentFiles.Add(new AssignmentFileRow
-                    {
-                        AssignmentId = assignment.Id,
-                        Name = target.File.Name,
-                        BundleDigest = target.File.BundleDigest,
-                    });
-                if (target.AiClient is not null)
-                    db.AssignmentAiClients.Add(new AssignmentAiClientRow
-                    {
-                        AssignmentId = assignment.Id,
-                        Schema = target.AiClient.Schema,
-                        Client = target.AiClient.Client,
-                        Mode = target.AiClient.Mode,
-                        BaseUrl = target.AiClient.BaseUrl,
-                        Model = target.AiClient.Model,
-                    });
-                db.Attempts.Add(new AttemptRow
-                {
-                    Id = Guid.NewGuid(),
-                    AssignmentId = assignment.Id,
-                    RolloutId = rollout.Id,
-                    NodeId = target.NodeId.Value,
-                    State = (int)ConvergenceState.Pending,
-                    UpdatedAt = snapshot.ObservedAt
-                });
-            }
-        }
-        await db.SaveChangesAsync(cancellationToken);
-        await transaction.CommitAsync(cancellationToken);
-        return new(PublicationOutcome.Accepted, snapshot.SourceRevision, new(revision.Id),
-            rollout is null ? null : new RolloutId(rollout.Id), changed.Count);
-    }
-
-    public async Task RecordSourceScanAsync(RecordSourceScan scan, CancellationToken cancellationToken = default)
-    {
-        if (!Enum.IsDefined(scan.Outcome))
-            throw Error("invalid_source_scan_outcome", "Source scan outcome is invalid.");
-        if (scan.Diagnostic?.Length > options.MaximumDiagnosticLength || scan.Code?.Length > 100 || scan.SourceRevision?.Length > 500)
-            throw Error("source_scan_too_large", "Source scan metadata exceeds a text limit.");
-        await EnsureWorkspace(cancellationToken);
-        db.SourceScans.Add(new SourceScanRow
-        {
-            Id = Guid.NewGuid(),
-            WorkspaceId = options.WorkspaceId.Value,
-            SourceRevision = scan.SourceRevision,
-            Outcome = (int)scan.Outcome,
-            Code = scan.Code,
-            Diagnostic = scan.Diagnostic,
-            ObservedAt = scan.ObservedAt,
-            RequestedBy = scan.RequestedBy is null ? null : Required(scan.RequestedBy, 200, "requested_by")
-        });
-        await db.SaveChangesAsync(cancellationToken);
-    }
-
-    public async Task<SourceScanStatus?> GetLatestSourceScanAsync(CancellationToken cancellationToken = default)
-    {
-        await EnsureWorkspace(cancellationToken);
-        var row = await db.SourceScans.AsNoTracking().Where(x => x.WorkspaceId == options.WorkspaceId.Value)
-            .OrderByDescending(x => x.ObservedAt).ThenByDescending(x => x.Id).FirstOrDefaultAsync(cancellationToken);
-        return row is null ? null : new(row.SourceRevision, (SourceScanOutcome)row.Outcome, row.Code,
-            row.Diagnostic, row.ObservedAt, row.RequestedBy);
-    }
-
-    public Task<PollResult> PollAsync(NodeAuthentication authentication, DateTimeOffset contactedAt, CancellationToken cancellationToken = default) =>
-        PollInternal(authentication, contactedAt, null, null, cancellationToken);
-
-    public Task<PollResult> PollTargetAsync(NodeAuthentication authentication, string targetName, DateTimeOffset contactedAt,
-        CancellationToken cancellationToken = default) =>
-        PollInternal(authentication, contactedAt, Required(targetName, 100, "target_name"), null, cancellationToken);
-
-    // Capabilities are recorded only when the caller passes them (the poll route always does).
-    private async Task<PollResult> PollInternal(NodeAuthentication authentication, DateTimeOffset contactedAt, string? targetName,
-        AgentCapabilities? capabilities, CancellationToken cancellationToken)
-    {
-        if (contactedAt > clock.GetUtcNow() + TimeSpan.FromMinutes(5))
-            throw Error("invalid_contact_time", "Node contact time is too far in the future.");
-        var selfUpdate = capabilities?.HasFlag(AgentCapabilities.AgentUpdate);
-        var node = await Authenticate(authentication, contactedAt, true, cancellationToken, selfUpdate);
-        var result = await FindPollAssignment(authentication, targetName, capabilities ?? AgentCapabilities.None, cancellationToken) with
-        {
-            DiskUsageRequested = node.DiskUsageRefreshRequestedAt is not null,
-            AgentUpdate = selfUpdate == true ? await RequestedAgentUpdate(authentication.NodeId.Value, cancellationToken) : null
-        };
-        // After the Assignment is found and never part of it: the check-in is telemetry and cannot fail or hold up the poll.
-        await RecordCheckin(authentication.NodeId.Value, contactedAt, cancellationToken);
-        return result;
-    }
-
-    private async Task<PollResult> FindPollAssignment(NodeAuthentication authentication, string? targetName,
-        AgentCapabilities capabilities, CancellationToken cancellationToken)
-    {
-        await RetryFailedAiAssignment(authentication.NodeId.Value, targetName, cancellationToken);
-        var claudeSkills = capabilities.HasFlag(AgentCapabilities.ClaudeSkills);
-        var assignment = await db.Assignments.AsNoTracking().Where(x => x.NodeId == authentication.NodeId.Value && x.IsCurrent &&
-                (x.State == (int)ConvergenceState.Pending || x.State == (int)ConvergenceState.Applying) &&
-                (claudeSkills || x.TargetName != "skills/claude") &&
-                (targetName == null || x.TargetName == targetName))
-            .OrderBy(x => x.TargetName).FirstOrDefaultAsync(cancellationToken);
-        if (assignment is null) return new(null);
-        var attempt = await db.Attempts.AsNoTracking().SingleAsync(x => x.AssignmentId == assignment.Id &&
-            (x.State == (int)ConvergenceState.Pending || x.State == (int)ConvergenceState.Applying), cancellationToken);
-        var skills = await (from item in db.AssignmentSkills
-                            join bundle in db.Bundles on item.BundleDigest equals bundle.Digest
-                            where item.AssignmentId == assignment.Id
-                            orderby item.Ordinal
-                            select new AssignmentSkill(item.Name, item.BundleDigest, bundle.Size, bundle.Schema))
-            .ToListAsync(cancellationToken);
-        var file = await (from item in db.AssignmentFiles
-                          join bundle in db.Bundles on item.BundleDigest equals bundle.Digest into available
-                          from bundle in available.DefaultIfEmpty()
-                          where item.AssignmentId == assignment.Id
-                          select new AssignmentFile(item.Name, item.BundleDigest,
-                              bundle == null ? null : bundle.Size, bundle == null ? null : bundle.Schema))
-            .SingleOrDefaultAsync(cancellationToken);
-        var aiClient = await db.AssignmentAiClients.AsNoTracking()
-            .Where(item => item.AssignmentId == assignment.Id)
-            .Select(item => new AiClientAssignment(item.Schema, item.Client, item.Mode, item.BaseUrl, item.Model))
-            .SingleOrDefaultAsync(cancellationToken);
-        return new(new(new(assignment.Id), new(attempt.Id), new(assignment.RolloutId), new(assignment.DesiredRevisionId),
-            assignment.TargetName, new(assignment.TargetBase, assignment.TargetPath), skills, file, aiClient));
-    }
-
-    private async Task RetryFailedAiAssignment(Guid nodeId, string? targetName, CancellationToken ct)
-    {
-        if (await db.Assignments.AnyAsync(x => x.NodeId == nodeId && x.IsCurrent &&
-            (targetName == null || x.TargetName == targetName) &&
-            (x.State == (int)ConvergenceState.Pending || x.State == (int)ConvergenceState.Applying), ct)) return;
-        var cutoff = clock.GetUtcNow().AddMinutes(-1);
-        var candidate = await db.Assignments.AsNoTracking()
-            .Where(x => x.NodeId == nodeId && x.IsCurrent && x.State == (int)ConvergenceState.Failed &&
-                (targetName == null || x.TargetName == targetName) &&
-                db.AssignmentAiClients.Any(client => client.AssignmentId == x.Id) &&
-                db.Attempts.Where(attempt => attempt.AssignmentId == x.Id).OrderByDescending(attempt => attempt.UpdatedAt)
-                    .Select(attempt => attempt.ErrorCode).First() == "ai_client_reconcile_failed" &&
-                !db.Attempts.Any(attempt => attempt.AssignmentId == x.Id && attempt.UpdatedAt > cutoff))
-            .OrderBy(x => x.TargetName).Select(x => (Guid?)x.Id).FirstOrDefaultAsync(ct);
-        if (candidate is not { } assignmentId) return;
-        await using var transaction = await db.Database.BeginTransactionAsync(IsolationLevel.ReadCommitted, ct);
-        var assignment = await db.Assignments.FromSqlInterpolated($"SELECT * FROM assignments WHERE \"Id\" = {assignmentId} FOR UPDATE")
-            .SingleAsync(ct);
-        // A concurrent poll or publication may already have changed the assignment.
-        await db.Entry(assignment).ReloadAsync(ct);
-        if (!assignment.IsCurrent || assignment.State != (int)ConvergenceState.Failed) return;
-        var last = await db.Attempts.AsNoTracking().Where(x => x.AssignmentId == assignmentId)
-            .OrderByDescending(x => x.UpdatedAt).FirstAsync(ct);
-        if (last.State != (int)ConvergenceState.Failed || last.ErrorCode != "ai_client_reconcile_failed" ||
-            last.UpdatedAt > cutoff) return;
-        assignment.State = (int)ConvergenceState.Pending;
-        db.Attempts.Add(new AttemptRow
-        {
-            Id = Guid.NewGuid(),
-            AssignmentId = assignment.Id,
-            RolloutId = assignment.RolloutId,
-            NodeId = nodeId,
-            State = (int)ConvergenceState.Pending,
-            UpdatedAt = clock.GetUtcNow()
-        });
-        await db.SaveChangesAsync(ct);
-        await transaction.CommitAsync(ct);
-    }
-
-    public async Task<string> AuthorizeCliProxyCredentialAsync(NodeAuthentication authentication, CancellationToken cancellationToken = default)
-    {
-        await Authenticate(authentication, clock.GetUtcNow(), false, cancellationToken);
-        var baseUrl = await (from assignment in db.Assignments.AsNoTracking()
-                             join aiClient in db.AssignmentAiClients.AsNoTracking() on assignment.Id equals aiClient.AssignmentId
-                             where assignment.NodeId == authentication.NodeId.Value && assignment.IsCurrent &&
-                                   aiClient.Mode == "cliproxy"
-                             select aiClient.BaseUrl).FirstOrDefaultAsync(cancellationToken);
-        if (baseUrl is null)
-            throw Error("cliproxy_credential_not_authorized", "CLIProxy credential is not assigned to this Node.");
-        return baseUrl;
-    }
-
-    public async Task<BundleContent> GetBundleAsync(NodeAuthentication authentication, string digest, CancellationToken cancellationToken = default)
-    {
-        await Authenticate(authentication, clock.GetUtcNow(), true, cancellationToken);
-        var authorized = await (from assignment in db.Assignments
-                                join skill in db.AssignmentSkills on assignment.Id equals skill.AssignmentId
-                                join attempt in db.Attempts on assignment.Id equals attempt.AssignmentId
-                                where assignment.NodeId == authentication.NodeId.Value && skill.BundleDigest == digest &&
-                                    (assignment.IsCurrent || attempt.State == (int)ConvergenceState.Pending ||
-                                     attempt.State == (int)ConvergenceState.Applying)
-                                select skill).AnyAsync(cancellationToken);
-        authorized = authorized || await (from assignment in db.Assignments
-                                          join file in db.AssignmentFiles on assignment.Id equals file.AssignmentId
-                                          join attempt in db.Attempts on assignment.Id equals attempt.AssignmentId
-                                          where assignment.NodeId == authentication.NodeId.Value && file.BundleDigest == digest &&
-                                              (assignment.IsCurrent || attempt.State == (int)ConvergenceState.Pending ||
-                                               attempt.State == (int)ConvergenceState.Applying)
-                                          select file).AnyAsync(cancellationToken);
-        if (!authorized) throw Error("bundle_not_authorized", "Bundle is not assigned to this Node.");
-        var bundle = await db.Bundles.AsNoTracking().SingleAsync(x => x.Digest == digest, cancellationToken);
-        return new(bundle.Digest, bundle.Schema, bundle.Size, bundle.Content);
-    }
-
-    public async Task<ReportResult> ReportAttemptAsync(NodeAuthentication authentication, AttemptReport report, CancellationToken cancellationToken = default)
-    {
-        if (report.Diagnostic?.Length > options.MaximumDiagnosticLength || report.ErrorCode?.Length > 100)
-            throw Error("report_too_large", "Attempt report exceeds a text limit.");
-        if (report.State is ConvergenceState.Pending or ConvergenceState.Superseded)
-            throw Error("invalid_transition", "Agent reports may be applying, succeeded, or failed.");
-        if (report.ReportedAt > clock.GetUtcNow() + TimeSpan.FromMinutes(5))
-            throw Error("invalid_report_time", "Attempt report time is too far in the future.");
-        await Authenticate(authentication, report.ReportedAt, true, cancellationToken);
-        await using var transaction = await db.Database.BeginTransactionAsync(IsolationLevel.ReadCommitted, cancellationToken);
-        var attemptId = report.AttemptId.Value;
-        var attemptIdentity = await db.Attempts.AsNoTracking().Where(x => x.Id == attemptId)
-            .Select(x => new { x.AssignmentId, x.NodeId }).SingleOrDefaultAsync(cancellationToken);
-        if (attemptIdentity is null || attemptIdentity.NodeId != authentication.NodeId.Value)
-            throw Error("attempt_not_found", "Attempt was not found.");
-        var assignmentId = attemptIdentity.AssignmentId;
-        var assignment = await db.Assignments.FromSqlInterpolated($"SELECT * FROM assignments WHERE \"Id\" = {assignmentId} FOR UPDATE")
-            .SingleAsync(cancellationToken);
-        var attempt = await db.Attempts.FromSqlInterpolated($"SELECT * FROM attempts WHERE \"Id\" = {attemptId} FOR UPDATE")
-            .SingleAsync(cancellationToken);
-        var currentState = (ConvergenceState)attempt.State;
-        // Agents send no diagnostic with the report; the detail route may have stored one since, which must not turn a repeat into an error.
-        if (currentState == report.State && attempt.ErrorCode == report.ErrorCode &&
-            (report.Diagnostic is null && currentState == ConvergenceState.Failed || attempt.Diagnostic == report.Diagnostic))
-            return new(ReportOutcome.Duplicate, currentState);
-        if (currentState is ConvergenceState.Succeeded or ConvergenceState.Failed)
-            throw Error("terminal_attempt", "A terminal Attempt cannot change result.");
-        var stale = !assignment.IsCurrent || (ConvergenceState)assignment.State == ConvergenceState.Superseded;
-        attempt.State = (int)report.State;
-        attempt.ErrorCode = report.ErrorCode;
-        attempt.Diagnostic = report.Diagnostic;
-        attempt.UpdatedAt = report.ReportedAt;
-        if (!stale) assignment.State = (int)report.State;
-        await db.SaveChangesAsync(cancellationToken);
-        await transaction.CommitAsync(cancellationToken);
-        return new(stale ? ReportOutcome.Stale : ReportOutcome.Recorded, report.State);
-    }
-
-    public async Task<Page<AttemptStatus>> GetAttemptsAsync(RolloutId rolloutId, PageRequest page, CancellationToken cancellationToken = default)
-    {
-        await EnsureWorkspace(cancellationToken);
-        var (limit, cursor) = PageArgs(page);
-        var rows = await db.Attempts.AsNoTracking().Where(x => x.RolloutId == rolloutId.Value && x.Id.CompareTo(cursor) > 0)
-            .OrderBy(x => x.Id).Take(limit + 1).ToListAsync(cancellationToken);
-        return MakePage(rows, limit, x => x.Id, x => new AttemptStatus(new(x.Id), new(x.AssignmentId),
-            (ConvergenceState)x.State, x.ErrorCode, x.Diagnostic, x.FailurePath, x.FailureStep, x.UpdatedAt));
-    }
-
-    public async Task RecordAttemptDetailAsync(NodeAuthentication authentication, AttemptId attemptId, AttemptDetail detail,
-        CancellationToken cancellationToken = default)
-    {
-        var clean = AttemptDetailRules.Sanitize(detail);
-        await Authenticate(authentication, clock.GetUtcNow(), false, cancellationToken);
-        var id = attemptId.Value;
-        var nodeId = authentication.NodeId.Value;
-        var failed = (int)ConvergenceState.Failed;
-        // One conditional UPDATE by Attempt, Node and state: no read-modify-write, and the latest accepted detail wins.
-        // The IS DISTINCT FROM test skips the physical write (row version, WAL) when a repeat carries the stored values.
-        var updated = await db.Database.ExecuteSqlInterpolatedAsync($$"""
-            UPDATE attempts SET "Diagnostic" = {{clean.Diagnostic}}, "FailurePath" = {{clean.Path}}, "FailureStep" = {{clean.Step}}
-            WHERE "Id" = {{id}} AND "NodeId" = {{nodeId}} AND "State" = {{failed}}
-              AND ("Diagnostic" IS DISTINCT FROM {{clean.Diagnostic}} OR "FailurePath" IS DISTINCT FROM {{clean.Path}}
-                OR "FailureStep" IS DISTINCT FROM {{clean.Step}})
-            """, cancellationToken);
-        if (updated > 0) return;
-        // Zero rows is either a refusal or an unchanged repeat of an owned failed Attempt, which is still accepted.
-        var state = await db.Attempts.AsNoTracking().Where(x => x.Id == id && x.NodeId == nodeId)
-            .Select(x => (int?)x.State).SingleOrDefaultAsync(cancellationToken);
-        if (state == failed) return;
-        throw state is null ? Error("attempt_not_found", "Attempt was not found.")
-            : Error("attempt_not_failed", "Detail can only be added to a failed Attempt.");
-    }
-
-    public async Task<Page<WarningStatus>> GetWarningsAsync(PageRequest page, CancellationToken cancellationToken = default)
-    {
-        await EnsureWorkspace(cancellationToken);
-        var (limit, cursor) = PageArgs(page);
-        var rows = await db.Warnings.AsNoTracking().Where(x => x.Id.CompareTo(cursor) > 0).OrderBy(x => x.Id)
-            .Take(limit + 1).ToListAsync(cancellationToken);
-        return MakePage(rows, limit, x => x.Id, x => new WarningStatus(new(x.DesiredRevisionId), x.Code, x.Message,
-            JsonSerializer.Deserialize<string[]>(x.SourceLocations) ?? []));
-    }
-
-    public async Task<Page<DesiredRevisionSummary>> GetDesiredRevisionsAsync(PageRequest page, CancellationToken cancellationToken = default)
-    {
-        await EnsureWorkspace(cancellationToken);
-        if (page.Order == PageOrder.Newest)
-        {
-            var (newestLimit, after) = OperatorPageArgs(page);
-            var query = db.DesiredRevisions.AsNoTracking().Where(x => x.WorkspaceId == options.WorkspaceId.Value);
-            if (after is var (at, cursorId))
-                query = query.Where(x => x.AcceptedAt < at || x.AcceptedAt == at && x.Id.CompareTo(cursorId) < 0);
-            var newest = await query.OrderByDescending(x => x.AcceptedAt).ThenByDescending(x => x.Id).Take(newestLimit + 1)
-                .ToListAsync(cancellationToken);
-            return MakeTimePage(newest, newestLimit, x => x.AcceptedAt, x => x.Id,
-                x => new DesiredRevisionSummary(new(x.Id), x.SourceRevision, x.AcceptedAt, CommitOf(x)));
-        }
-        var (limit, cursor) = PageArgs(page);
-        var rows = await db.DesiredRevisions.AsNoTracking().Where(x => x.Id.CompareTo(cursor) > 0).OrderBy(x => x.Id)
-            .Take(limit + 1).ToListAsync(cancellationToken);
-        return MakePage(rows, limit, x => x.Id, x => new DesiredRevisionSummary(new(x.Id), x.SourceRevision, x.AcceptedAt, CommitOf(x)));
-    }
-
-    public async Task<Page<RolloutStatus>> GetRolloutsAsync(PageRequest page, CancellationToken cancellationToken = default)
-    {
-        await EnsureWorkspace(cancellationToken);
-        var newest = page.Order == PageOrder.Newest;
-        int limit;
-        List<RolloutRow> rows;
-        if (newest)
-        {
-            var (newestLimit, after) = OperatorPageArgs(page);
-            limit = newestLimit;
-            var query = db.Rollouts.AsNoTracking();
-            if (after is var (at, cursorId))
-                query = query.Where(x => x.CreatedAt < at || x.CreatedAt == at && x.Id.CompareTo(cursorId) < 0);
-            rows = await query.OrderByDescending(x => x.CreatedAt).ThenByDescending(x => x.Id).Take(limit + 1).ToListAsync(cancellationToken);
-        }
-        else
-        {
-            var (idLimit, cursor) = PageArgs(page);
-            limit = idLimit;
-            rows = await db.Rollouts.AsNoTracking().Where(x => x.Id.CompareTo(cursor) > 0).OrderBy(x => x.Id)
-                .Take(limit + 1).ToListAsync(cancellationToken);
-        }
-        var ids = rows.Take(limit).Select(x => x.Id).ToArray();
-        var counts = await db.Assignments.Where(x => ids.Contains(x.RolloutId)).GroupBy(x => new { x.RolloutId, x.State })
-            .Select(x => new { x.Key.RolloutId, x.Key.State, Count = x.Count() }).ToListAsync(cancellationToken);
-        int Count(Guid rollout, ConvergenceState state) => counts.FirstOrDefault(c => c.RolloutId == rollout && c.State == (int)state)?.Count ?? 0;
-        RolloutStatus Map(RolloutRow x) => new(new(x.Id), new(x.DesiredRevisionId), x.CreatedAt,
-            Count(x.Id, ConvergenceState.Pending), Count(x.Id, ConvergenceState.Applying), Count(x.Id, ConvergenceState.Succeeded),
-            Count(x.Id, ConvergenceState.Failed), Count(x.Id, ConvergenceState.Superseded));
-        return newest ? MakeTimePage(rows, limit, x => x.CreatedAt, x => x.Id, Map) : MakePage(rows, limit, x => x.Id, Map);
-    }
-
-    public async Task<PersistenceMaintenanceResult> MaintainPersistenceAsync(PersistenceMaintenancePolicy policy,
-        CancellationToken cancellationToken = default)
-    {
-        if (policy.BatchSize is < 1 or > 10_000 || policy.AuditEventRetention <= TimeSpan.Zero ||
-            policy.SourceScanRetention <= TimeSpan.Zero)
-            throw Error("invalid_retention_policy", "Retention periods must be positive and batch size must be between 1 and 10,000.");
-        await EnsureWorkspace(cancellationToken);
-        var now = clock.GetUtcNow();
-        var workspaceId = options.WorkspaceId.Value;
-        var scrubbed = await db.Database.ExecuteSqlInterpolatedAsync($$"""
-            WITH expired AS (
-                SELECT "Id" FROM enrollment_authorizations
-                WHERE "WorkspaceId" = {{workspaceId}} AND "DeliveryPayload" IS NOT NULL AND "RetryUntil" < {{now}}
-                ORDER BY "RetryUntil" LIMIT {{policy.BatchSize}} FOR UPDATE SKIP LOCKED
-            )
-            UPDATE enrollment_authorizations e SET "DeliveryPayload" = NULL
-            FROM expired WHERE e."Id" = expired."Id"
-            """, cancellationToken);
-        var auditDeleted = policy.AuditEventRetention is TimeSpan auditRetention
-            ? await DeleteAuditEvents(workspaceId, now - auditRetention, policy.BatchSize, cancellationToken) : 0;
-        var scansDeleted = policy.SourceScanRetention is TimeSpan scanRetention
-            ? await DeleteSourceScans(workspaceId, now - scanRetention, policy.BatchSize, cancellationToken) : 0;
-        // Check-in history is operational telemetry with a fixed window, independent of the opt-in retention policy.
-        var checkinsDeleted = await DeleteCheckins(now.AddDays(-CheckinRetentionDays), policy.BatchSize, cancellationToken);
-        return new(scrubbed, auditDeleted, scansDeleted, checkinsDeleted);
     }
 
     // Returns the Node row it loaded anyway, so poll reads the pending disk refresh request without another query.
@@ -830,99 +56,53 @@ public sealed partial class PostgresFleetCoordinator(
         return valid;
     }
 
-    private async Task<bool> SameTarget(AssignmentRow current, SnapshotTarget target, CancellationToken cancellationToken)
+    // Serializes source publication with Node removal. Both take it before they lock or read Node rows.
+    private const string PublicationLockSql = "SELECT pg_advisory_xact_lock(1179403596)";
+
+    private IQueryable<NodeRow> NodeForUpdate(Guid id) =>
+        db.Nodes.FromSqlInterpolated($"SELECT * FROM nodes WHERE \"Id\" = {id} FOR UPDATE");
+
+    // Locks a Node of this Workspace, or throws node_not_found. Callers that only read the row pass tracked: false.
+    private async Task<NodeRow> LockNodeAsync(Guid id, CancellationToken cancellationToken, bool tracked = true)
     {
-        if (current.TargetBase != target.Descriptor.Base || current.TargetPath != target.Descriptor.Path) return false;
-        var skills = await db.AssignmentSkills.AsNoTracking().Where(x => x.AssignmentId == current.Id)
-            .OrderBy(x => x.Name).Select(x => new { x.Name, x.BundleDigest }).ToListAsync(cancellationToken);
-        var desired = target.Skills.OrderBy(x => x.Name).ToList();
-        if (skills.Count != desired.Count || !skills.Zip(desired).All(x =>
-            x.First.Name == x.Second.Name && x.First.BundleDigest == x.Second.BundleDigest)) return false;
-        var file = await db.AssignmentFiles.AsNoTracking().Where(x => x.AssignmentId == current.Id)
-            .Select(x => new { x.Name, x.BundleDigest }).SingleOrDefaultAsync(cancellationToken);
-        var sameFile = file is null
-            ? target.File is null
-            : target.File is not null && file.Name == target.File.Name && file.BundleDigest == target.File.BundleDigest;
-        if (!sameFile) return false;
-        var aiClient = await db.AssignmentAiClients.AsNoTracking().Where(x => x.AssignmentId == current.Id)
-            .Select(x => new { x.Schema, x.Client, x.Mode, x.BaseUrl, x.Model }).SingleOrDefaultAsync(cancellationToken);
-        return aiClient is null
-            ? target.AiClient is null
-            : target.AiClient is not null && aiClient.Schema == target.AiClient.Schema &&
-              aiClient.Client == target.AiClient.Client && aiClient.Mode == target.AiClient.Mode &&
-              aiClient.BaseUrl == target.AiClient.BaseUrl && aiClient.Model == target.AiClient.Model;
+        var query = NodeForUpdate(id);
+        var node = await (tracked ? query : query.AsNoTracking()).SingleOrDefaultAsync(cancellationToken);
+        if (node is null || node.WorkspaceId != options.WorkspaceId.Value) throw Error("node_not_found", "Node was not found.");
+        return node;
     }
 
-    private static void ValidateSnapshot(AcceptedSourceSnapshot snapshot)
+    // Locks the Node an Agent report comes from, after Authenticate, and throws node_unauthorized if it is gone or revoked by now.
+    private async Task LockReportingNodeAsync(Guid nodeId, CancellationToken cancellationToken)
     {
-        if (snapshot.Targets.GroupBy(x => (x.NodeId, x.TargetName)).Any(x => x.Count() > 1))
-            throw Error("duplicate_target", "Snapshot contains a duplicate Node Target.");
-        if (snapshot.Bundles.Select(x => x.Digest).Distinct(StringComparer.Ordinal).Count() != snapshot.Bundles.Count)
-            throw Error("duplicate_bundle", "Snapshot contains a duplicate Bundle digest.");
-        if (snapshot.Bundles.Aggregate(0L, (total, bundle) => checked(total + bundle.Content.LongLength)) > 256L * 1024 * 1024)
-            throw Error("snapshot_too_large", "Bundle content exceeds the 256 MiB snapshot limit.");
-        var bundles = snapshot.Bundles.ToDictionary(x => x.Digest, StringComparer.Ordinal);
-        foreach (var bundle in snapshot.Bundles)
-        {
-            ValidateSha256(bundle.Digest, "bundle_digest");
-            if (bundle.Size is < 0 or > 16 * 1024 * 1024 || bundle.Size != bundle.Content.LongLength || !DigestMatches(bundle.Digest, bundle.Schema, bundle.Content))
-                throw Error("invalid_bundle_digest", "Bundle size or digest does not match its content.");
-            Required(bundle.Schema, 100, "bundle_schema");
-        }
-        foreach (var target in snapshot.Targets)
-        {
-            Required(target.TargetName, 100, "target_name"); Required(target.Descriptor.Base, 50, "target_base");
-            Required(target.Descriptor.Path, 1_024, "target_path");
-            if (target.Descriptor.Base != "home" || target.Descriptor.Path.StartsWith('/') || target.Descriptor.Path.StartsWith('\\') ||
-                target.Descriptor.Path.Split(['/', '\\']).Any(x => x is "" or "." or ".."))
-                throw Error("invalid_target_descriptor", "Target must be a non-empty relative path below home.");
-            if (target.Skills.Count > 10_000 || target.Skills.Select(x => x.Name).Distinct(StringComparer.Ordinal).Count() != target.Skills.Count)
-                throw Error("invalid_skills", "Target Skills exceed the limit or contain duplicate names.");
-            var isSkills = target.TargetName is "skills" or "skills/claude";
-            var isFile = target.TargetName.StartsWith("agent-file/", StringComparison.Ordinal);
-            var isAiClient = target.TargetName.StartsWith("ai-client/", StringComparison.Ordinal);
-            if ((isSkills ? 1 : 0) + (isFile ? 1 : 0) + (isAiClient ? 1 : 0) != 1 ||
-                isSkills && (target.File is not null || target.AiClient is not null) ||
-                isFile && (target.File is null || target.AiClient is not null || target.Skills.Count != 0) ||
-                isAiClient && (target.AiClient is null || target.File is not null || target.Skills.Count != 0))
-                throw Error("invalid_target_content", "Target content does not match its Target type.");
-            foreach (var skill in target.Skills)
-            {
-                Required(skill.Name, 200, "skill_name");
-                ValidateSha256(skill.BundleDigest, "bundle_digest");
-            }
-            if (target.File is not null)
-            {
-                Required(target.File.Name, 255, "file_name");
-                if (target.File.Name.Contains('/') || target.File.Name.Contains('\\') || target.File.Name is "." or "..")
-                    throw Error("invalid_file_name", "Managed file name must be one portable path segment.");
-                if (target.File.BundleDigest is not null) ValidateSha256(target.File.BundleDigest, "bundle_digest");
-            }
-            if (target.AiClient is not null)
-            {
-                Required(target.AiClient.Schema, 100, "ai_client_schema");
-                Required(target.AiClient.Client, 100, "ai_client");
-                Required(target.AiClient.Mode, 20, "ai_client_mode");
-                if (target.AiClient.Schema != "fleet.ai-client/v1" ||
-                    target.TargetName != $"ai-client/{target.AiClient.Client}" ||
-                    target.AiClient.Client is not ("codex" or "opencode" or "claude") ||
-                    target.AiClient.Mode is not ("native" or "cliproxy") ||
-                    target.AiClient.Mode == "native" && (target.AiClient.BaseUrl is not null || target.AiClient.Model is not null) ||
-                    target.AiClient.Mode == "cliproxy" && (!IsValidCliProxyBaseUrl(target.AiClient.BaseUrl) ||
-                        target.AiClient.Model is not null && !IsValidModelId(target.AiClient.Model)))
-                    throw Error("invalid_ai_client", "AI client assignment is invalid.");
-                if (target.AiClient.BaseUrl?.Length > 2_048 || target.AiClient.Model?.Length > 200)
-                    throw Error("invalid_ai_client", "AI client assignment exceeds a text limit.");
-            }
-        }
-        foreach (var warning in snapshot.Warnings)
-        {
-            Required(warning.Code, 100, "warning_code");
-            Required(warning.Message, 2_048, "warning_message");
-            if (warning.SourceLocations.Count > 100 || warning.SourceLocations.Any(x => string.IsNullOrWhiteSpace(x) || x.Length > 1_024))
-                throw Error("invalid_warning_locations", "Warning source locations exceed a count or text limit.");
-        }
+        var node = await NodeForUpdate(nodeId).AsNoTracking().SingleOrDefaultAsync(cancellationToken);
+        if (node is null || node.RevokedAt is not null) throw Error("node_unauthorized", "Node credential is not active.");
     }
+
+    // Locks the Node, then its credential, and throws node_unauthorized unless both are active. With allowExpired, a credential
+    // past its NotAfter still counts (credential renewal).
+    private async Task<(NodeRow Node, CredentialRow Credential)> LockActiveCredentialAsync(NodeAuthentication authentication,
+        DateTimeOffset now, bool allowExpired, CancellationToken cancellationToken)
+    {
+        var credentialId = authentication.CredentialId.Value;
+        var node = await NodeForUpdate(authentication.NodeId.Value).SingleOrDefaultAsync(cancellationToken);
+        var credential = await db.Credentials.FromSqlInterpolated($"SELECT * FROM node_credentials WHERE \"Id\" = {credentialId} FOR UPDATE")
+            .SingleOrDefaultAsync(cancellationToken);
+        if (node is null || credential is null || node.WorkspaceId != options.WorkspaceId.Value || node.RevokedAt is not null ||
+            credential.NodeId != node.Id || credential.RevokedAt is not null || credential.NotBefore > now ||
+            !allowExpired && credential.NotAfter <= now || credential.CertificateSha256 != authentication.CertificateSha256)
+            throw Error("node_unauthorized", "Node credential is not active.");
+        return (node, credential);
+    }
+
+    private static AttemptRow NewPendingAttempt(Guid assignmentId, Guid rolloutId, Guid nodeId, DateTimeOffset at) => new()
+    {
+        Id = Guid.NewGuid(),
+        AssignmentId = assignmentId,
+        RolloutId = rolloutId,
+        NodeId = nodeId,
+        State = (int)ConvergenceState.Pending,
+        UpdatedAt = at
+    };
 
     private async Task EnsureWorkspace(CancellationToken cancellationToken)
     {
@@ -933,26 +113,25 @@ public sealed partial class PostgresFleetCoordinator(
         if (actual != workspaceId) throw Error("workspace_mismatch", "The database belongs to a different Workspace.");
     }
 
-    private static bool IsValidModelId(string value) => value.Length is > 0 and <= 200 &&
-        value.All(character => character is >= '!' and <= '~');
-
-    private static bool IsValidCliProxyBaseUrl(string? value) =>
-        Uri.TryCreate(value, UriKind.Absolute, out var uri) && uri.Scheme == Uri.UriSchemeHttps &&
-        !string.IsNullOrEmpty(uri.Host) && string.IsNullOrEmpty(uri.UserInfo) &&
-        string.IsNullOrEmpty(uri.Query) && string.IsNullOrEmpty(uri.Fragment) &&
-        uri.AbsolutePath.TrimEnd('/') == "/v1";
-
-    private async Task<int> DeleteAuditEvents(Guid workspaceId, DateTimeOffset cutoff, int batchSize, CancellationToken cancellationToken) =>
-        await db.Database.ExecuteSqlInterpolatedAsync($$"""
-            WITH expired AS (SELECT "Id" FROM audit_events WHERE "WorkspaceId" = {{workspaceId}} AND "RecordedAt" < {{cutoff}} ORDER BY "RecordedAt" LIMIT {{batchSize}} FOR UPDATE SKIP LOCKED)
-            DELETE FROM audit_events a USING expired WHERE a."Id" = expired."Id"
-            """, cancellationToken);
-
-    private async Task<int> DeleteSourceScans(Guid workspaceId, DateTimeOffset cutoff, int batchSize, CancellationToken cancellationToken) =>
-        await db.Database.ExecuteSqlInterpolatedAsync($$"""
-            WITH expired AS (SELECT "Id" FROM source_scans WHERE "WorkspaceId" = {{workspaceId}} AND "ObservedAt" < {{cutoff}} ORDER BY "ObservedAt" LIMIT {{batchSize}} FOR UPDATE SKIP LOCKED)
-            DELETE FROM source_scans s USING expired WHERE s."Id" = expired."Id"
-            """, cancellationToken);
+    private async Task ChangeNodeAlias(NodeRow node, string alias, string actor, Guid? credentialId,
+        CancellationToken cancellationToken)
+    {
+        if (node.Name == alias) return;
+        if (await db.Nodes.AnyAsync(x => x.WorkspaceId == options.WorkspaceId.Value && x.Name == alias && x.Id != node.Id,
+                cancellationToken))
+            throw Error("node_alias_in_use", "The Node alias is already registered in this Workspace.");
+        node.Name = alias;
+        db.AuditEvents.Add(Audit("node_alias_changed", actor, clock.GetUtcNow(), node.Id, credentialId));
+        try
+        {
+            await db.SaveChangesAsync(cancellationToken);
+        }
+        catch (DbUpdateException exception) when (exception.InnerException is PostgresException
+        { SqlState: PostgresErrorCodes.UniqueViolation, ConstraintName: "IX_nodes_WorkspaceId_Name" })
+        {
+            throw Error("node_alias_in_use", "The Node alias is already registered in this Workspace.");
+        }
+    }
 
     private static (int Limit, Guid Cursor) PageArgs(PageRequest page)
     {
@@ -967,6 +146,33 @@ public sealed partial class PostgresFleetCoordinator(
         return new(items, rows.Count > limit ? id(rows[limit - 1]).ToString("D") : null);
     }
 
+    private static (int Limit, (DateTimeOffset At, Guid Id)? After) OperatorPageArgs(PageRequest page)
+    {
+        if (page.Limit is < 1 or > PageRequest.MaximumLimit)
+            throw Error("invalid_request", $"limit must be between 1 and {PageRequest.MaximumLimit}.");
+        if (page.Cursor is null) return (page.Limit, null);
+        try
+        {
+            var text = Encoding.UTF8.GetString(Microsoft.AspNetCore.WebUtilities.WebEncoders.Base64UrlDecode(page.Cursor));
+            var parts = text.Split(':');
+            if (parts.Length == 2 && long.TryParse(parts[0], NumberStyles.None, CultureInfo.InvariantCulture, out var ticks) &&
+                ticks <= DateTime.MaxValue.Ticks && Guid.TryParseExact(parts[1], "N", out var id))
+                return (page.Limit, (new DateTimeOffset(ticks, TimeSpan.Zero), id));
+        }
+        catch (FormatException) { }
+        throw Error("invalid_request", "after is not a valid cursor for this order.");
+    }
+
+    private static Page<TOut> MakeTimePage<TRow, TOut>(List<TRow> rows, int limit, Func<TRow, DateTimeOffset> at, Func<TRow, Guid> id,
+        Func<TRow, TOut> map)
+    {
+        var items = rows.Take(limit).Select(map).ToList();
+        if (rows.Count <= limit) return new(items, null);
+        var last = rows[limit - 1];
+        return new(items, Base64Url(Encoding.UTF8.GetBytes(
+            at(last).UtcTicks.ToString(CultureInfo.InvariantCulture) + ":" + id(last).ToString("N"))));
+    }
+
     private static string Required(string value, int maximum, string field)
     {
         if (string.IsNullOrWhiteSpace(value) || value.Length > maximum) throw Error("invalid_" + field, $"{field} is required and bounded.");
@@ -979,13 +185,12 @@ public sealed partial class PostgresFleetCoordinator(
         if (hex.Length != 64 || !hex.All(Uri.IsHexDigit)) throw Error("invalid_" + field, $"{field} must be a SHA-256 digest.");
     }
 
-    private static bool DigestMatches(string expected, string schema, byte[] content)
+    private static DateTimeOffset TruncateToMicroseconds(DateTimeOffset value) => new(value.UtcTicks / 10 * 10, TimeSpan.Zero);
+
+    private static DateTimeOffset TruncateToHour(DateTimeOffset value)
     {
-        var digestInput = schema == "fleet.file/v1"
-            ? Encoding.UTF8.GetBytes("fleet.file/v1\0").Concat(content).ToArray()
-            : content;
-        var hex = Convert.ToHexString(SHA256.HashData(digestInput)).ToLowerInvariant();
-        return string.Equals(expected, hex, StringComparison.OrdinalIgnoreCase) || string.Equals(expected, "sha256:" + hex, StringComparison.OrdinalIgnoreCase);
+        var utc = value.UtcDateTime;
+        return new(utc.Year, utc.Month, utc.Day, utc.Hour, 0, 0, TimeSpan.Zero);
     }
 
     private static string TokenDigest(string token) => Convert.ToHexString(SHA256.HashData(

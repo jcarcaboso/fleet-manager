@@ -1,3 +1,5 @@
+using static Fleet.Core.Coordination.RuleText;
+
 namespace Fleet.Core.Coordination;
 
 /// <summary>Validation and arithmetic for disk usage reports, shared by the Server route, the coordinator and the Operator views.</summary>
@@ -34,5 +36,12 @@ public static class DiskUsageRules
         return denominator == 0 ? 0 : (double)Math.Round(usedBytes * 100m / denominator, 1, MidpointRounding.AwayFromZero);
     }
 
-    private static CoordinationException Invalid(string message) => new("invalid_request", message);
+    /// <summary>
+    /// The fullest of one Node's volumes: the highest <see cref="UsedPercent"/>, ties broken by label (ordinal). The fullest volume is
+    /// picked by percent rather than bytes because used + available can be 0. <paramref name="volumes"/> must not be empty.
+    /// </summary>
+    public static (T Volume, double UsedPercent) Fullest<T>(IEnumerable<T> volumes, Func<T, string> label, Func<T, long> usedBytes,
+        Func<T, long> availableBytes) =>
+        volumes.Select(x => (Volume: x, UsedPercent: UsedPercent(usedBytes(x), availableBytes(x))))
+            .OrderByDescending(x => x.UsedPercent).ThenBy(x => label(x.Volume), StringComparer.Ordinal).First();
 }

@@ -1,3 +1,5 @@
+using static Fleet.Core.Coordination.RuleText;
+
 namespace Fleet.Core.Coordination;
 
 /// <summary>Validation and limits for <see cref="RepairFailureReport"/>, shared by the Server route and the coordinator.</summary>
@@ -32,7 +34,5 @@ public static class RepairFailureRules
     }
 
     private static bool IsName(string? value, int maximumLength) =>
-        !string.IsNullOrWhiteSpace(value) && value.Length <= maximumLength && !value.Any(char.IsControl);
-
-    private static CoordinationException Invalid(string message) => new("invalid_request", message);
+        !string.IsNullOrWhiteSpace(value) && value.Length <= maximumLength && !HasControl(value);
 }
