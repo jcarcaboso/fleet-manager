@@ -147,13 +147,35 @@ impl Api {
         segments: &[&str],
         body: Option<&Value>,
     ) -> Result<Value, CliError> {
-        let request = self.client.post(self.endpoint(segments)?);
-        self.send(if let Some(body) = body {
-            request.json(body)
-        } else {
-            request
-        })
-        .await
+        self.post_with_timeout(segments, body, None).await
+    }
+
+    /// `POST` with the longer [`AGENT_UPDATE_TIMEOUT`].
+    pub(crate) async fn post_agent_update(
+        &self,
+        segments: &[&str],
+        body: Option<&Value>,
+    ) -> Result<Value, CliError> {
+        self.post_with_timeout(segments, body, Some(AGENT_UPDATE_TIMEOUT))
+            .await
+    }
+
+    /// `POST` with an optional JSON body; `timeout` replaces the client's
+    /// default request timeout.
+    async fn post_with_timeout(
+        &self,
+        segments: &[&str],
+        body: Option<&Value>,
+        timeout: Option<Duration>,
+    ) -> Result<Value, CliError> {
+        let mut request = self.client.post(self.endpoint(segments)?);
+        if let Some(timeout) = timeout {
+            request = request.timeout(timeout);
+        }
+        if let Some(body) = body {
+            request = request.json(body);
+        }
+        self.send(request).await
     }
 
     /// `GET` one page of a paged list, always with `limit=100`.
@@ -210,24 +232,6 @@ impl Api {
                 }),
             rename_error_detail,
         )
-        .await
-    }
-
-    /// `POST` with the longer [`AGENT_UPDATE_TIMEOUT`].
-    pub(crate) async fn post_agent_update(
-        &self,
-        segments: &[&str],
-        body: Option<&Value>,
-    ) -> Result<Value, CliError> {
-        let request = self
-            .client
-            .post(self.endpoint(segments)?)
-            .timeout(AGENT_UPDATE_TIMEOUT);
-        self.send(if let Some(body) = body {
-            request.json(body)
-        } else {
-            request
-        })
         .await
     }
 

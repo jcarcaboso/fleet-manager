@@ -9,13 +9,6 @@ use crate::error::CliError;
 use serde_json::{Map, Value, json};
 use std::collections::BTreeSet;
 
-fn invalid_response() -> CliError {
-    CliError::transport(
-        "invalid_response",
-        "Fleet Server response had an unexpected shape",
-    )
-}
-
 fn strings(policy: &Value, key: &str) -> BTreeSet<String> {
     policy
         .get(key)
@@ -59,7 +52,7 @@ pub(crate) fn build_body(selection: &Value, args: &SelectArgs) -> Result<Value, 
     let catalogs = selection
         .get("catalogs")
         .and_then(Value::as_array)
-        .ok_or_else(invalid_response)?;
+        .ok_or_else(CliError::invalid_response)?;
     let current = match (&args.base_url, catalogs.as_slice()) {
         (Some(url), _) => catalogs
             .iter()
@@ -87,7 +80,7 @@ pub(crate) fn build_body(selection: &Value, args: &SelectArgs) -> Result<Value, 
                 .and_then(Value::as_str)
                 .map(str::to_owned)
         })
-        .ok_or_else(invalid_response)?;
+        .ok_or_else(CliError::invalid_response)?;
     let policy = current
         .and_then(|catalog| catalog.get("policy"))
         .unwrap_or(&Value::Null);

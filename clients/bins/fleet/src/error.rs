@@ -52,6 +52,14 @@ impl CliError {
         }
     }
 
+    /// A Server response that decoded as JSON but not in the expected shape. Exit 6.
+    pub(crate) fn invalid_response() -> Self {
+        Self::transport(
+            "invalid_response",
+            "Fleet Server response had an unexpected shape",
+        )
+    }
+
     /// A non-success HTTP status. `code` is the Server's validated error code,
     /// if it sent one; `message` is always CLI-owned text.
     pub(crate) fn http(status: u16, code: Option<String>, message: impl Into<String>) -> Self {

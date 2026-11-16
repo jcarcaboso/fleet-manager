@@ -4,8 +4,11 @@ use reqwest::{
     Certificate, Client, Identity, Method, Response, StatusCode, Url, header::CONTENT_TYPE,
     redirect::Policy,
 };
-use serde::{Deserialize, Serialize, de::DeserializeOwned};
+use serde::{Serialize, de::DeserializeOwned};
 use uuid::Uuid;
+
+mod wire;
+pub use wire::*;
 
 const MAX_JSON_BYTES: usize = 1024 * 1024;
 const MAX_BUNDLE_BYTES: usize = 16 * 1024 * 1024;
@@ -174,13 +177,12 @@ impl Api {
     }
 
     pub async fn cliproxy_credential(&self) -> Result<Vec<u8>, ProtocolError> {
-        let response = self
-            .authenticated()?
-            .get(self.endpoint("agent/v1/cliproxy/credential")?)
-            .send()
-            .await
-            .map_err(ProtocolError::Transport)?;
-        let bytes = read_bounded(success(response)?, MAX_CLIPROXY_CREDENTIAL_BYTES).await?;
+        let bytes = self
+            .get_bytes(
+                self.endpoint("agent/v1/cliproxy/credential"),
+                MAX_CLIPROXY_CREDENTIAL_BYTES,
+            )
+            .await?;
         if bytes.is_empty() || !bytes.iter().all(u8::is_ascii_graphic) {
             return Err(ProtocolError::InvalidResponse(
                 "CLIProxy credential is invalid",
@@ -190,13 +192,8 @@ impl Api {
     }
 
     pub async fn cliproxy_models(&self) -> Result<Vec<u8>, ProtocolError> {
-        let response = self
-            .authenticated()?
-            .get(self.endpoint("agent/v1/cliproxy/models")?)
-            .send()
+        self.get_bytes(self.endpoint("agent/v1/cliproxy/models"), 4 * 1024 * 1024)
             .await
-            .map_err(ProtocolError::Transport)?;
-        read_bounded(success(response)?, 4 * 1024 * 1024).await
     }
 
     pub async fn bundle(&self, skill: &AssignmentSkill) -> Result<Bundle, ProtocolError> {
@@ -297,20 +294,17 @@ impl Api {
         attempt_id: Uuid,
         detail: &AttemptDetail,
     ) -> Result<(), ProtocolError> {
-        let body = serde_json::to_vec(detail).map_err(|_| ProtocolError::Json)?;
-        if body.len() > MAX_DETAIL_REQUEST_BYTES {
-            return Err(ProtocolError::RequestTooLarge {
-                limit: MAX_DETAIL_REQUEST_BYTES,
-            });
-        }
+        // Keeps the client's 30 s timeout; `detail::deliver` wraps the call in
+        // its own shorter limit.
         let response = self
-            .authenticated()?
-            .post(self.endpoint(&format!("agent/v1/attempts/{attempt_id}/detail"))?)
-            .header(CONTENT_TYPE, "application/json")
-            .body(body)
-            .send()
-            .await
-            .map_err(ProtocolError::Transport)?;
+            .send_json(
+                Method::POST,
+                &format!("agent/v1/attempts/{attempt_id}/detail"),
+                detail,
+                MAX_DETAIL_REQUEST_BYTES,
+                None,
+            )
+            .await?;
         success(response)?;
         Ok(())
     }
@@ -341,7 +335,7 @@ impl Api {
 
     /// Sends the files repaired in one Target. Best effort like
     /// [`Api::disk_usage`]: the response body is never read.
-    pub async fn drift(&self, report: &crate::drift::Report) -> Result<(), ProtocolError> {
+    pub async fn drift(&self, report: &DriftReport) -> Result<(), ProtocolError> {
         self.send_report(
             Method::POST,
             "agent/v1/drift",
@@ -355,7 +349,7 @@ impl Api {
     /// like [`Api::disk_usage`]: the response body is never read.
     pub async fn repair_failures(
         &self,
-        report: &crate::repair::Report,
+        report: &RepairFailuresReport,
     ) -> Result<(), ProtocolError> {
         self.send_report(
             Method::PUT,
@@ -373,21 +367,57 @@ impl Api {
         report: &impl Serialize,
         limit: usize,
     ) -> Result<(), ProtocolError> {
-        let body = serde_json::to_vec(report).map_err(|_| ProtocolError::Json)?;
+        let response = self
+            .send_json(method, path, report, limit, Some(SIDE_REPORT_TIMEOUT))
+            .await?;
+        success(response)?;
+        Ok(())
+    }
+
+    /// Sends `body` as JSON with the client identity and returns the response
+    /// unchecked. A body over `limit` bytes is not sent. `timeout` replaces the
+    /// client's 30 s default.
+    async fn send_json(
+        &self,
+        method: Method,
+        path: &str,
+        body: &impl Serialize,
+        limit: usize,
+        timeout: Option<Duration>,
+    ) -> Result<Response, ProtocolError> {
+        let body = serde_json::to_vec(body).map_err(|_| ProtocolError::Json)?;
         if body.len() > limit {
             return Err(ProtocolError::RequestTooLarge { limit });
         }
-        let response = self
+        let mut request = self
             .authenticated()?
             .request(method, self.endpoint(path)?)
-            .header(CONTENT_TYPE, "application/json")
-            .timeout(SIDE_REPORT_TIMEOUT)
+            .header(CONTENT_TYPE, "application/json");
+        if let Some(timeout) = timeout {
+            request = request.timeout(timeout);
+        }
+        request
             .body(body)
             .send()
             .await
+            .map_err(ProtocolError::Transport)
+    }
+
+    /// `GET` with the client identity; the body of a success response, at most
+    /// `limit` bytes. `url` is checked only after the identity, as every caller
+    /// did before this helper existed.
+    async fn get_bytes(
+        &self,
+        url: Result<Url, ProtocolError>,
+        limit: usize,
+    ) -> Result<Vec<u8>, ProtocolError> {
+        let response = self
+            .authenticated()?
+            .get(url?)
+            .send()
+            .await
             .map_err(ProtocolError::Transport)?;
-        success(response)?;
-        Ok(())
+        read_bounded(success(response)?, limit).await
     }
 
     /// A client for loopback tests that speaks plain HTTP to a mock Server.
@@ -408,24 +438,21 @@ impl Api {
 
     /// The signed release manifest of `version`, as the Server mirrors it.
     pub async fn release_manifest(&self, version: &str) -> Result<Vec<u8>, ProtocolError> {
-        let response = self
-            .authenticated()?
-            .get(self.release_url(version, &["manifest"])?)
-            .send()
-            .await
-            .map_err(ProtocolError::Transport)?;
-        read_bounded(success(response)?, MAX_RELEASE_MANIFEST_BYTES).await
+        self.get_bytes(
+            self.release_url(version, &["manifest"]),
+            MAX_RELEASE_MANIFEST_BYTES,
+        )
+        .await
     }
 
     /// The Ed25519 signature of the release manifest of `version`.
     pub async fn release_signature(&self, version: &str) -> Result<Vec<u8>, ProtocolError> {
-        let response = self
-            .authenticated()?
-            .get(self.release_url(version, &["signature"])?)
-            .send()
-            .await
-            .map_err(ProtocolError::Transport)?;
-        let bytes = read_bounded(success(response)?, RELEASE_SIGNATURE_BYTES).await?;
+        let bytes = self
+            .get_bytes(
+                self.release_url(version, &["signature"]),
+                RELEASE_SIGNATURE_BYTES,
+            )
+            .await?;
         if bytes.len() != RELEASE_SIGNATURE_BYTES {
             return Err(ProtocolError::InvalidResponse(
                 "release signature has the wrong size",
@@ -483,27 +510,20 @@ impl Api {
         state: AgentUpdateState,
         error_code: Option<&str>,
     ) -> Result<bool, ProtocolError> {
-        let body = serde_json::to_vec(&AgentUpdateReport {
-            update_id: update.update_id,
-            version: &update.version,
-            state,
-            error_code,
-        })
-        .map_err(|_| ProtocolError::Json)?;
-        if body.len() > MAX_AGENT_UPDATE_REQUEST_BYTES {
-            return Err(ProtocolError::RequestTooLarge {
-                limit: MAX_AGENT_UPDATE_REQUEST_BYTES,
-            });
-        }
         let response = self
-            .authenticated()?
-            .post(self.endpoint("agent/v1/agent-update/report")?)
-            .header(CONTENT_TYPE, "application/json")
-            .timeout(SIDE_REPORT_TIMEOUT)
-            .body(body)
-            .send()
-            .await
-            .map_err(ProtocolError::Transport)?;
+            .send_json(
+                Method::POST,
+                "agent/v1/agent-update/report",
+                &AgentUpdateReport {
+                    update_id: update.update_id,
+                    version: &update.version,
+                    state,
+                    error_code,
+                },
+                MAX_AGENT_UPDATE_REQUEST_BYTES,
+                Some(SIDE_REPORT_TIMEOUT),
+            )
+            .await?;
         if response.status() == StatusCode::CONFLICT {
             return Ok(false);
         }
@@ -604,236 +624,11 @@ async fn read_bounded(mut response: Response, limit: usize) -> Result<Vec<u8>, P
     Ok(output)
 }
 
-#[derive(Debug, Clone, Deserialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
-pub struct EnrollmentResponse {
-    pub workspace_id: Uuid,
-    pub node_id: Uuid,
-    pub credential_id: Uuid,
-    pub certificate_pem: String,
-    pub expires_at: String,
-    pub poll_interval_seconds: u64,
-}
-
-#[derive(Debug, Clone, Deserialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
-pub struct RenewalResponse {
-    pub credential_id: Uuid,
-    pub certificate_pem: String,
-    pub expires_at: String,
-}
-
-#[derive(Debug, Clone, Deserialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
-pub struct PollResponse {
-    pub workspace_id: Uuid,
-    pub node_id: Uuid,
-    pub assignment: Option<Assignment>,
-    pub next_poll_seconds: u64,
-    /// Set by the Server only for Agents that sent the disk-usage capability.
-    #[serde(default)]
-    pub disk_usage_requested: bool,
-    /// An Operator's update request. Set by the Server only for Agents that
-    /// sent the agent-update capability.
-    #[serde(default)]
-    pub agent_update: Option<AgentUpdate>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
-pub struct AgentUpdate {
-    pub version: String,
-    /// Identifies this request; every report about it repeats it, so a late
-    /// report about an earlier request of the same version changes nothing.
-    pub update_id: Uuid,
-}
-
-/// States an Agent reports while it updates itself.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum AgentUpdateState {
-    Downloading,
-    Restarting,
-    Succeeded,
-    Failed,
-}
-
-/// Body of `POST agent/v1/agent-update/report`. Every property is always
-/// present; `errorCode` is `null` unless the state is `failed`.
-#[derive(Serialize)]
-#[serde(rename_all = "camelCase")]
-struct AgentUpdateReport<'a> {
-    update_id: Uuid,
-    version: &'a str,
-    state: AgentUpdateState,
-    error_code: Option<&'a str>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
-pub struct Assignment {
-    pub assignment_id: Uuid,
-    pub attempt_id: Uuid,
-    pub rollout_id: Uuid,
-    pub desired_revision_id: Uuid,
-    pub target_name: String,
-    pub target: TargetDescriptor,
-    pub skills: Vec<AssignmentSkill>,
-    #[serde(default)]
-    pub file: Option<AssignmentFile>,
-    #[serde(default)]
-    pub ai_client: Option<AiClientAssignment>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
-pub struct AiClientAssignment {
-    pub schema: String,
-    pub client: String,
-    pub mode: String,
-    pub base_url: Option<String>,
-    pub model: Option<String>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct TargetDescriptor {
-    pub base: String,
-    pub path: String,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
-pub struct AssignmentSkill {
-    pub name: String,
-    pub bundle_digest: String,
-    pub size: i64,
-    pub schema: String,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
-pub struct AssignmentFile {
-    pub name: String,
-    pub bundle_digest: Option<String>,
-    pub size: Option<i64>,
-    pub schema: Option<String>,
-}
-
 #[derive(Debug, Clone)]
 pub struct Bundle {
     pub digest: String,
     pub schema: String,
     pub bytes: Vec<u8>,
-}
-
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case")]
-pub enum ConvergenceState {
-    Pending,
-    Applying,
-    Succeeded,
-    Failed,
-    Superseded,
-}
-
-#[derive(Debug, Clone, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct ReportResponse {
-    pub outcome: ReportOutcome,
-    pub state: ConvergenceState,
-}
-
-#[derive(Debug, Clone, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum ReportOutcome {
-    Recorded,
-    Duplicate,
-    Stale,
-}
-
-#[derive(Debug, Clone, Deserialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
-pub struct RenameResponse {
-    pub node_id: Uuid,
-    pub alias: String,
-}
-
-/// Failure detail for one Attempt, as the Server's attempt-detail route
-/// expects it.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct AttemptDetail {
-    pub diagnostic: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub path: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub step: Option<fleet_reconcile::Step>,
-}
-
-/// Body of `PUT agent/v1/disk-usage`.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
-pub struct DiskUsageReport {
-    pub volumes: Vec<DiskVolume>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct DiskVolume {
-    pub label: &'static str,
-    pub total_bytes: u64,
-    pub used_bytes: u64,
-    pub available_bytes: u64,
-}
-
-/// Body of `PUT agent/v1/telemetry`. Every property is always present; a value
-/// that could not be read is `null`.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct TelemetryReport {
-    pub agent_version: String,
-    pub os: TelemetryOs,
-    pub arch: Option<String>,
-    pub hostname: Option<String>,
-    pub user: Option<String>,
-    /// `homebrew`, `cargo` or `binary`.
-    pub install_method: Option<&'static str>,
-    /// `systemd`, `launchd` or `none`.
-    pub service_manager: &'static str,
-    pub state_directory: Option<String>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
-pub struct TelemetryOs {
-    pub name: Option<String>,
-    pub version: Option<String>,
-    pub kernel: Option<String>,
-}
-
-#[derive(Serialize)]
-#[serde(rename_all = "camelCase")]
-struct EnrollmentRequest<'a> {
-    token: &'a str,
-    certificate_request_pem: &'a str,
-    node_name: &'a str,
-    platform: &'a str,
-}
-#[derive(Serialize)]
-#[serde(rename_all = "camelCase")]
-struct RenewalRequest<'a> {
-    certificate_request_pem: &'a str,
-}
-#[derive(Serialize)]
-#[serde(rename_all = "camelCase")]
-struct ReportRequest<'a> {
-    attempt_id: Uuid,
-    state: ConvergenceState,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    error_code: Option<&'a str>,
-}
-#[derive(Serialize)]
-struct AliasRequest<'a> {
-    alias: &'a str,
 }
 
 #[cfg(test)]

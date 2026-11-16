@@ -698,13 +698,6 @@ fn dry_run(action: &str, target: Value, request: Value) -> Value {
     json!({"dryRun": true, "action": action, "target": target, "request": request})
 }
 
-fn invalid_response() -> CliError {
-    CliError::transport(
-        "invalid_response",
-        "Fleet Server response had an unexpected shape",
-    )
-}
-
 /// A short, stable view of a `GET nodes/{node}` response.
 fn node_target(node: &Value) -> Value {
     let mut target = Map::new();
@@ -728,7 +721,7 @@ fn string_field<'a>(value: &'a Value, key: &str) -> Result<&'a str, CliError> {
     value
         .get(key)
         .and_then(Value::as_str)
-        .ok_or_else(invalid_response)
+        .ok_or_else(CliError::invalid_response)
 }
 
 pub(crate) async fn run(api: &Api, command: Command) -> Result<Outcome, CliError> {
