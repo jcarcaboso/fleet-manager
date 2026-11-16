@@ -12,8 +12,10 @@ internal interface IManifestSchemaParser
 internal static class ManifestSchemaParser
 {
     private static readonly IReadOnlyDictionary<string, IManifestSchemaParser> Parsers =
-        new IManifestSchemaParser[] { new FleetManifestV1Parser(), new FleetManifestV2Parser() }
+        new IManifestSchemaParser[] { new FleetManifestV1Parser(), new FleetManifestV2Parser(), new FleetManifestV3Parser() }
             .ToDictionary(parser => parser.Schema, StringComparer.Ordinal);
+
+    public static string SupportedSchemas => string.Join(", ", Parsers.Keys.Order(StringComparer.Ordinal));
 
     public static FleetManifest Parse(string yaml)
     {

@@ -262,12 +262,14 @@ public sealed class SourceGitSourceScannerTests : IDisposable
     [InlineData("fleet/v2", "      ai-clients:\n        claude:\n          mode: native\n")]
     [InlineData("fleet/v2", "      ai-clients:\n        claude:\n          mode: cliproxy\n")]
     [InlineData("fleet/v2", "      agents:\n        - source: personal\n          clients: [claude]\n      ai-clients:\n        claude:\n          mode: native\n")]
+    [InlineData("fleet/v3", "")]
+    [InlineData("fleet/v3", "      ai-clients:\n        claude:\n          mode: cliproxy\n")]
     public async Task Claude_receives_the_same_resolved_skills_independently_of_other_targets(string schema, string nodeTargets)
     {
         var repository = CreateRepository();
         var manifest = Manifest(["preferred", "fallback"]).Replace("schema: fleet/v1", $"schema: {schema}", StringComparison.Ordinal);
-        if (schema == "fleet/v2")
-            manifest = manifest.Replace("schema: fleet/v2\n", "schema: fleet/v2\ncliproxy:\n  base-url: https://proxy.example/v1\n", StringComparison.Ordinal);
+        if (schema != "fleet/v1")
+            manifest = manifest.Replace($"schema: {schema}\n", $"schema: {schema}\ncliproxy:\n  base-url: https://proxy.example/v1\n", StringComparison.Ordinal);
         Write(repository, "fleet.yml", manifest + nodeTargets);
         Write(repository, "agents/personal/AGENTS.md", "# Personal instructions\n");
         Write(repository, "skills/preferred/review/SKILL.md", "# Preferred review\n");
@@ -292,6 +294,8 @@ public sealed class SourceGitSourceScannerTests : IDisposable
     [InlineData("fleet/v1", "      agents:\n        - source: personal\n          clients: [claude]\n")]
     [InlineData("fleet/v2", "")]
     [InlineData("fleet/v2", "      ai-clients:\n        claude:\n          mode: native\n")]
+    [InlineData("fleet/v3", "")]
+    [InlineData("fleet/v3", "      ai-clients:\n        claude:\n          mode: native\n")]
     public async Task Exclude_Claude_inherits_the_default_and_allows_node_overrides(string schema, string nodeTargets)
     {
         var repository = CreateRepository();
@@ -339,6 +343,8 @@ public sealed class SourceGitSourceScannerTests : IDisposable
     [InlineData("fleet/v1", "        groups: []\n")]
     [InlineData("fleet/v2", "    path: .agents/skills\n")]
     [InlineData("fleet/v2", "        groups: []\n")]
+    [InlineData("fleet/v3", "    path: .agents/skills\n")]
+    [InlineData("fleet/v3", "        groups: []\n")]
     public async Task Exclude_Claude_rejects_non_boolean_values(string schema, string location)
     {
         var repository = CreateRepository();
@@ -359,6 +365,8 @@ public sealed class SourceGitSourceScannerTests : IDisposable
     [InlineData("fleet/v1", true)]
     [InlineData("fleet/v2", false)]
     [InlineData("fleet/v2", true)]
+    [InlineData("fleet/v3", false)]
+    [InlineData("fleet/v3", true)]
     public async Task A_skills_target_already_in_the_Claude_directory_is_not_duplicated(string schema, bool excludeClaude)
     {
         var repository = CreateRepository();
@@ -550,6 +558,192 @@ public sealed class SourceGitSourceScannerTests : IDisposable
             await Scanner(repository).ScanAsync(null, CancellationToken.None));
 
         Assert.Contains(invalid.Diagnostics, diagnostic => diagnostic.Code == "invalid_ai_client_model");
+    }
+
+    [Fact]
+    public async Task Fleet_v3_applies_default_targets_to_every_listed_node_and_lets_nodes_override_them()
+    {
+        var bb = new NodeId(Guid.NewGuid());
+        var slimbook = new NodeId(Guid.NewGuid());
+        var repository = CreateRepository();
+        Write(repository, "fleet.yml", """
+            schema: fleet/v3
+
+            cliproxy:
+              base-url: https://proxy.example/v1
+
+            targets:
+              skills:
+                base: home
+                path: .agents/skills
+                groups:
+                  - production
+                  - testing
+              agents:
+                - source: mins
+                  clients:
+                    - claude
+                    - codex
+                    - opencode
+              ai-clients:
+                codex:
+                  mode: cliproxy
+                opencode:
+                  mode: cliproxy
+                claude:
+                  mode: cliproxy
+
+            nodes:
+              fixture:
+
+              bb:
+                targets:
+                  skills:
+                    groups:
+                      - t3
+                  agents:
+                    - source: mins
+                      clients:
+                        - claude
+                  ai-clients:
+                    claude:
+                      mode: native
+
+              slimbook:
+                targets: {}
+            """);
+        Write(repository, "agents/mins/AGENTS.md", "# Mins\n");
+        Write(repository, "skills/production/deploy/SKILL.md", "deploy");
+        Write(repository, "skills/testing/check/SKILL.md", "check");
+        Write(repository, "skills/t3/thread/SKILL.md", "thread");
+        Commit(repository, "fleet v3 defaults");
+        var nodes = new Dictionary<string, NodeId>(StringComparer.Ordinal)
+        {
+            ["fixture"] = _nodeId,
+            ["bb"] = bb,
+            ["slimbook"] = slimbook,
+        };
+
+        var snapshot = Assert.IsType<SourceScanResult.Snapshot>(await new GitSourceScanner(
+            repository, Path.Combine(_root, "v3-defaults-mirror"), new Nodes(nodes)).ScanAsync(null, CancellationToken.None));
+        string[] Names(NodeId node, string prefix) => snapshot.Value.Targets
+            .Where(target => target.NodeId == node && target.TargetName.StartsWith(prefix, StringComparison.Ordinal))
+            .Select(target => target.TargetName).ToArray();
+        SnapshotTarget Target(NodeId node, string name) =>
+            Assert.Single(snapshot.Value.Targets, target => target.NodeId == node && target.TargetName == name);
+
+        foreach (var node in new[] { _nodeId, slimbook })
+        {
+            Assert.Equal(".agents/skills", Target(node, "skills").Descriptor.Path);
+            Assert.Equal(["deploy", "check"], Target(node, "skills").Skills.Select(skill => skill.Name));
+            Assert.Equal(["agent-file/claude", "agent-file/codex", "agent-file/opencode"], Names(node, "agent-file/"));
+            Assert.Equal(["ai-client/claude", "ai-client/codex", "ai-client/opencode"], Names(node, "ai-client/"));
+            Assert.All(snapshot.Value.Targets.Where(target => target.NodeId == node && target.AiClient is not null),
+                target => Assert.Equal(("cliproxy", "https://proxy.example/v1"), (target.AiClient!.Mode, target.AiClient.BaseUrl)));
+        }
+
+        Assert.Equal(".agents/skills", Target(bb, "skills").Descriptor.Path);
+        Assert.Equal(["thread"], Target(bb, "skills").Skills.Select(skill => skill.Name));
+        Assert.Equal(["agent-file/claude"], Names(bb, "agent-file/"));
+        Assert.Equal(["ai-client/claude", "ai-client/codex", "ai-client/opencode"], Names(bb, "ai-client/"));
+        Assert.Equal(new AiClientAssignment("fleet.ai-client/v1", "claude", "native"), Target(bb, "ai-client/claude").AiClient);
+        Assert.Equal("cliproxy", Target(bb, "ai-client/codex").AiClient!.Mode);
+    }
+
+    [Fact]
+    public async Task Fleet_v3_nodes_remove_defaults_with_explicit_nulls()
+    {
+        var second = new NodeId(Guid.NewGuid());
+        var third = new NodeId(Guid.NewGuid());
+        var repository = CreateRepository();
+        Write(repository, "fleet.yml", """
+            schema: fleet/v3
+            cliproxy:
+              base-url: https://proxy.example/v1
+            targets:
+              skills:
+                base: home
+                path: .agents/skills
+                groups: [production]
+              agents:
+                - source: mins
+              ai-clients:
+                codex:
+                  mode: cliproxy
+                  model: default-model
+                claude:
+                  mode: cliproxy
+            nodes:
+              fixture:
+                targets:
+                  skills:
+                    path: .codex/skills
+                    groups: []
+                  agents: ~
+                  ai-clients:
+                    codex:
+                      mode: cliproxy
+                      model: node-model
+                    claude: ~
+              second:
+                targets:
+                  agents: []
+                  ai-clients: ~
+              third:
+                targets:
+                  ai-clients: {}
+            """);
+        Write(repository, "agents/mins/AGENTS.md", "# Mins\n");
+        Write(repository, "skills/production/deploy/SKILL.md", "deploy");
+        Write(repository, "skills/testing/check/SKILL.md", "check");
+        Commit(repository, "fleet v3 removals");
+        var nodes = new Dictionary<string, NodeId>(StringComparer.Ordinal)
+        {
+            ["fixture"] = _nodeId,
+            ["second"] = second,
+            ["third"] = third,
+        };
+
+        var snapshot = Assert.IsType<SourceScanResult.Snapshot>(await new GitSourceScanner(
+            repository, Path.Combine(_root, "v3-removal-mirror"), new Nodes(nodes)).ScanAsync(null, CancellationToken.None));
+        SnapshotTarget[] Targets(NodeId node) => snapshot.Value.Targets.Where(target => target.NodeId == node).ToArray();
+
+        var fixtureSkills = Assert.Single(Targets(_nodeId), target => target.TargetName == "skills");
+        Assert.Equal(".codex/skills", fixtureSkills.Descriptor.Path);
+        Assert.Equal(["check", "deploy"], fixtureSkills.Skills.Select(skill => skill.Name).Order(StringComparer.Ordinal));
+        Assert.DoesNotContain(Targets(_nodeId), target => target.File is not null);
+        var codex = Assert.Single(Targets(_nodeId), target => target.AiClient is not null);
+        Assert.Equal(new AiClientAssignment("fleet.ai-client/v1", "codex", "cliproxy", "https://proxy.example/v1", "node-model"), codex.AiClient);
+
+        Assert.Equal(["deploy"], Assert.Single(Targets(second), target => target.TargetName == "skills").Skills.Select(skill => skill.Name));
+        var emptyFiles = Targets(second).Where(target => target.File is not null).ToArray();
+        Assert.Equal(3, emptyFiles.Length);
+        var emptyBundle = Assert.Single(snapshot.Value.Bundles, bundle => bundle.Digest == emptyFiles.Select(target => target.File!.BundleDigest).Distinct().Single());
+        Assert.Equal(0, emptyBundle.Size);
+        Assert.DoesNotContain(Targets(second), target => target.AiClient is not null);
+
+        Assert.Equal(["ai-client/claude", "ai-client/codex"],
+            Targets(third).Where(target => target.AiClient is not null).Select(target => target.TargetName));
+        Assert.Equal("default-model", Assert.Single(Targets(third), target => target.TargetName == "ai-client/codex").AiClient!.Model);
+    }
+
+    [Theory]
+    [InlineData("  agents:\n    - source: missing\n", "unknown_agent_source")]
+    [InlineData("  ai-clients:\n    claude:\n      mode: proxy\n", "invalid_ai_client_mode")]
+    [InlineData("  ai-clients:\n    claude:\n      mode: cliproxy\n", "invalid_cliproxy_base_url")]
+    [InlineData("  unknown: true\n", "invalid_manifest")]
+    public async Task Fleet_v3_validates_defaults_through_the_nodes_that_inherit_them(string defaults, string code)
+    {
+        var repository = CreateRepository();
+        Write(repository, "fleet.yml",
+            "schema: fleet/v3\ntargets:\n  skills:\n    base: home\n    path: .agents/skills\n" + defaults + "nodes:\n  fixture:\n");
+        Write(repository, "agents/mins/AGENTS.md", "# Mins\n");
+        Commit(repository, "invalid fleet v3 defaults");
+
+        var invalid = Assert.IsType<SourceScanResult.Invalid>(
+            await Scanner(repository).ScanAsync(null, CancellationToken.None));
+
+        Assert.Contains(invalid.Diagnostics, diagnostic => diagnostic.Code == code);
     }
 
     [Fact]

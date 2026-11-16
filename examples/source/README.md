@@ -22,3 +22,8 @@ it over `fleet.yml` only after the Server API-key setting is configured and
 compatible Agents run on the selected Node. Replace the proxy hostname and
 placeholder model with a model advertised by the authenticated `/v1/models`
 endpoint. The key never belongs in either manifest.
+
+[`fleet-defaults.yml`](fleet-defaults.yml) is the same configuration in
+`fleet/v3`. It declares the Skills, agent, and AI client Targets once under the
+top-level `targets` and lists the Nodes that receive them. A Node's own
+`targets` override the defaults for that Node only.

@@ -191,7 +191,7 @@ absent root contributes no content of that type.
 
 Fleet also publishes each Node's resolved Skills to
 `~/.claude/skills/<skill-name>/SKILL.md`, independently of agent instruction files
-and AI client connections. In both `fleet/v1` and `fleet/v2`, the boolean
+and AI client connections. In every manifest version, the boolean
 `targets.skills.excludeClaude` defaults to `false`. Set it to `true` to remove
 Fleet-managed Claude Skills while preserving personal Skills and other unowned
 content. A Node's `targets.skills.excludeClaude` overrides the top-level default.
@@ -238,6 +238,39 @@ every selected Agent before publishing those entries. The key stays out of Git
 and client configuration. See the
 [CLIProxyAPI operations guide](docs/technical-design/cliproxy-operations.md)
 and [example manifest](examples/source/fleet-cliproxy.yml).
+
+`fleet/v3` takes the same fields but lets you declare `skills`, `agents`, and
+`ai-clients` once under the top-level `targets`. Every Node listed under
+`nodes` inherits them, and a Node's own `targets` override only what they set:
+
+```yaml
+schema: fleet/v3
+cliproxy:
+  base-url: https://proxy.example/v1
+targets:
+  skills:
+    base: home
+    path: .agents/skills
+  agents:
+    - source: personal
+  ai-clients:
+    claude:
+      mode: cliproxy
+nodes:
+  node-1:
+  node-2:
+    targets:
+      agents:
+        - source: personal
+          clients:
+            - claude
+```
+
+Skill fields override one by one, a Node's `agents` list replaces the default
+list, and `ai-clients` entries merge by client name, with `<client>: ~`
+removing a default client. The
+[desired-state design](docs/architecture/desired-state.md#fleet-wide-defaults-in-fleetv3)
+lists every override rule.
 
 For a private source, use SSH with a dedicated read-only deploy key, a verified
 `known_hosts`, and an explicit SSH configuration under the homelab deployment's

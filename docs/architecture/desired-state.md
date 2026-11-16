@@ -93,8 +93,11 @@ protocol decisions.
 
 Manifest versions are independent strict contracts. `fleet/v1` supports Skills
 and Agent instruction files. `fleet/v2` retains those fields and adds AI client
-connections. Both versions normalize to the same internal desired-state model;
-unknown fields are rejected according to the declared version.
+connections. `fleet/v3` keeps the same fields but declares them once as
+fleet-wide defaults that each Node may override; see
+[Fleet-wide defaults](#fleet-wide-defaults-in-fleetv3). All versions normalize
+to the same internal desired-state model; unknown fields are rejected according
+to the declared version.
 
 ```yaml
 schema: fleet/v1
@@ -148,7 +151,7 @@ filename:
 Every Node also receives its resolved Skills at
 `~/.claude/skills/<skill-name>/SKILL.md`, through a separate `skills/claude`
 Target. This does not require `agents` or `ai-clients.claude` configuration.
-In both manifest versions, `targets.skills.excludeClaude` is a boolean that
+In every manifest version, `targets.skills.excludeClaude` is a boolean that
 defaults to `false`. A Node's value overrides the top-level default; an omitted
 Node value inherits it. Set it to `true` to publish an empty Claude Skills map.
 The Agent removes Skills recorded in its ownership receipt and preserves
@@ -221,6 +224,68 @@ without handling OAuth. The
 operator signs in locally through the AI client's normal flow. The Server reads
 the proxy API key from the optional `Fleet:CliProxyApiKey` setting and
 serves it only to Nodes with a current `cliproxy` Assignment.
+
+### Fleet-wide defaults in fleet/v3
+
+`fleet/v3` accepts `skills`, `agents`, and `ai-clients` under the top-level
+`targets` and applies them to every Node listed under `nodes`. A Node with no
+value receives the defaults unchanged. A Node's own `targets` override them
+before validation, so each Node is validated and published exactly as if its
+resolved Targets had been written out in `fleet/v2`:
+
+```yaml
+schema: fleet/v3
+
+cliproxy:
+  base-url: https://proxy.example/v1
+
+targets:
+  skills:
+    base: home
+    path: .agents/skills
+    groups:
+      - production
+      - testing
+  agents:
+    - source: personal
+  ai-clients:
+    codex:
+      mode: cliproxy
+    claude:
+      mode: cliproxy
+
+nodes:
+  homelab-mini:
+
+  laptop:
+    targets:
+      skills:
+        groups:
+          - testing
+      agents:
+        - source: personal
+          clients:
+            - claude
+      ai-clients:
+        claude:
+          mode: native
+        codex: ~
+```
+
+Override rules:
+
+| Field | Node override |
+|---|---|
+| `skills` | Each field the Node sets (`base`, `path`, `groups`, `excludeClaude`) replaces the default field. `groups` replaces the whole list; `groups: []` selects every group. |
+| `agents` | Setting the key replaces the default list. `agents: []` clears every client file as in `fleet/v2`; `agents: ~` leaves the Node's agent files unmanaged. |
+| `ai-clients` | Entries merge by client name. A Node entry replaces that client's default entry, including its `model`. `<client>: ~` drops one default client and `ai-clients: ~` drops all of them. |
+
+In the example, `homelab-mini` receives both groups, `personal` for every
+client, and proxied Codex and Claude Code. `laptop` receives only `testing`,
+`personal` for Claude Code only, and a native Claude Code connection; Codex is
+not managed for it. A Node listed under `nodes` is required for any default to
+apply, so an enrolled Node missing from the YAML still receives nothing.
+Invalid defaults are reported once for each Node that inherits them.
 
 The Server owns the enrolled Node registry. Keys under `nodes` are unique Node
 aliases, resolved by the Server to stable internal Node IDs. The alias is the

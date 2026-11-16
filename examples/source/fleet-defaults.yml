@@ -1,0 +1,35 @@
+schema: fleet/v3
+
+cliproxy:
+  base-url: https://proxy.example.com/v1
+
+targets:
+  skills:
+    base: home
+    path: .agents/skills
+    excludeClaude: false
+  agents:
+    - source: personal
+      clients:
+        - codex
+        - opencode
+  ai-clients:
+    codex:
+      mode: cliproxy
+    opencode:
+      mode: cliproxy
+    claude:
+      mode: cliproxy
+
+nodes:
+  example-node:
+
+  # A Node's own targets override the defaults above for that Node only.
+  # example-laptop:
+  #   targets:
+  #     skills:
+  #       groups:
+  #         - testing
+  #     ai-clients:
+  #       claude:
+  #         mode: native

@@ -34,7 +34,7 @@ that file private and out of source control. Container environment variables
 are visible to users with access to Docker metadata, so restrict Docker access
 and use a dedicated proxy key.
 
-Use `fleet/v2` only after compatible Agents are running on every selected Node.
+Use `fleet/v2` or `fleet/v3` AI client entries only after compatible Agents are running on every selected Node.
 Copy [the CLIProxyAPI manifest example](../../examples/source/fleet-cliproxy.yml)
 to `fleet.yml`, then replace its hostname and Node alias. Set `mode: cliproxy`
 for each client that should receive the catalog. No model or effort list is
