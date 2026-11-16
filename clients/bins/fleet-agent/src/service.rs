@@ -1,6 +1,5 @@
 use anyhow::{Context, Result, bail};
 use clap::Subcommand;
-#[cfg(unix)]
 use std::os::unix::fs::OpenOptionsExt;
 use std::{
     env, fs,
@@ -252,7 +251,7 @@ pub fn run(action: ServiceCommand, state_dir: &Path) -> Result<()> {
 /// active, then moves a Homebrew service over. Requires an enrolled Agent,
 /// because the service starts right away.
 fn prepare_install(state_dir: &Path, installed: &[Manager], home: &Path) -> Result<()> {
-    if !crate::inspect::enrolled(state_dir)? {
+    if !crate::credentials::enrolled(state_dir)? {
         bail!("enroll this Agent before installing its service: `fleet-agent enroll --link`");
     }
     let source = env::current_exe()

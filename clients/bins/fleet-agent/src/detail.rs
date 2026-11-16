@@ -10,6 +10,10 @@
 //! Sending detail is best effort. It never delays or blocks the report, and no
 //! failure here is fatal to a cycle.
 
+mod redact;
+
+pub use redact::Redactor;
+
 use crate::{
     actions::ActionError,
     protocol::{Api, AttemptDetail, ProtocolError},
@@ -18,11 +22,7 @@ use crate::{
 use anyhow::Result;
 use reqwest::StatusCode;
 use serde::{Deserialize, Serialize};
-use std::{
-    fs,
-    path::{Path, PathBuf},
-    time::Duration,
-};
+use std::{fs, path::Path, time::Duration};
 use time::OffsetDateTime;
 use uuid::Uuid;
 
@@ -72,18 +72,6 @@ pub enum Delivery {
     Retry,
 }
 
-/// Home directory prefixes to hide from diagnostics: the installation home and,
-/// when it differs, the account's real home directory.
-pub fn home_prefixes(configured: &Path) -> Vec<PathBuf> {
-    let mut homes = vec![configured.to_owned()];
-    if let Some(home) = dirs::home_dir()
-        && home != configured
-    {
-        homes.push(home);
-    }
-    homes
-}
-
 pub fn now() -> i64 {
     OffsetDateTime::now_utc().unix_timestamp()
 }
@@ -115,194 +103,6 @@ pub fn sanitize_diagnostic(raw: &str, redactor: &Redactor) -> String {
         .filter(|c| !c.is_control() || matches!(c, '\n' | '\t'))
         .collect();
     truncate_utf16(&redactor.redact(&cleaned), MAX_DIAGNOSTIC_UNITS)
-}
-
-/// Hides where things live on the machine. The diagnostic may contain only
-/// these locations:
-///
-/// 1. The home directory becomes `~` and the Agent state directory becomes
-///    `<state-dir>`, where the text names exactly that directory or something
-///    below it. Aliases are included: the configured and the account home, the
-///    state directory as given, made absolute, and canonicalized (macOS
-///    `/var` is really `/private/var`). They are computed once, in
-///    [`Redactor::new`]; the longest prefix wins.
-/// 2. Every other absolute path (`/x/y`, `\\server\share`, `C:\x`) becomes
-///    `<path>/<last component>`, or `<path>` when the last component is not
-///    safe to show (`.` or `..`).
-///
-/// Both rules apply only to a whole path token. A token starts at the
-/// beginning of the text or after whitespace, a quote (`"`, `'`, `` ` ``),
-/// `(`, `[`, `{`, `<`, `=`, `,` or `;`, or after a `:` (as in `PATH=/a:/b`,
-/// but not in `https://`). A home or state directory matches only when the
-/// next character is the end of the text, a separator (`/`, `\`), whitespace,
-/// a quote, one of `) ] } > , ; ! ?`, a `:` followed by whitespace or the end
-/// of the text, or a `.` that is not followed by a name character. So
-/// `/private/Users/joan/x` is not under `/Users/joan` and `/home/joan+backup/x`
-/// is not under `/home/joan`; both fall to rule 2. A path token ends at
-/// whitespace, a quote, one of `) ] } > , ;` or a `:` followed by whitespace or
-/// the end; trailing `. ! ?` are not part of it. A path containing spaces is
-/// cut at the first space.
-#[derive(Debug, Default)]
-pub struct Redactor {
-    /// Longest first, so a state directory inside the home wins.
-    prefixes: Vec<(String, &'static str)>,
-}
-
-impl Redactor {
-    pub fn new(homes: &[PathBuf], state_dir: &Path) -> Self {
-        let mut prefixes: Vec<(String, &'static str)> = Vec::new();
-        let roots = homes
-            .iter()
-            .map(|home| (home.as_path(), "~"))
-            .chain([(state_dir, "<state-dir>")]);
-        for (root, replacement) in roots {
-            for alias in aliases(root) {
-                if !prefixes.iter().any(|(known, _)| *known == alias) {
-                    prefixes.push((alias, replacement));
-                }
-            }
-        }
-        prefixes.sort_by_key(|(prefix, _)| std::cmp::Reverse(prefix.len()));
-        Self { prefixes }
-    }
-
-    pub fn redact(&self, text: &str) -> String {
-        let mut result = String::with_capacity(text.len());
-        let mut previous: Option<char> = None;
-        let mut index = 0;
-        while index < text.len() {
-            let rest = &text[index..];
-            let Some(c) = rest.chars().next() else { break };
-            if starts_token(previous, rest) {
-                if let Some((length, replacement)) = self.match_root(rest) {
-                    result.push_str(replacement);
-                    previous = rest[..length].chars().next_back();
-                    index += length;
-                    continue;
-                }
-                if let Some(length) = absolute_path_length(rest) {
-                    result.push_str(&hide_path(&rest[..length]));
-                    previous = rest[..length].chars().next_back();
-                    index += length;
-                    continue;
-                }
-            }
-            result.push(c);
-            previous = Some(c);
-            index += c.len_utf8();
-        }
-        result
-    }
-
-    fn match_root(&self, rest: &str) -> Option<(usize, &'static str)> {
-        self.prefixes.iter().find_map(|(prefix, replacement)| {
-            let after = rest.strip_prefix(prefix.as_str())?;
-            ends_root(after).then_some((prefix.len(), *replacement))
-        })
-    }
-}
-
-/// The spellings of an absolute `root` to hide: as given, made absolute and
-/// canonical. Relative roots are ignored, since they could match anything.
-fn aliases(root: &Path) -> Vec<String> {
-    let mut found = Vec::new();
-    let candidates = [
-        Some(root.to_owned()),
-        std::path::absolute(root).ok(),
-        fs::canonicalize(root).ok(),
-    ];
-    for candidate in candidates.into_iter().flatten() {
-        let Some(text) = candidate.to_str() else {
-            continue;
-        };
-        let text = text.trim_end_matches(['/', '\\']);
-        if candidate.is_absolute() && !text.is_empty() && !found.iter().any(|f| f == text) {
-            found.push(text.to_owned());
-        }
-    }
-    found
-}
-
-fn is_name_char(c: char) -> bool {
-    c.is_alphanumeric() || matches!(c, '_' | '-')
-}
-
-/// Whether a path token starts here. `previous` is the character before `rest`.
-fn starts_token(previous: Option<char>, rest: &str) -> bool {
-    match previous {
-        None => true,
-        Some(c) if c.is_whitespace() => true,
-        Some('"' | '\'' | '`' | '(' | '[' | '{' | '<' | '=' | ',' | ';') => true,
-        // A list separator, but not the colon of `https://`.
-        Some(':') => !rest.starts_with("//"),
-        Some(_) => false,
-    }
-}
-
-/// Whether a home or state directory that is followed by `after` ends there.
-fn ends_root(after: &str) -> bool {
-    let mut chars = after.chars();
-    match chars.next() {
-        None => true,
-        Some(c) if c.is_whitespace() => true,
-        Some('/' | '\\' | '"' | '\'' | '`' | ')' | ']' | '}' | '>' | ',' | ';' | '!' | '?') => true,
-        Some(':') => chars.next().is_none_or(char::is_whitespace),
-        // A dot ends a sentence unless a name continues after it.
-        Some('.') => !chars.next().is_some_and(is_name_char),
-        Some(_) => false,
-    }
-}
-
-/// The length of the absolute path token at the start of `rest`, if there is one.
-fn absolute_path_length(rest: &str) -> Option<usize> {
-    let bytes = rest.as_bytes();
-    let rooted = rest.starts_with('/')
-        || rest.starts_with("\\\\")
-        || (bytes.len() >= 3
-            && bytes[0].is_ascii_alphabetic()
-            && bytes[1] == b':'
-            && matches!(bytes[2], b'/' | b'\\'));
-    if !rooted {
-        return None;
-    }
-    let mut end = rest.len();
-    let mut chars = rest.char_indices().peekable();
-    while let Some((at, c)) = chars.next() {
-        let stops = c.is_whitespace()
-            || matches!(c, '"' | '\'' | '`' | ')' | ']' | '}' | '>' | ',' | ';')
-            || (c == ':' && chars.peek().is_none_or(|(_, next)| next.is_whitespace()));
-        if stops {
-            end = at;
-            break;
-        }
-    }
-    // Sentence punctuation after the path is not part of it, but `..` is.
-    let token = &rest[..end];
-    let last = token.rsplit(['/', '\\']).next().unwrap_or_default();
-    if !last.is_empty() && last.chars().all(|c| c == '.') {
-        return Some(end);
-    }
-    Some(token.trim_end_matches(['.', '!', '?']).len())
-}
-
-/// Replaces an absolute path by `<path>/<last component>`.
-fn hide_path(path: &str) -> String {
-    let trailing = path.len() - path.trim_end_matches(['/', '\\']).len();
-    let name = path[..path.len() - trailing]
-        .rsplit(['/', '\\'])
-        .next()
-        .unwrap_or_default();
-    // A drive such as `C:` is not a name.
-    let name = if name.len() == 2 && name.ends_with(':') {
-        ""
-    } else {
-        name
-    };
-    match name {
-        "" if trailing > 0 && path.chars().all(|c| matches!(c, '/' | '\\')) => path.to_owned(),
-        "" | "." | ".." => "<path>".to_owned(),
-        name => format!("<path>/{name}"),
-    }
 }
 
 fn truncate_utf16(text: &str, limit: usize) -> String {
@@ -445,163 +245,48 @@ pub async fn deliver(
     }
 }
 
-/// A loopback HTTP server for tests: records requests and answers with scripted
-/// responses (the last one repeats).
-#[cfg(test)]
-pub mod testing {
-    use std::{
-        io::{BufRead, BufReader, Read, Write},
-        net::{SocketAddr, TcpListener, TcpStream},
-        sync::{
-            Arc, Mutex,
-            atomic::{AtomicBool, Ordering},
-        },
-        thread::JoinHandle,
+/// Sends the saved failure detail once the failed report for its Attempt has
+/// been accepted; the Agent loop calls it after each cycle. `unacknowledged` is
+/// the Attempt of the terminal report the Server has not accepted yet, and
+/// `client` is the loop's Server client, or why it could not be built. Detail
+/// is best effort: nothing here can fail a cycle.
+pub async fn after_cycle(client: &Result<Api>, directory: &Path, unacknowledged: Option<Uuid>) {
+    let Some(pending) = load(directory) else {
+        return;
     };
-
-    #[derive(Clone, Debug)]
-    pub struct Request {
-        pub method: String,
-        pub path: String,
-        /// Lower-case header names with trimmed values.
-        pub headers: Vec<(String, String)>,
-        pub body: String,
+    // Expiry is decided before the report gate: detail whose report is never
+    // accepted must not linger forever.
+    match precheck(directory, &pending, unacknowledged, now()) {
+        Some(Delivery::Dropped(reason)) => {
+            eprintln!("dropped attempt detail: {reason}");
+            return;
+        }
+        Some(_) => return,
+        None => {}
     }
-
-    impl Request {
-        pub fn header(&self, name: &str) -> Option<&str> {
-            self.headers
-                .iter()
-                .find(|(key, _)| key == name)
-                .map(|(_, value)| value.as_str())
+    let client = match client {
+        Ok(client) => client,
+        Err(error) => {
+            eprintln!("could not send attempt detail: {error}");
+            return;
         }
-    }
-
-    pub struct MockServer {
-        address: SocketAddr,
-        requests: Arc<Mutex<Vec<Request>>>,
-        stop: Arc<AtomicBool>,
-        thread: Option<JoinHandle<()>>,
-    }
-
-    /// A response the route server sends for `method` and `path`.
-    pub type Route = (&'static str, String, u16, Vec<u8>);
-
-    impl MockServer {
-        pub fn start(responses: Vec<(u16, &'static str)>) -> Self {
-            let mut served = 0;
-            Self::serve(move |_| {
-                let (status, body) = responses[served.min(responses.len() - 1)];
-                served += 1;
-                (status, body.as_bytes().to_vec())
-            })
-        }
-
-        /// Answers each request from the first route with its method and path,
-        /// and every other request with 404.
-        pub fn routes(routes: Vec<Route>) -> Self {
-            Self::serve(move |request| {
-                routes
-                    .iter()
-                    .find(|(method, path, _, _)| *method == request.method && *path == request.path)
-                    .map_or((404, Vec::new()), |(_, _, status, body)| {
-                        (*status, body.clone())
-                    })
-            })
-        }
-
-        fn serve(mut respond: impl FnMut(&Request) -> (u16, Vec<u8>) + Send + 'static) -> Self {
-            let listener = TcpListener::bind("127.0.0.1:0").unwrap();
-            let address = listener.local_addr().unwrap();
-            let requests = Arc::new(Mutex::new(Vec::new()));
-            let stop = Arc::new(AtomicBool::new(false));
-            let thread = {
-                let (requests, stop) = (requests.clone(), stop.clone());
-                std::thread::spawn(move || {
-                    for stream in listener.incoming() {
-                        if stop.load(Ordering::SeqCst) {
-                            break;
-                        }
-                        let Ok(stream) = stream else { continue };
-                        let Some(request) = read_request(&stream) else {
-                            continue;
-                        };
-                        let (status, body) = respond(&request);
-                        requests.lock().unwrap().push(request);
-                        let mut stream = stream;
-                        let _ = write!(
-                            stream,
-                            "HTTP/1.1 {status} Test\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
-                            body.len()
-                        );
-                        let _ = stream.write_all(&body);
-                    }
-                })
-            };
-            Self {
-                address,
-                requests,
-                stop,
-                thread: Some(thread),
-            }
-        }
-
-        pub fn url(&self) -> String {
-            format!("http://{}/", self.address)
-        }
-
-        pub fn requests(&self) -> Vec<Request> {
-            self.requests.lock().unwrap().clone()
-        }
-    }
-
-    impl Drop for MockServer {
-        fn drop(&mut self) {
-            self.stop.store(true, Ordering::SeqCst);
-            let _ = TcpStream::connect(self.address);
-            if let Some(thread) = self.thread.take() {
-                let _ = thread.join();
-            }
-        }
-    }
-
-    fn read_request(stream: &TcpStream) -> Option<Request> {
-        let mut reader = BufReader::new(stream);
-        let mut line = String::new();
-        reader.read_line(&mut line).ok()?;
-        let mut parts = line.split_whitespace();
-        let (method, path) = (parts.next()?.to_owned(), parts.next()?.to_owned());
-        let mut length = 0;
-        let mut headers = Vec::new();
-        loop {
-            line.clear();
-            reader.read_line(&mut line).ok()?;
-            if line == "\r\n" || line.is_empty() {
-                break;
-            }
-            if let Some((name, value)) = line.split_once(':') {
-                let name = name.to_ascii_lowercase();
-                if name == "content-length" {
-                    length = value.trim().parse().ok()?;
-                }
-                headers.push((name, value.trim().to_owned()));
-            }
-        }
-        let mut body = vec![0; length];
-        reader.read_exact(&mut body).ok()?;
-        Some(Request {
-            method,
-            path,
-            headers,
-            body: String::from_utf8_lossy(&body).into_owned(),
-        })
+    };
+    match deliver(client, directory, &pending, unacknowledged, now()).await {
+        Delivery::Dropped(reason) => eprintln!("dropped attempt detail: {reason}"),
+        Delivery::Retry => eprintln!("could not send attempt detail; will retry"),
+        Delivery::Waiting | Delivery::Sent => {}
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{testing::MockServer, *};
+    use super::*;
     use crate::actions::Step;
+    use crate::{
+        run_state::{PendingReport, RunState},
+        test_support::MockServer,
+    };
+    use std::path::PathBuf;
 
     struct TestDir(PathBuf);
 
@@ -1249,5 +934,69 @@ mod tests {
             deliver(&client, &dir.0, &pending, other, 11).await,
             Delivery::Sent
         );
+    }
+
+    // The pending detail beside the run state, as the Agent loop keeps them.
+    fn test_directory() -> PathBuf {
+        let path = std::env::temp_dir()
+            .canonicalize()
+            .unwrap()
+            .join(format!("fleet-main-{}", Uuid::new_v4()));
+        state::private_directory(&path).unwrap();
+        path
+    }
+
+    #[test]
+    fn saving_attempt_detail_leaves_the_run_state_file_untouched() {
+        let directory = test_directory();
+        let path = directory.join("run.json");
+        let run = RunState {
+            pending_report: Some(PendingReport {
+                attempt_id: Uuid::nil(),
+                succeeded: false,
+                error_code: Some("io".to_owned()),
+            }),
+            ..RunState::default()
+        };
+        state::write_json(&path, &run).unwrap();
+        let before = fs::read(&path).unwrap();
+        let detail = AttemptDetail {
+            diagnostic: "cannot write".to_owned(),
+            path: None,
+            step: None,
+        };
+        save(&directory, Uuid::nil(), &detail, now()).unwrap();
+        assert_eq!(fs::read(&path).unwrap(), before);
+        assert!(directory.join("pending-detail.json").is_file());
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn unsent_detail_expires_while_its_report_is_still_pending() {
+        let directory = test_directory();
+        let attempt_id = Uuid::new_v4();
+        let detail = AttemptDetail {
+            diagnostic: "Skill alpha exists without Fleet ownership".to_owned(),
+            path: None,
+            step: None,
+        };
+        let created = now() - 25 * 60 * 60;
+        save(&directory, attempt_id, &detail, created).unwrap();
+        let run = RunState {
+            pending_report: Some(PendingReport {
+                attempt_id,
+                succeeded: false,
+                error_code: Some("ownership_conflict".to_owned()),
+            }),
+            ..RunState::default()
+        };
+        let unacknowledged = run.pending_report.as_ref().map(|r| r.attempt_id);
+        let pending = load(&directory).unwrap();
+
+        let outcome = precheck(&directory, &pending, unacknowledged, now());
+
+        assert_eq!(outcome, Some(Delivery::Dropped("expired")));
+        assert!(!directory.join("pending-detail.json").exists());
+        fs::remove_dir_all(directory).unwrap();
     }
 }

@@ -6,7 +6,7 @@
 //! variables. It never starts a process or walks a directory, and a field that
 //! cannot be read is `null`.
 //!
-//! The reads run on a [`disk::Worker`] thread, never on the Agent loop:
+//! The reads run on a [`Worker`] thread, never on the Agent loop:
 //! `getpwuid_r` can reach a directory service (NSS) that hangs, and a state
 //! directory on a stuck mount makes any path lookup slow.
 
@@ -20,7 +20,8 @@ use std::{
 
 use crate::{
     disk,
-    protocol::{TelemetryOs, TelemetryReport},
+    protocol::{Api, TelemetryOs, TelemetryReport},
+    worker::{DEFAULT_STUCK, DEFAULT_WAIT, Style, Worker},
 };
 
 /// Most a text file is read for: `os-release` and the macOS version plist are
@@ -41,19 +42,21 @@ const HOSTNAME_BYTES: usize = 256;
 
 /// Starts and runs the thread that collects reports. It reads files and
 /// calls `getpwuid_r`, so it gets a larger stack than the disk thread.
-const STYLE: disk::Style = disk::Style {
+const STYLE: Style = Style {
     thread: "fleet-telemetry",
     what: "machine information",
     stack_bytes: 512 * 1024,
 };
 
-pub fn worker(state_directory: PathBuf, configured_home: PathBuf) -> disk::Worker<TelemetryReport> {
-    disk::Worker::standard(
+pub fn worker(state_directory: PathBuf, configured_home: PathBuf) -> Worker<TelemetryReport> {
+    Worker::new(
         Box::new(move || {
             let homes = crate::state::home_prefixes(&configured_home);
             Some(collect(&state_directory, &homes))
         }),
         STYLE,
+        DEFAULT_WAIT,
+        DEFAULT_STUCK,
     )
 }
 
@@ -489,6 +492,62 @@ fn login_name() -> Option<String> {
     None
 }
 
+/// A machine information report being sent. It ends with the report if the
+/// Server accepted it.
+pub type Task = tokio::task::JoinHandle<Option<TelemetryReport>>;
+
+/// One cycle's machine information work, shaped like [`disk::step`]. The
+/// reads run on the worker thread and the report is a side task, with at most
+/// one in flight. A report the Server did not accept is not remembered, so the
+/// next slot (4 hours after this attempt) sends it again; one it accepted is
+/// sent again only if the values change.
+pub async fn step<F, Fut>(
+    now: Instant,
+    schedule: &mut Schedule,
+    worker: &mut Worker<TelemetryReport>,
+    in_flight: &mut Option<Task>,
+    send: F,
+) where
+    F: FnOnce(TelemetryReport) -> Fut,
+    Fut: std::future::Future<Output = bool> + Send + 'static,
+{
+    // The previous report finished: remember it if the Server accepted it.
+    if let Some(task) = in_flight.take_if(|task| task.is_finished())
+        && let Ok(Some(accepted)) = task.await
+    {
+        schedule.accepted(accepted);
+    }
+    let mut report = worker.collect(now);
+    if report.is_none() && worker.is_idle() && schedule.is_due(now) {
+        schedule.attempted(now);
+        report = worker.measure(now).await;
+    }
+    let Some(report) = report else {
+        return;
+    };
+    if !schedule.needs_sending(&report) {
+        return;
+    }
+    if in_flight.is_some() {
+        eprintln!("skipped a machine information report: the previous one is still being sent");
+        return;
+    }
+    let sending = send(report.clone());
+    *in_flight = Some(tokio::spawn(async move { sending.await.then_some(report) }));
+}
+
+/// True when the Server accepted the report. A 404 from an older Server and
+/// every other failure is logged and left for the next slot.
+pub async fn deliver(client: &Api, report: &TelemetryReport) -> bool {
+    match client.telemetry(report).await {
+        Ok(()) => true,
+        Err(error) => {
+            eprintln!("could not send machine information; will retry later: {error}");
+            false
+        }
+    }
+}
+
 /// The example of the contract, for tests that need a report.
 #[cfg(test)]
 pub fn fixture() -> TelemetryReport {
@@ -511,6 +570,7 @@ pub fn fixture() -> TelemetryReport {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::test_support::MockServer;
     use std::time::Duration;
 
     fn os_str(value: &str) -> Option<&OsStr> {
@@ -915,5 +975,158 @@ VERSION_ID=1\ 2"#;
         assert!(schedule.needs_sending(&renamed));
         assert!(!schedule.is_due(start + slot + Duration::from_secs(1)));
         assert!(schedule.is_due(start + 2 * slot));
+    }
+
+    // One cycle's machine information work, as the Agent loop runs it.
+    fn telemetry_worker(
+        counter: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+    ) -> Worker<TelemetryReport> {
+        // The hostname follows the counter, so a test changes the values by
+        // bumping it.
+        Worker::new(
+            Box::new(move || {
+                let mut report = fixture();
+                report.hostname = Some(format!(
+                    "host-{}",
+                    counter.load(std::sync::atomic::Ordering::SeqCst)
+                ));
+                Some(report)
+            }),
+            Style {
+                thread: "fleet-telemetry-test",
+                what: "machine information",
+                stack_bytes: 512 * 1024,
+            },
+            Duration::from_secs(5),
+            Duration::from_secs(60),
+        )
+    }
+
+    async fn finish(task: &Option<Task>) {
+        while task.as_ref().is_some_and(|task| !task.is_finished()) {
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    }
+
+    #[tokio::test]
+    async fn machine_information_is_sent_after_the_first_poll_then_only_on_change() {
+        use std::sync::{
+            Arc, Mutex,
+            atomic::{AtomicUsize, Ordering},
+        };
+        let slot = disk::REPORT_INTERVAL;
+        let start = Instant::now();
+        let counter = Arc::new(AtomicUsize::new(0));
+        let accept = Arc::new(std::sync::atomic::AtomicBool::new(true));
+        let sent: Arc<Mutex<Vec<String>>> = Arc::default();
+        let mut schedule = Schedule::default();
+        let mut worker = telemetry_worker(counter.clone());
+        let mut in_flight = None;
+        let mut cycle =
+            async |now: Instant, schedule: &mut Schedule, in_flight: &mut Option<Task>| {
+                let (sent, accept) = (sent.clone(), accept.clone());
+                step(now, schedule, &mut worker, in_flight, |report| async move {
+                    sent.lock().unwrap().push(report.hostname.unwrap());
+                    accept.load(Ordering::SeqCst)
+                })
+                .await;
+                finish(in_flight).await;
+            };
+
+        // Not before the first successful poll.
+        cycle(start, &mut schedule, &mut in_flight).await;
+        assert!(sent.lock().unwrap().is_empty());
+
+        // The first poll sends; polls in the next minutes do not.
+        schedule.poll_succeeded();
+        cycle(start, &mut schedule, &mut in_flight).await;
+        cycle(
+            start + Duration::from_secs(60),
+            &mut schedule,
+            &mut in_flight,
+        )
+        .await;
+        assert_eq!(*sent.lock().unwrap(), ["host-0"]);
+
+        // The next slot with unchanged values sends nothing.
+        cycle(start + slot, &mut schedule, &mut in_flight).await;
+        assert_eq!(sent.lock().unwrap().len(), 1);
+
+        // Changed values go out at the following slot, not before.
+        counter.store(1, Ordering::SeqCst);
+        cycle(
+            start + slot + Duration::from_secs(60),
+            &mut schedule,
+            &mut in_flight,
+        )
+        .await;
+        assert_eq!(sent.lock().unwrap().len(), 1);
+        accept.store(false, Ordering::SeqCst);
+        cycle(start + 2 * slot, &mut schedule, &mut in_flight).await;
+        assert_eq!(*sent.lock().unwrap(), ["host-0", "host-1"]);
+
+        // The Server refused (404, 429, ...): not retried before the next slot,
+        // then retried although the values did not change again.
+        cycle(
+            start + 2 * slot + Duration::from_secs(30 * 60),
+            &mut schedule,
+            &mut in_flight,
+        )
+        .await;
+        assert_eq!(sent.lock().unwrap().len(), 2);
+        accept.store(true, Ordering::SeqCst);
+        cycle(start + 3 * slot, &mut schedule, &mut in_flight).await;
+        assert_eq!(sent.lock().unwrap().len(), 3);
+        cycle(start + 4 * slot, &mut schedule, &mut in_flight).await;
+        assert_eq!(
+            sent.lock().unwrap().len(),
+            3,
+            "accepted values are not resent"
+        );
+    }
+
+    #[tokio::test]
+    async fn machine_information_is_a_side_task_with_one_in_flight() {
+        let start = Instant::now();
+        let counter = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let mut schedule = Schedule::default();
+        schedule.poll_succeeded();
+        let mut worker = telemetry_worker(counter.clone());
+        let mut in_flight = None;
+        let slow = |_report: TelemetryReport| async {
+            tokio::time::sleep(Duration::from_secs(30)).await;
+            true
+        };
+        let began = Instant::now();
+        step(start, &mut schedule, &mut worker, &mut in_flight, slow).await;
+        assert!(began.elapsed() < Duration::from_secs(2));
+        assert!(in_flight.as_ref().is_some_and(|task| !task.is_finished()));
+
+        // A slot arrives while the report is still being sent: dropped.
+        counter.store(1, std::sync::atomic::Ordering::SeqCst);
+        step(
+            start + disk::REPORT_INTERVAL,
+            &mut schedule,
+            &mut worker,
+            &mut in_flight,
+            |_| async { panic!("one report at a time") },
+        )
+        .await;
+        in_flight.take().unwrap().abort();
+    }
+
+    #[tokio::test]
+    async fn machine_information_failures_are_not_remembered() {
+        let server = MockServer::start(vec![(404, ""), (204, "")]);
+        let client = Api::for_loopback_test(&server.url());
+        let report = fixture();
+        assert!(!deliver(&client, &report).await);
+        assert!(deliver(&client, &report).await);
+        let requests = server.requests();
+        assert!(
+            requests
+                .iter()
+                .all(|r| r.method == "PUT" && r.path == "/agent/v1/telemetry")
+        );
     }
 }

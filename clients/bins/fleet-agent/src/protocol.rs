@@ -11,7 +11,14 @@ mod wire;
 pub use wire::*;
 
 const MAX_JSON_BYTES: usize = 1024 * 1024;
-const MAX_BUNDLE_BYTES: usize = 16 * 1024 * 1024;
+/// Largest content of the bundles route: an encoded Bundle or the content of
+/// a managed file, whichever limit is larger.
+pub const MAX_CONTENT_BYTES: usize =
+    if fleet_reconcile::MAX_BUNDLE_BYTES > fleet_reconcile::MAX_FILE_BYTES {
+        fleet_reconcile::MAX_BUNDLE_BYTES
+    } else {
+        fleet_reconcile::MAX_FILE_BYTES
+    };
 const MAX_CLIPROXY_CREDENTIAL_BYTES: usize = 4096;
 const MAX_DETAIL_REQUEST_BYTES: usize = 16 * 1024;
 const MAX_DISK_USAGE_REQUEST_BYTES: usize = 4 * 1024;
@@ -226,9 +233,9 @@ impl Api {
         size: i64,
         expected_schema: &str,
     ) -> Result<Bundle, ProtocolError> {
-        if size < 0 || size as usize > MAX_BUNDLE_BYTES {
+        if size < 0 || size as usize > MAX_CONTENT_BYTES {
             return Err(ProtocolError::ResponseTooLarge {
-                limit: MAX_BUNDLE_BYTES,
+                limit: MAX_CONTENT_BYTES,
             });
         }
         let mut url = self.endpoint("agent/v1/bundles")?;
@@ -255,7 +262,7 @@ impl Api {
                 "bundle schema does not match assignment",
             ));
         }
-        let bytes = read_bounded(response, MAX_BUNDLE_BYTES).await?;
+        let bytes = read_bounded(response, MAX_CONTENT_BYTES).await?;
         if bytes.len() as i64 != size {
             return Err(ProtocolError::InvalidResponse(
                 "bundle size does not match assignment",
@@ -726,7 +733,7 @@ mod tests {
     #[tokio::test]
     async fn every_poll_request_advertises_the_supported_capabilities() {
         let server =
-            crate::detail::testing::MockServer::start(vec![(200, POLL), (200, POLL_REQUESTED)]);
+            crate::test_support::MockServer::start(vec![(200, POLL), (200, POLL_REQUESTED)]);
         let client = Api::for_loopback_test(&server.url());
         assert!(!client.poll().await.unwrap().disk_usage_requested);
         assert!(client.poll().await.unwrap().disk_usage_requested);
@@ -773,8 +780,7 @@ mod tests {
 
     #[tokio::test]
     async fn update_reports_have_the_wire_shape_and_a_409_means_not_requested() {
-        let server =
-            crate::detail::testing::MockServer::start(vec![(204, ""), (409, ""), (500, "")]);
+        let server = crate::test_support::MockServer::start(vec![(204, ""), (409, ""), (500, "")]);
         let client = Api::for_loopback_test(&server.url());
         let update = AgentUpdate {
             version: "0.12.0".to_owned(),
@@ -824,7 +830,7 @@ mod tests {
     #[tokio::test]
     async fn release_files_are_fetched_by_version_with_their_limits() {
         let manifest = "x".repeat(MAX_RELEASE_MANIFEST_BYTES + 1);
-        let server = crate::detail::testing::MockServer::routes(vec![
+        let server = crate::test_support::MockServer::routes(vec![
             (
                 "GET",
                 "/agent/v1/agent-releases/0.12.0/manifest".to_owned(),
@@ -906,7 +912,7 @@ mod tests {
 
     #[tokio::test]
     async fn disk_usage_is_put_and_the_response_body_is_ignored() {
-        let server = crate::detail::testing::MockServer::start(vec![(204, ""), (200, "not json")]);
+        let server = crate::test_support::MockServer::start(vec![(204, ""), (200, "not json")]);
         let client = Api::for_loopback_test(&server.url());
         client.disk_usage(&sample_report()).await.unwrap();
         client.disk_usage(&sample_report()).await.unwrap();
@@ -920,7 +926,7 @@ mod tests {
 
     #[tokio::test]
     async fn disk_usage_failures_are_errors_not_panics() {
-        let server = crate::detail::testing::MockServer::start(vec![(404, ""), (429, "")]);
+        let server = crate::test_support::MockServer::start(vec![(404, ""), (429, "")]);
         let client = Api::for_loopback_test(&server.url());
         for expected in [StatusCode::NOT_FOUND, StatusCode::TOO_MANY_REQUESTS] {
             let error = client.disk_usage(&sample_report()).await.unwrap_err();
@@ -930,7 +936,7 @@ mod tests {
 
     #[tokio::test]
     async fn oversized_disk_usage_requests_are_not_sent() {
-        let server = crate::detail::testing::MockServer::start(vec![(204, "")]);
+        let server = crate::test_support::MockServer::start(vec![(204, "")]);
         let client = Api::for_loopback_test(&server.url());
         let report = DiskUsageReport {
             volumes: vec![sample_report().volumes[0].clone(); 200],
@@ -1114,7 +1120,7 @@ mod tests {
 
     #[tokio::test]
     async fn telemetry_is_put_and_the_response_body_is_ignored() {
-        let server = crate::detail::testing::MockServer::start(vec![(204, ""), (200, "not json")]);
+        let server = crate::test_support::MockServer::start(vec![(204, ""), (200, "not json")]);
         let client = Api::for_loopback_test(&server.url());
         client.telemetry(&sample_telemetry()).await.unwrap();
         client.telemetry(&sample_telemetry()).await.unwrap();
@@ -1128,7 +1134,7 @@ mod tests {
 
     #[tokio::test]
     async fn telemetry_failures_are_errors_not_panics() {
-        let server = crate::detail::testing::MockServer::start(vec![(404, ""), (429, "")]);
+        let server = crate::test_support::MockServer::start(vec![(404, ""), (429, "")]);
         let client = Api::for_loopback_test(&server.url());
         for expected in [StatusCode::NOT_FOUND, StatusCode::TOO_MANY_REQUESTS] {
             let error = client.telemetry(&sample_telemetry()).await.unwrap_err();
@@ -1138,7 +1144,7 @@ mod tests {
 
     #[tokio::test]
     async fn oversized_telemetry_requests_are_not_sent() {
-        let server = crate::detail::testing::MockServer::start(vec![(204, "")]);
+        let server = crate::test_support::MockServer::start(vec![(204, "")]);
         let client = Api::for_loopback_test(&server.url());
         let mut report = sample_telemetry();
         report.hostname = Some("x".repeat(MAX_TELEMETRY_REQUEST_BYTES));

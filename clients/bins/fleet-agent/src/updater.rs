@@ -794,7 +794,7 @@ fn rollback(state_dir: &Path, mut record: Record, failure: Failure) -> Result<St
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::detail::testing::{MockServer, Route};
+    use crate::test_support::{MockServer, Route};
     use ring::{
         rand::SystemRandom,
         signature::{Ed25519KeyPair, KeyPair},

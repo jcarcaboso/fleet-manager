@@ -223,6 +223,24 @@ fn other(error: impl std::error::Error + Send + Sync + 'static) -> io::Error {
     io::Error::other(error)
 }
 
+/// The identity in the state directory, read without creating or changing
+/// anything (see [`CredentialStore::open_read_only`]). `None` when there is
+/// none yet.
+pub fn load_identity(directory: &Path) -> io::Result<Option<StoredIdentity>> {
+    match CredentialStore::open_read_only(directory.join("credentials"))? {
+        Some(store) => store.load_identity(),
+        None => Ok(None),
+    }
+}
+
+/// Whether the state directory holds a configured and enrolled Agent.
+pub fn enrolled(directory: &Path) -> anyhow::Result<bool> {
+    Ok(crate::state::existing_private_directory(directory)?
+        && crate::state::read_json::<crate::state::Config>(&directory.join("config.json"))?
+            .is_some()
+        && load_identity(directory)?.is_some())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

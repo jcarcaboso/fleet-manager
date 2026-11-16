@@ -70,7 +70,7 @@ pub async fn deliver(client: &Api, report: &Report) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::detail::testing::MockServer;
+    use crate::test_support::MockServer;
     use std::{
         sync::{
             Arc,
