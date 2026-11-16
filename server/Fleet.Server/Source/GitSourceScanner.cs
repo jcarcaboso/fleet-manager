@@ -61,7 +61,7 @@ public sealed class GitSourceScanner(
             }
             catch (UnsupportedManifestSchemaException)
             {
-                return Invalid(revision, "unsupported_schema", "fleet.yml schema must be one of: fleet/v1, fleet/v2.", "fleet.yml");
+                return Invalid(revision, "unsupported_schema", $"fleet.yml schema must be one of: {ManifestSchemaParser.SupportedSchemas}.", "fleet.yml");
             }
             catch (Exception exception) when (exception is YamlException or DecoderFallbackException)
             {
