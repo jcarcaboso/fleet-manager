@@ -229,9 +229,10 @@ serves it only to Nodes with a current `cliproxy` Assignment.
 
 `fleet/v3` accepts `skills`, `agents`, and `ai-clients` under the top-level
 `targets` and applies them to every Node listed under `nodes`. A Node with no
-value receives the defaults unchanged. A Node's own `targets` override them
-before validation, so each Node is validated and published exactly as if its
-resolved Targets had been written out in `fleet/v2`:
+value receives the defaults unchanged. A Node's own `targets` override them.
+As in `fleet/v2`, the top-level `targets.skills` must itself set `base: home`
+and a valid `path`. Each Node's resolved Targets are then validated and
+published exactly as if they had been written out in `fleet/v2`:
 
 ```yaml
 schema: fleet/v3
