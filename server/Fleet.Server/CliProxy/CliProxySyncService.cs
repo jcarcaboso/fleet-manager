@@ -1,9 +1,9 @@
 using Fleet.Server.Persistence;
 using Fleet.Server.Security;
-using Fleet.Server.Transport;
+using Fleet.Server.Source;
 using Microsoft.Extensions.Options;
 
-namespace Fleet.Server.Hosting;
+namespace Fleet.Server.CliProxy;
 
 public sealed class CliProxySyncService(IServiceScopeFactory scopes, CliProxyCatalog catalog, SourcePollingService source,
     IOptions<FleetOptions> options, TimeProvider clock, ILogger<CliProxySyncService> logger) : BackgroundService

@@ -1,7 +1,9 @@
 using System.Text.RegularExpressions;
 using Fleet.Core.Coordination;
+using Fleet.Server.CliProxy;
 using Fleet.Server.Persistence;
 using Fleet.Server.Security;
+using Fleet.Server.Source;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Options;
 
@@ -38,7 +40,7 @@ public static partial class OperatorIssues
 
     private sealed record FailedAssignment(Guid NodeId, string NodeName, string TargetName, DateTimeOffset? FirstFailedAt, LatestFailure? Latest);
 
-    public static async Task<IReadOnlyList<OperatorIssue>> ReadAsync(FleetDbContext db, IFleetCoordinator coordinator,
+    public static async Task<IReadOnlyList<OperatorIssue>> ReadAsync(FleetDbContext db, IOperatorQueries coordinator,
         CliProxyCatalog catalog, IOptions<FleetOptions> options, IConfiguration configuration, TimeProvider clock,
         SemanticVersion latestAgentVersion, CancellationToken ct)
     {
@@ -259,7 +261,7 @@ public static partial class OperatorIssues
     }
 
     /// <summary>Repository and CLIProxy issues. They do not depend on a Node.</summary>
-    public static async Task<IReadOnlyList<OperatorIssue>> ConfigurationAsync(FleetDbContext db, IFleetCoordinator coordinator,
+    public static async Task<IReadOnlyList<OperatorIssue>> ConfigurationAsync(FleetDbContext db, IOperatorQueries coordinator,
         CliProxyCatalog catalog, FleetOptions settings, IConfiguration configuration, CancellationToken ct)
     {
         var issues = new List<OperatorIssue>();
@@ -295,7 +297,7 @@ public static partial class OperatorIssues
             }
         }
         var source = await coordinator.GetLatestSourceScanAsync(ct);
-        if (string.IsNullOrWhiteSpace(configuration["Source:Remote"]))
+        if (string.IsNullOrWhiteSpace(new SourceSettings(configuration).Remote))
             issues.Add(new("source_not_configured", "source_not_configured", "warning", "No repository is configured",
                 "The Server cannot publish new assignments from Git.", "Set Source:Remote, then sync the repository.", "repository",
                 null, null, null, null, null, []));

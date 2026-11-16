@@ -3,7 +3,11 @@ using System.Net;
 using System.Security.Cryptography;
 using System.Threading.RateLimiting;
 using Fleet.Core.Coordination;
+using Fleet.Server.AgentReleases;
+using Fleet.Server.CliProxy;
 using Fleet.Server.Dashboard;
+using Fleet.Server.Http;
+using Fleet.Server.Metrics;
 using Fleet.Server.Persistence;
 using Fleet.Server.Security;
 using Fleet.Server.Source;
@@ -70,6 +74,13 @@ public static class FleetServerHosting
                 WorkspaceId = new WorkspaceId(services.GetRequiredService<IOptions<FleetOptions>>().Value.WorkspaceId),
                 LatestAgentVersion = services.GetRequiredService<LatestAgentVersion>().Value
             }));
+        // Each role resolves to the scope's one coordinator, which owns the scope's FleetDbContext and its transactions.
+        builder.Services.AddScoped<INodeCredentialLookup>(services => services.GetRequiredService<IFleetCoordinator>());
+        builder.Services.AddScoped<IAgentProtocol>(services => services.GetRequiredService<IFleetCoordinator>());
+        builder.Services.AddScoped<ISourcePublication>(services => services.GetRequiredService<IFleetCoordinator>());
+        builder.Services.AddScoped<IOperatorCommands>(services => services.GetRequiredService<IFleetCoordinator>());
+        builder.Services.AddScoped<IOperatorQueries>(services => services.GetRequiredService<IFleetCoordinator>());
+        builder.Services.AddScoped<IPersistenceMaintenance>(services => services.GetRequiredService<IFleetCoordinator>());
         builder.Services.AddSingleton(new LatestAgentVersion(ServerVersion.Current));
         builder.Services.AddSingleton<IEnrolledNodeSource, RegisteredNodeSource>();
         builder.Services.AddSingleton<SourcePollingService>();
@@ -150,8 +161,8 @@ public static class FleetServerHosting
             try { await next(context); }
             catch (CoordinationException exception)
             {
-                context.Response.StatusCode = CoordinationErrorStatus(exception.Code);
-                await WriteError(context, exception.Code, exception.Message);
+                context.Response.StatusCode = ApiErrors.CoordinationErrorStatus(exception.Code);
+                await ApiErrors.WriteError(context, exception.Code, exception.Message);
             }
             catch (OperatorApiException exception)
             {
@@ -161,40 +172,20 @@ public static class FleetServerHosting
             catch (BadHttpRequestException exception)
             {
                 context.Response.StatusCode = exception.StatusCode;
-                await WriteError(context, "invalid_request", "The request is malformed or a parameter is invalid.");
+                await ApiErrors.WriteError(context, "invalid_request", "The request is malformed or a parameter is invalid.");
             }
             catch (Exception exception) when (exception is ArgumentException or CryptographicException or System.Text.Json.JsonException)
             {
                 context.Response.StatusCode = 400;
-                await WriteError(context, "invalid_request", "The request is malformed or a parameter is invalid.");
+                await ApiErrors.WriteError(context, "invalid_request", "The request is malformed or a parameter is invalid.");
             }
             catch (Exception exception) when (!context.RequestAborted.IsCancellationRequested)
             {
                 app.Logger.LogError("Request failed with {ErrorType}", exception.GetType().FullName);
                 context.Response.StatusCode = 500;
-                await WriteError(context, "internal_error", "The Server could not complete the request.");
+                await ApiErrors.WriteError(context, "internal_error", "The Server could not complete the request.");
             }
         });
-
-    /// <summary>
-    /// The HTTP status of a <see cref="CoordinationException"/> code. Every code not listed is 400, including <c>enrollment_not_found</c>;
-    /// the mapping is a wire contract.
-    /// </summary>
-    internal static int CoordinationErrorStatus(string code) => code switch
-    {
-        "unauthorized" or "invalid_credential" or "node_unauthorized" or "bundle_not_authorized" or "cliproxy_credential_not_authorized" => 403,
-        "not_found" or "node_not_found" or "credential_not_found" or "attempt_not_found" or "target_not_found" or "enrollment_link_not_found" or "revision_not_found" or
-            "rollout_not_found" => 404,
-        "node_alias_in_use" or "node_revoked" or "node_alias_changed" or "target_not_failed" or "attempt_not_failed" or
-            "agent_update_unsupported" or "agent_update_current" or "agent_update_in_progress" or "agent_update_not_cancellable" => 409,
-        _ => 400
-    };
-
-    // Routes carrying ErrorMessages metadata (every Operator API and dashboard API route) return { code, message }. Every other route keeps { code }.
-    private static Task WriteError(HttpContext context, string code, string message) =>
-        context.GetEndpoint()?.Metadata.GetMetadata<ErrorMessages>() is null
-            ? context.Response.WriteAsJsonAsync(new { code })
-            : context.Response.WriteAsJsonAsync(new { code, message });
 
     public static void MapFleetServer(this WebApplication app)
     {

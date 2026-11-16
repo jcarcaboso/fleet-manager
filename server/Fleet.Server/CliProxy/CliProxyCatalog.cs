@@ -8,7 +8,7 @@ using Fleet.Server.Security;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Options;
 
-namespace Fleet.Server.Transport;
+namespace Fleet.Server.CliProxy;
 
 public sealed record CliProxyModel(string Id, IReadOnlyList<string> ReasoningLevels,
     long? ContextWindow = null, long? MaxContextWindow = null, long? AutoCompactTokenLimit = null);

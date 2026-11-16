@@ -1,11 +1,11 @@
 using Fleet.Core.Coordination;
 using Fleet.Server.Persistence;
 using Fleet.Server.Security;
-using Fleet.Server.Source;
+using Fleet.Server.Metrics;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Options;
 
-namespace Fleet.Server.Hosting;
+namespace Fleet.Server.Source;
 
 public sealed class RegisteredNodeSource(IServiceScopeFactory scopes) : IEnrolledNodeSource
 {
@@ -31,6 +31,7 @@ public sealed class SourcePollingService(
     TimeProvider? clock = null) : BackgroundService
 {
     private readonly TimeProvider _clock = clock ?? TimeProvider.System;
+    private readonly SourceSettings _settings = new(configuration);
     private readonly SemaphoreSlim _scan = new(1, 1);
     private string? _lastObserved;
     private volatile string? _cliProxyBaseUrl;
@@ -40,7 +41,7 @@ public sealed class SourcePollingService(
 
     public async Task<object> ScanNowAsync(string? requestedBy = null, CancellationToken cancellationToken = default)
     {
-        var remote = configuration["Source:Remote"];
+        var remote = _settings.Remote;
         if (string.IsNullOrWhiteSpace(remote))
         {
             metrics.RecordSourceScan("disabled");
@@ -53,20 +54,13 @@ public sealed class SourcePollingService(
         }
         try
         {
-            var defaults = new SourceLimits();
-            var limits = defaults with
-            {
-                MaxMirrorBytes = configuration.GetValue("Source:MaxMirrorBytes", defaults.MaxMirrorBytes),
-                MaxMirrorEntries = configuration.GetValue("Source:MaxMirrorEntries", defaults.MaxMirrorEntries),
-                ScanTimeoutSeconds = configuration.GetValue("Source:ScanTimeoutSeconds", defaults.ScanTimeoutSeconds),
-                GitCommandTimeoutSeconds = configuration.GetValue("Source:GitCommandTimeoutSeconds", defaults.GitCommandTimeoutSeconds),
-            };
-            var scanner = new GitSourceScanner(remote, configuration["Source:MirrorPath"] ?? ".local/source.git", nodes, limits, logger, _clock);
+            var limits = _settings.Limits();
+            var scanner = new GitSourceScanner(remote, _settings.MirrorPath, nodes, limits, logger, _clock);
             // Operator scans re-read the same commit because registry changes can make a
             // previously invalid Node alias valid without a new Git commit.
             var result = await scanner.ScanAsync(requestedBy is null ? _lastObserved : null, cancellationToken);
             using var scope = scopes.CreateScope();
-            var coordinator = scope.ServiceProvider.GetRequiredService<IFleetCoordinator>();
+            var coordinator = scope.ServiceProvider.GetRequiredService<ISourcePublication>();
             switch (result)
             {
                 case SourceScanResult.Unchanged unchanged:
@@ -128,7 +122,7 @@ public sealed class SourcePollingService(
             try
             {
                 using var scope = scopes.CreateScope();
-                var coordinator = scope.ServiceProvider.GetRequiredService<IFleetCoordinator>();
+                var coordinator = scope.ServiceProvider.GetRequiredService<ISourcePublication>();
                 await coordinator.RecordSourceScanAsync(new RecordSourceScan(null, SourceScanOutcome.Failed,
                     "source_scan_failed", "Source scanning failed before validation completed.", _clock.GetUtcNow(), requestedBy), cancellationToken);
             }
@@ -143,7 +137,7 @@ public sealed class SourcePollingService(
 
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
     {
-        var seconds = configuration.GetValue("Source:PollIntervalSeconds", 1800);
+        var seconds = _settings.PollIntervalSeconds;
         if (seconds is < 10 or > 86400) throw new InvalidOperationException("Source polling interval must be between 10 and 86400 seconds.");
         using var timer = new PeriodicTimer(TimeSpan.FromSeconds(seconds));
         do
@@ -157,7 +151,7 @@ public sealed class SourcePollingService(
                 try
                 {
                     using var scope = scopes.CreateScope();
-                    var coordinator = scope.ServiceProvider.GetRequiredService<IFleetCoordinator>();
+                    var coordinator = scope.ServiceProvider.GetRequiredService<ISourcePublication>();
                     await coordinator.RecordSourceScanAsync(new RecordSourceScan(null, SourceScanOutcome.Failed,
                         "source_scan_failed", "Source scanning failed before validation completed.", _clock.GetUtcNow()), stoppingToken);
                 }

@@ -2,8 +2,10 @@ using System.Security.Claims;
 using System.Security.Cryptography.X509Certificates;
 using System.Text.Json;
 using Fleet.Core.Coordination;
+using Fleet.Server.Http;
 using Fleet.Server.Persistence;
 using Fleet.Server.Security;
+using Fleet.Server.Source;
 using Fleet.Server.Transport;
 using Microsoft.AspNetCore.Antiforgery;
 using Microsoft.AspNetCore.Authentication;
@@ -230,7 +232,7 @@ public static class DashboardEndpoints
                 : await next(context));
         MapAccounts(ready);
         // Every Operator route is shared with /operator/v1, so the two surfaces cannot drift.
-        OperatorApi.Map(ready, TimeSpan.FromSeconds(app.Configuration.GetValue("Source:ScanTimeoutSeconds", 180) + 30));
+        OperatorApi.Map(ready, new SourceSettings(app.Configuration).RescanRequestTimeout);
     }
 
     /// <summary>

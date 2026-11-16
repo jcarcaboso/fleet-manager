@@ -2,6 +2,7 @@ using System.Net;
 using System.Net.Http.Json;
 using System.Text.Json.Nodes;
 using Fleet.Core.Coordination;
+using Fleet.Server.CliProxy;
 using Fleet.Server.Persistence;
 using Fleet.Server.Security;
 using Fleet.Server.Transport;

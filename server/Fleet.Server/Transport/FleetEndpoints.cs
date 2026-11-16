@@ -3,8 +3,12 @@ using System.Text;
 using System.Text.Json;
 using System.Threading.RateLimiting;
 using Fleet.Core.Coordination;
-using Fleet.Server.Hosting;
+using Fleet.Server.AgentReleases;
+using Fleet.Server.CliProxy;
+using Fleet.Server.Http;
+using Fleet.Server.Metrics;
 using Fleet.Server.Security;
+using Fleet.Server.Source;
 using Microsoft.Extensions.Options;
 
 namespace Fleet.Server.Transport;
@@ -14,12 +18,12 @@ public static class FleetEndpoints
     public static void MapFleetEndpoints(this WebApplication app)
     {
         var operators = app.MapGroup("/operator/v1").RequireAuthorization(FleetAuthenticationHandler.OperatorPolicy).WithGroupName("operator");
-        var operatorApi = OperatorApi.Map(operators, TimeSpan.FromSeconds(app.Configuration.GetValue("Source:ScanTimeoutSeconds", 180) + 30));
+        var operatorApi = OperatorApi.Map(operators, new SourceSettings(app.Configuration).RescanRequestTimeout);
         operatorApi.MapGet("/metrics", (FleetMetrics metrics) => Results.Ok(metrics.Snapshot()))
             .WithMetadata(new RequiredScope(OperatorScope.Read));
 
         app.MapPost("/agent/v1/enroll", async (EnrollmentRequest request, HttpContext context, NodeCertificateIssuer issuer,
-            IFleetCoordinator coordinator, IOptions<FleetOptions> options, TimeProvider time, CancellationToken ct) =>
+            IAgentProtocol coordinator, IOptions<FleetOptions> options, TimeProvider time, CancellationToken ct) =>
         {
             var verified = NodeCertificateIssuer.ValidateRequest(request.CertificateRequestPem);
             var nodeId = Guid.NewGuid();
@@ -37,7 +41,7 @@ public static class FleetEndpoints
         }).RequireRateLimiting("enrollment").WithGroupName("agent");
 
         var agents = app.MapGroup("/agent/v1").RequireAuthorization(FleetAuthenticationHandler.NodePolicy).WithGroupName("agent");
-        agents.MapPost("/poll", async (HttpContext context, IFleetCoordinator coordinator, IOptions<FleetOptions> options,
+        agents.MapPost("/poll", async (HttpContext context, IAgentProtocol coordinator, IOptions<FleetOptions> options,
             TimeProvider time, CancellationToken ct) =>
         {
             var capabilities = Capabilities(context);
@@ -55,7 +59,7 @@ public static class FleetEndpoints
                 response["agentUpdate"] = new { version = update.Version, updateId = update.UpdateId };
             return Results.Ok(response);
         });
-        agents.MapGet("/bundles/{digest}", async (string digest, HttpContext context, IFleetCoordinator coordinator, CancellationToken ct) =>
+        agents.MapGet("/bundles/{digest}", async (string digest, HttpContext context, IAgentProtocol coordinator, CancellationToken ct) =>
         {
             var bundle = await coordinator.GetBundleAsync(Node(context), digest, ct);
             context.Response.Headers.ETag = $"\"{bundle.Digest}\"";
@@ -63,7 +67,7 @@ public static class FleetEndpoints
             context.Response.Headers.CacheControl = "private, no-store";
             return Results.Bytes(bundle.Content, "application/octet-stream");
         });
-        agents.MapGet("/cliproxy/credential", async (HttpContext context, IFleetCoordinator coordinator,
+        agents.MapGet("/cliproxy/credential", async (HttpContext context, IAgentProtocol coordinator,
             IOptions<FleetOptions> options, CancellationToken ct) =>
         {
             await coordinator.AuthorizeCliProxyCredentialAsync(Node(context), ct);
@@ -73,7 +77,7 @@ public static class FleetEndpoints
                 ? Results.Json(new { code = "cliproxy_credential_unavailable" }, statusCode: StatusCodes.Status503ServiceUnavailable)
                 : Results.Bytes(Encoding.UTF8.GetBytes(credential), "application/octet-stream");
         });
-        agents.MapGet("/cliproxy/models", async (HttpContext context, IFleetCoordinator coordinator,
+        agents.MapGet("/cliproxy/models", async (HttpContext context, IAgentProtocol coordinator,
             CliProxySelectionStore selection, CancellationToken ct) =>
         {
             var baseUrl = await coordinator.AuthorizeCliProxyCredentialAsync(Node(context), ct);
@@ -83,20 +87,20 @@ public static class FleetEndpoints
                 ? Results.Json(new { code = "cliproxy_models_unavailable" }, statusCode: StatusCodes.Status503ServiceUnavailable)
                 : Results.Ok(catalog);
         });
-        agents.MapPost("/reports", async (ReportRequest request, HttpContext context, IFleetCoordinator coordinator,
+        agents.MapPost("/reports", async (ReportRequest request, HttpContext context, IAgentProtocol coordinator,
             TimeProvider time, CancellationToken ct) =>
             await coordinator.ReportAttemptAsync(Node(context), new(new(request.AttemptId), request.State,
                 request.ErrorCode, null, time.GetUtcNow()), ct));
         // The Agent sends why a failed Attempt failed after its report is accepted. One conditional UPDATE that skips unchanged values.
         agents.MapPost("/attempts/{attemptId:guid}/detail", async (Guid attemptId, AttemptDetailRequest request, HttpContext context,
-            IFleetCoordinator coordinator, CancellationToken ct) =>
+            IAgentProtocol coordinator, CancellationToken ct) =>
         {
             await coordinator.RecordAttemptDetailAsync(Node(context), new(attemptId),
                 new(request.Diagnostic, request.Path, request.Step), ct);
             return Results.NoContent();
         }).LimitPerNode();
         // The Agent reports the latest disk usage of its volumes. A report replaces the stored volumes and clears a refresh request.
-        agents.MapPut("/disk-usage", async (DiskUsageRequest request, HttpContext context, IFleetCoordinator coordinator,
+        agents.MapPut("/disk-usage", async (DiskUsageRequest request, HttpContext context, IAgentProtocol coordinator,
             CancellationToken ct) =>
         {
             if (request.Volumes is null) throw new CoordinationException("invalid_request", "volumes is required.");
@@ -107,7 +111,7 @@ public static class FleetEndpoints
             return Results.NoContent();
         }).LimitPerNode();
         // The Agent reports its version and machine information. The latest report replaces the stored one.
-        agents.MapPut("/telemetry", async (TelemetryRequest request, HttpContext context, IFleetCoordinator coordinator,
+        agents.MapPut("/telemetry", async (TelemetryRequest request, HttpContext context, IAgentProtocol coordinator,
             CancellationToken ct) =>
         {
             if (request.Os is null) throw new CoordinationException("invalid_request", "os is required.");
@@ -118,7 +122,7 @@ public static class FleetEndpoints
             return Results.NoContent();
         }).LimitPerNode();
         // The Agent reports the files it repaired in an assigned Target. The Server keeps the newest events of the Node.
-        agents.MapPost("/drift", async (DriftRequest request, HttpContext context, IFleetCoordinator coordinator, CancellationToken ct) =>
+        agents.MapPost("/drift", async (DriftRequest request, HttpContext context, IAgentProtocol coordinator, CancellationToken ct) =>
         {
             if (request.Target is null) throw new CoordinationException("invalid_request", "target is required.");
             if (request.Files is null || request.Files.Any(x => x is null))
@@ -128,7 +132,7 @@ public static class FleetEndpoints
         }).LimitPerNode();
         // The Agent reports every idle repair that currently fails, after the Assignment's Attempt succeeded. The list replaces the
         // stored one, so an empty list clears it; failures of an Assignment that is no longer current are skipped.
-        agents.MapPut("/repair-failures", async (RepairFailuresRequest request, HttpContext context, IFleetCoordinator coordinator,
+        agents.MapPut("/repair-failures", async (RepairFailuresRequest request, HttpContext context, IAgentProtocol coordinator,
             CancellationToken ct) =>
         {
             if (request.Failures is null) throw new CoordinationException("invalid_request", "failures is required.");
@@ -152,13 +156,13 @@ public static class FleetEndpoints
                 : Results.Json(new { code = "agent_release_not_found" }, statusCode: StatusCodes.Status404NotFound);
         }).WithRequestTimeout(TimeSpan.FromMinutes(10));
         // The Agent reports the progress of a requested update. A report without a matching update changes nothing and gets a 409.
-        agents.MapPost("/agent-update/report", async (AgentUpdateReportRequest request, HttpContext context, IFleetCoordinator coordinator,
+        agents.MapPost("/agent-update/report", async (AgentUpdateReportRequest request, HttpContext context, IAgentProtocol coordinator,
             CancellationToken ct) =>
             await coordinator.RecordAgentUpdateReportAsync(Node(context),
                 new(request.UpdateId ?? Guid.Empty, request.Version!, request.State!, request.ErrorCode), ct)
                 ? Results.NoContent()
                 : Results.Json(new { code = "agent_update_not_requested" }, statusCode: StatusCodes.Status409Conflict)).LimitPerNode();
-        agents.MapPost("/credentials/renew", async (RenewalRequest request, HttpContext context, IFleetCoordinator coordinator,
+        agents.MapPost("/credentials/renew", async (RenewalRequest request, HttpContext context, IAgentProtocol coordinator,
             NodeCertificateIssuer issuer, TimeProvider time, CancellationToken ct) =>
         {
             var verified = NodeCertificateIssuer.ValidateRequest(request.CertificateRequestPem);
@@ -171,7 +175,7 @@ public static class FleetEndpoints
             context.Response.Headers.CacheControl = "no-store";
             return Results.Ok(response);
         }).RequireRateLimiting("enrollment").WithMetadata(new AllowExpiredNodeCertificate());
-        agents.MapPut("/alias", async (AliasRequest request, HttpContext context, IFleetCoordinator coordinator,
+        agents.MapPut("/alias", async (AliasRequest request, HttpContext context, IAgentProtocol coordinator,
             CancellationToken ct) => Results.Ok(await coordinator.RenameNodeAliasAsync(new(Node(context), request.Alias), ct)));
     }
 

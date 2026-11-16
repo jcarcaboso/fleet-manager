@@ -1,6 +1,7 @@
 using System.Net;
 using System.Text;
 using System.Text.Json;
+using Fleet.Server.CliProxy;
 using Fleet.Server.Security;
 using Fleet.Server.Transport;
 using Microsoft.Extensions.Options;
@@ -129,6 +130,38 @@ public sealed class CliProxyCatalogTests
         settings.CliProxyApiKey = "secret";
         await catalog.SyncAsync(["http://proxy.example/v1", "https://proxy.example/v1/"], true, default);
         Assert.Equal(3, handler.Calls);
+    }
+
+    // The complete body of GET cliproxy/status under the Server's HTTP serializer options: names, order and nulls are the contract.
+    [Fact]
+    public async Task Status_json_keeps_its_exact_shape()
+    {
+        var options = new JsonSerializerOptions(JsonSerializerDefaults.Web);
+        WireJson.Configure(options);
+        var clock = new Clock { Now = new DateTimeOffset(2026, 1, 2, 3, 4, 5, TimeSpan.Zero) };
+
+        var disabled = new CliProxyCatalog(new Handler(), Options.Create(new FleetOptions()), clock);
+        Assert.Equal("""{"enabled":false,"intervalSeconds":604800,"errorCode":"credential_unavailable","catalogs":[]}""",
+            JsonSerializer.Serialize(disabled.Status(), options));
+
+        var catalog = new CliProxyCatalog(new OneHostDown(new Handler(), "down.example"),
+            Options.Create(new FleetOptions { CliProxyApiKey = "secret", CliProxySyncIntervalSeconds = 120 }), clock);
+        await catalog.SyncAsync(["https://proxy.example/v1", "https://down.example/v1"], false, default);
+        Assert.Equal(
+            """{"enabled":true,"intervalSeconds":120,"errorCode":null,"catalogs":[""" +
+            """{"baseUrl":"https://down.example/v1","modelCount":0,"lastSuccess":null,"nextRefresh":"2026-01-02T03:05:05Z","outcome":"failed","errorCode":"upstream_http_503"},""" +
+            """{"baseUrl":"https://proxy.example/v1","modelCount":1,"lastSuccess":"2026-01-02T03:04:05Z","nextRefresh":"2026-01-02T03:06:05Z","outcome":"succeeded","errorCode":null}]}""",
+            JsonSerializer.Serialize(catalog.Status(), options));
+    }
+
+    // Answers 503 for one host and passes every other request to the inner handler.
+    private sealed class OneHostDown(HttpMessageHandler inner, string host) : DelegatingHandler(inner), IHttpClientFactory
+    {
+        public HttpClient CreateClient(string name) => new(this, false);
+        protected override Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken cancellationToken) =>
+            request.RequestUri!.Host == host
+                ? Task.FromResult(new HttpResponseMessage(HttpStatusCode.ServiceUnavailable))
+                : base.SendAsync(request, cancellationToken);
     }
 
     private sealed class Clock : TimeProvider

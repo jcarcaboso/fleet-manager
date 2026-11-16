@@ -1,7 +1,7 @@
 using System.Collections.Concurrent;
 using System.Diagnostics.Metrics;
 
-namespace Fleet.Server.Hosting;
+namespace Fleet.Server.Metrics;
 
 public sealed class FleetMetrics : IDisposable
 {

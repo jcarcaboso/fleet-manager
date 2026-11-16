@@ -4,7 +4,7 @@ using Fleet.Core.Coordination;
 using Fleet.Server.Persistence;
 using Microsoft.EntityFrameworkCore;
 
-namespace Fleet.Server.Transport;
+namespace Fleet.Server.CliProxy;
 
 public sealed record CliProxySelectionPolicy(bool IncludeNew, string[] DisabledFamilies, Dictionary<string, bool> ModelOverrides,
     string[] EnabledFamilies, bool SkipClaudeModelsForOtherClients = true);

@@ -14,7 +14,7 @@ public sealed class FleetAuthenticationHandler(
     UrlEncoder encoder,
     IOptions<FleetOptions> fleetOptions,
     NodeCertificateIssuer issuer,
-    IFleetCoordinator coordinator) : AuthenticationHandler<AuthenticationSchemeOptions>(options, logger, encoder)
+    INodeCredentialLookup coordinator) : AuthenticationHandler<AuthenticationSchemeOptions>(options, logger, encoder)
 {
     public const string OperatorScheme = "Operator";
     public const string NodeScheme = "Node";

@@ -1,5 +1,5 @@
 using System.Security.Cryptography.X509Certificates;
-using Fleet.Server.Hosting;
+using Fleet.Server.Metrics;
 using Microsoft.Extensions.Options;
 
 namespace Fleet.Server.Security;

@@ -1,8 +1,8 @@
 using System.Data;
 using System.Security.Cryptography;
 using System.Text;
+using Fleet.Server.Http;
 using Fleet.Server.Persistence;
-using Fleet.Server.Transport;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Options;
 
@@ -227,7 +227,7 @@ public sealed class OperatorAccountStore(FleetDbContext db, IOptions<FleetOption
         if (row is null || row.SecurityStamp != actor.Stamp)
             throw new OperatorApiException(401, "unauthorized", "The session ended because the account changed. Sign in again.");
         if (row.Scope != OperatorScope.Admin.Name() || row.MustChangePassword)
-            throw new OperatorApiException(403, OperatorApi.ScopeDeniedCode, "This action needs the admin scope.");
+            throw new OperatorApiException(403, ApiErrors.ScopeDeniedCode, "This action needs the admin scope.");
         return row;
     }
 
