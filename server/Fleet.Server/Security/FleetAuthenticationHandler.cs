@@ -18,6 +18,9 @@ public sealed class FleetAuthenticationHandler(
 {
     public const string OperatorScheme = "Operator";
     public const string NodeScheme = "Node";
+    /// <summary>Authorization policies that require an authenticated user of the scheme with the same name.</summary>
+    public const string OperatorPolicy = OperatorScheme;
+    public const string NodePolicy = NodeScheme;
     public const string NodeIdentityKey = "Fleet.NodeAuthentication";
 
     protected override async Task<AuthenticateResult> HandleAuthenticateAsync()

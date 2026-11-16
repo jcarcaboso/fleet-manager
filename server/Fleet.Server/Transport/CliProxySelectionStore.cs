@@ -1,5 +1,6 @@
 using System.Text.Json;
 using System.Text.RegularExpressions;
+using Fleet.Core.Coordination;
 using Fleet.Server.Persistence;
 using Microsoft.EntityFrameworkCore;
 
@@ -49,7 +50,7 @@ public sealed class CliProxySelectionStore(FleetDbContext database, CliProxyCata
             policy.DisabledFamilies.Any(key => !ValidFamilyKey(key)) ||
             policy.EnabledFamilies.Any(key => !ValidFamilyKey(key)) ||
             policy.DisabledFamilies.Intersect(policy.EnabledFamilies, StringComparer.Ordinal).Any() ||
-            policy.ModelOverrides.Any(pair => !Fleet.Server.Source.SourceTargetPublishers.IsValidModelId(pair.Key)))
+            policy.ModelOverrides.Any(pair => !CliProxyRules.IsValidModelId(pair.Key)))
             return (400, new { code = "invalid_selection", message = InvalidSelection });
 
         var models = await catalog.GetAsync(baseUrl, ct);
@@ -166,5 +167,5 @@ public sealed class CliProxySelectionStore(FleetDbContext database, CliProxyCata
     };
 
     private static bool ValidFamilyKey(string? key) => key is { Length: > 0 and <= 200 } &&
-        Fleet.Server.Source.SourceTargetPublishers.IsValidModelId(key);
+        CliProxyRules.IsValidModelId(key);
 }

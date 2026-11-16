@@ -19,8 +19,8 @@ internal sealed class FleetManifestV3Parser : IManifestSchemaParser
         return new FleetManifest
         {
             Schema = Schema,
-            CliProxy = source?.CliProxy is null ? null : new ManifestCliProxy { BaseUrl = source.CliProxy.BaseUrl },
-            Targets = new ManifestDefaults { Skills = Map(defaults.Skills) },
+            CliProxy = ManifestYaml.Map(source?.CliProxy),
+            Targets = new ManifestDefaults { Skills = ManifestYaml.Map(defaults.Skills) },
             Nodes = source?.Nodes?.ToDictionary(
                 pair => pair.Key,
                 pair => new ManifestNode { Targets = Resolve(defaults, pair.Value?.Targets ?? new ManifestTargetsV3()) },
@@ -37,20 +37,16 @@ internal sealed class FleetManifestV3Parser : IManifestSchemaParser
             Groups = node.Skills?.Groups ?? defaults.Skills?.Groups,
             ExcludeClaude = node.Skills?.ExcludeClaude ?? defaults.Skills?.ExcludeClaude,
         },
-        Agents = (node.HasAgents ? node.Agents : defaults.Agents)?.Select(agent => agent is null ? null! : new ManifestAgentTarget
-        {
-            Source = agent.Source,
-            Clients = agent.Clients,
-        }).ToList(),
+        Agents = ManifestYaml.Map(node.HasAgents ? node.Agents : defaults.Agents),
         AiClients = ResolveAiClients(defaults.AiClients, node.HasAiClients, node.AiClients),
     };
 
     private static Dictionary<string, ManifestAiClientTarget>? ResolveAiClients(
-        Dictionary<string, ManifestAiClientTargetV3?>? defaults, bool nodeSetsAiClients, Dictionary<string, ManifestAiClientTargetV3?>? node)
+        Dictionary<string, ManifestAiClientTargetYaml?>? defaults, bool nodeSetsAiClients, Dictionary<string, ManifestAiClientTargetYaml?>? node)
     {
         if (nodeSetsAiClients && node is null) return null;
         if (defaults is null && node is null) return null;
-        var merged = new Dictionary<string, ManifestAiClientTargetV3?>(StringComparer.Ordinal);
+        var merged = new Dictionary<string, ManifestAiClientTargetYaml?>(StringComparer.Ordinal);
         foreach (var (client, target) in defaults ?? new())
             merged[client] = target;
         foreach (var (client, target) in node ?? new())
@@ -58,31 +54,16 @@ internal sealed class FleetManifestV3Parser : IManifestSchemaParser
             if (target is null) merged.Remove(client);
             else merged[client] = target;
         }
-        return merged.ToDictionary(
-            pair => pair.Key,
-            pair => pair.Value is null ? null! : new ManifestAiClientTarget { Mode = pair.Value.Mode, Model = pair.Value.Model },
-            StringComparer.Ordinal);
+        return ManifestYaml.Map(merged);
     }
-
-    private static ManifestTarget Map(ManifestTargetV3? source) => new()
-    {
-        Base = source?.Base,
-        Path = source?.Path,
-        Groups = source?.Groups,
-        ExcludeClaude = source?.ExcludeClaude,
-    };
 }
 
 internal sealed class FleetManifestV3
 {
     [YamlMember(Alias = "schema")] public string? Schema { get; init; }
-    [YamlMember(Alias = "cliproxy")] public ManifestCliProxyV3? CliProxy { get; init; }
+    [YamlMember(Alias = "cliproxy")] public ManifestCliProxyYaml? CliProxy { get; init; }
     [YamlMember(Alias = "targets")] public ManifestTargetsV3? Targets { get; init; }
     [YamlMember(Alias = "nodes")] public Dictionary<string, ManifestNodeV3?>? Nodes { get; init; }
-}
-internal sealed class ManifestCliProxyV3
-{
-    [YamlMember(Alias = "base-url")] public string? BaseUrl { get; init; }
 }
 internal sealed class ManifestNodeV3
 {
@@ -90,21 +71,21 @@ internal sealed class ManifestNodeV3
 }
 internal sealed class ManifestTargetsV3
 {
-    private List<ManifestAgentTargetV3?>? _agents;
-    private Dictionary<string, ManifestAiClientTargetV3?>? _aiClients;
+    private List<ManifestAgentTargetYaml?>? _agents;
+    private Dictionary<string, ManifestAiClientTargetYaml?>? _aiClients;
 
-    [YamlMember(Alias = "skills")] public ManifestTargetV3? Skills { get; init; }
+    [YamlMember(Alias = "skills")] public ManifestTargetYaml? Skills { get; init; }
 
     // The setters record presence so an explicit null (`agents: ~`) can clear a default.
     [YamlMember(Alias = "agents")]
-    public List<ManifestAgentTargetV3?>? Agents
+    public List<ManifestAgentTargetYaml?>? Agents
     {
         get => _agents;
         init { _agents = value; HasAgents = true; }
     }
 
     [YamlMember(Alias = "ai-clients")]
-    public Dictionary<string, ManifestAiClientTargetV3?>? AiClients
+    public Dictionary<string, ManifestAiClientTargetYaml?>? AiClients
     {
         get => _aiClients;
         init { _aiClients = value; HasAiClients = true; }
@@ -112,21 +93,4 @@ internal sealed class ManifestTargetsV3
 
     [YamlIgnore] public bool HasAgents { get; private set; }
     [YamlIgnore] public bool HasAiClients { get; private set; }
-}
-internal sealed class ManifestAgentTargetV3
-{
-    [YamlMember(Alias = "source")] public string? Source { get; init; }
-    [YamlMember(Alias = "clients")] public List<string>? Clients { get; init; }
-}
-internal sealed class ManifestAiClientTargetV3
-{
-    [YamlMember(Alias = "mode")] public string? Mode { get; init; }
-    [YamlMember(Alias = "model")] public string? Model { get; init; }
-}
-internal sealed class ManifestTargetV3
-{
-    [YamlMember(Alias = "base")] public string? Base { get; init; }
-    [YamlMember(Alias = "path")] public string? Path { get; init; }
-    [YamlMember(Alias = "groups")] public List<string>? Groups { get; init; }
-    [YamlMember(Alias = "excludeClaude")] public bool? ExcludeClaude { get; init; }
 }

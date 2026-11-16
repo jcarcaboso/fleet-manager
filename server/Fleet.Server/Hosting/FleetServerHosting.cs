@@ -79,11 +79,13 @@ public static class FleetServerHosting
         builder.Services.AddSingleton(services => DashboardSettings.Load(services.GetRequiredService<IOptions<FleetOptions>>().Value));
         builder.Services.AddFleetDashboard();
         builder.Services.AddAuthentication(options => options.DefaultAuthenticateScheme = DashboardEndpoints.Scheme)
-            .AddScheme<AuthenticationSchemeOptions, FleetAuthenticationHandler>("Operator", _ => { })
-            .AddScheme<AuthenticationSchemeOptions, FleetAuthenticationHandler>("Node", _ => { });
+            .AddScheme<AuthenticationSchemeOptions, FleetAuthenticationHandler>(FleetAuthenticationHandler.OperatorScheme, _ => { })
+            .AddScheme<AuthenticationSchemeOptions, FleetAuthenticationHandler>(FleetAuthenticationHandler.NodeScheme, _ => { });
         builder.Services.AddAuthorizationBuilder()
-            .AddPolicy("Operator", policy => policy.AddAuthenticationSchemes("Operator").RequireAuthenticatedUser())
-            .AddPolicy("Node", policy => policy.AddAuthenticationSchemes("Node").RequireAuthenticatedUser());
+            .AddPolicy(FleetAuthenticationHandler.OperatorPolicy, policy =>
+                policy.AddAuthenticationSchemes(FleetAuthenticationHandler.OperatorScheme).RequireAuthenticatedUser())
+            .AddPolicy(FleetAuthenticationHandler.NodePolicy, policy =>
+                policy.AddAuthenticationSchemes(FleetAuthenticationHandler.NodeScheme).RequireAuthenticatedUser());
         builder.Services.AddRateLimiter(options =>
         {
             options.RejectionStatusCode = StatusCodes.Status429TooManyRequests;
@@ -100,6 +102,18 @@ public static class FleetServerHosting
 
     public static void UseFleetServer(this WebApplication app)
     {
+        app.UseRequestMetrics();
+        app.UseHttpsAndErrorResponses();
+        // Before the rate limiter and authentication so preflights are answered without a session and 401/429 responses still carry CORS headers.
+        app.UseDashboardApiHeaders();
+        app.UseDashboardRedirect();
+        app.UseRateLimiter();
+        app.UseRequestTimeouts();
+        app.UseAuthentication();
+        app.UseAuthorization();
+    }
+
+    private static void UseRequestMetrics(this WebApplication app) =>
         app.Use(async (context, next) =>
         {
             var started = Stopwatch.GetTimestamp();
@@ -117,6 +131,8 @@ public static class FleetServerHosting
             }
         });
 
+    // Rejects plain HTTP except loopback when allowed and /health, then maps exceptions to error responses.
+    private static void UseHttpsAndErrorResponses(this WebApplication app) =>
         app.Use(async (context, next) =>
         {
             context.Response.Headers.CacheControl = "no-store";
@@ -134,15 +150,7 @@ public static class FleetServerHosting
             try { await next(context); }
             catch (CoordinationException exception)
             {
-                context.Response.StatusCode = exception.Code switch
-                {
-                    "unauthorized" or "invalid_credential" or "node_unauthorized" or "bundle_not_authorized" or "cliproxy_credential_not_authorized" => 403,
-                    "not_found" or "node_not_found" or "credential_not_found" or "attempt_not_found" or "target_not_found" or "enrollment_link_not_found" or "revision_not_found" or
-                        "rollout_not_found" => 404,
-                    "node_alias_in_use" or "node_revoked" or "node_alias_changed" or "target_not_failed" or "attempt_not_failed" or
-                        "agent_update_unsupported" or "agent_update_current" or "agent_update_in_progress" or "agent_update_not_cancellable" => 409,
-                    _ => 400
-                };
+                context.Response.StatusCode = CoordinationErrorStatus(exception.Code);
                 await WriteError(context, exception.Code, exception.Message);
             }
             catch (OperatorApiException exception)
@@ -167,14 +175,20 @@ public static class FleetServerHosting
                 await WriteError(context, "internal_error", "The Server could not complete the request.");
             }
         });
-        // Before the rate limiter and authentication so preflights are answered without a session and 401/429 responses still carry CORS headers.
-        app.UseDashboardApiHeaders();
-        app.UseDashboardRedirect();
-        app.UseRateLimiter();
-        app.UseRequestTimeouts();
-        app.UseAuthentication();
-        app.UseAuthorization();
-    }
+
+    /// <summary>
+    /// The HTTP status of a <see cref="CoordinationException"/> code. Every code not listed is 400, including <c>enrollment_not_found</c>;
+    /// the mapping is a wire contract.
+    /// </summary>
+    internal static int CoordinationErrorStatus(string code) => code switch
+    {
+        "unauthorized" or "invalid_credential" or "node_unauthorized" or "bundle_not_authorized" or "cliproxy_credential_not_authorized" => 403,
+        "not_found" or "node_not_found" or "credential_not_found" or "attempt_not_found" or "target_not_found" or "enrollment_link_not_found" or "revision_not_found" or
+            "rollout_not_found" => 404,
+        "node_alias_in_use" or "node_revoked" or "node_alias_changed" or "target_not_failed" or "attempt_not_failed" or
+            "agent_update_unsupported" or "agent_update_current" or "agent_update_in_progress" or "agent_update_not_cancellable" => 409,
+        _ => 400
+    };
 
     // Routes carrying ErrorMessages metadata (every Operator API and dashboard API route) return { code, message }. Every other route keeps { code }.
     private static Task WriteError(HttpContext context, string code, string message) =>
@@ -201,6 +215,6 @@ public static class FleetServerHosting
         _ = app.Services.GetRequiredService<EnrollmentLinkSettings>();
         app.MapFleetEndpoints();
         app.MapFleetDashboard();
-        app.MapOpenApi().RequireAuthorization("Operator");
+        app.MapOpenApi().RequireAuthorization(FleetAuthenticationHandler.OperatorPolicy);
     }
 }

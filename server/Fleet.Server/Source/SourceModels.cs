@@ -14,11 +14,6 @@ public abstract record SourceScanResult
 
 public sealed record SourceDiagnostic(string Code, string Message, string? Path = null);
 
-public interface ISourceScanner
-{
-    Task<SourceScanResult> ScanAsync(string? lastObservedRevision, CancellationToken cancellationToken);
-}
-
 public interface IEnrolledNodeSource
 {
     Task<IReadOnlyDictionary<string, NodeId>> GetNodeAliasesAsync(CancellationToken cancellationToken);

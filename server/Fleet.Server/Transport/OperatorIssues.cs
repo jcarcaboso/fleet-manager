@@ -1,4 +1,3 @@
-using System.Text.Json;
 using System.Text.RegularExpressions;
 using Fleet.Core.Coordination;
 using Fleet.Server.Persistence;
@@ -30,7 +29,7 @@ public sealed record OperatorIssue(
     DateTimeOffset? StateAt = null,
     DateTimeOffset? SnoozedUntil = null);
 
-/// <summary>Builds the open issues of the Workspace. <c>GET issues</c> returns them; the legacy diagnostics reuse the configuration part.</summary>
+/// <summary>Builds the open issues of the Workspace, which <c>GET issues</c> returns and <c>POST issues/state</c> changes.</summary>
 public static partial class OperatorIssues
 {
     public const int MaximumItems = 200;
@@ -189,10 +188,8 @@ public static partial class OperatorIssues
         var issues = new List<OperatorIssue>();
         foreach (var group in rows.GroupBy(x => x.NodeId))
         {
-            var fullest = group.Select(x => (Row: x, Percent: DiskUsageRules.UsedPercent(x.UsedBytes, x.AvailableBytes)))
-                .OrderByDescending(x => x.Percent).ThenBy(x => x.Row.Label, StringComparer.Ordinal).First();
-            if (fullest.Percent < DiskLowPercent) continue;
-            var (row, percent) = fullest;
+            var (row, percent) = DiskUsageRules.Fullest(group, x => x.Label, x => x.UsedBytes, x => x.AvailableBytes);
+            if (percent < DiskLowPercent) continue;
             var critical = percent >= DiskCriticalPercent;
             var code = critical ? "disk_space_critical" : "disk_space_low";
             var alias = Quote(row.NodeName);
@@ -266,12 +263,7 @@ public static partial class OperatorIssues
         CliProxyCatalog catalog, FleetOptions settings, IConfiguration configuration, CancellationToken ct)
     {
         var issues = new List<OperatorIssue>();
-        var nodes = db.Nodes.AsNoTracking().Where(node => node.WorkspaceId == settings.WorkspaceId && node.RevokedAt == null);
-        var proxies = await (from assignment in db.Assignments.AsNoTracking()
-                             join node in nodes on assignment.NodeId equals node.Id
-                             join client in db.AssignmentAiClients on assignment.Id equals client.AssignmentId
-                             where assignment.IsCurrent && client.Mode == "cliproxy"
-                             select client.BaseUrl!).Distinct().ToArrayAsync(ct);
+        var proxies = await CliProxyCatalog.AssignedBaseUrlsAsync(db, settings.WorkspaceId, ct);
         if (proxies.Length > 0 && settings.CliProxyApiKey.Length == 0)
             issues.Add(new("cliproxy_key_missing", "cliproxy_key_missing", "error", "CLIProxy API key is missing",
                 "Nodes are assigned to CLIProxy, but the Server cannot retrieve or distribute their models.",
@@ -279,19 +271,18 @@ public static partial class OperatorIssues
                 null, null, null, null, null, ["fleet models refresh"]));
         else if (proxies.Length > 0)
         {
-            var status = JsonSerializer.SerializeToElement(catalog.Status());
-            var catalogs = status.GetProperty("catalogs").EnumerateArray().ToArray();
+            var catalogs = catalog.Status().Catalogs;
             foreach (var url in proxies.Take(20))
             {
-                var entry = catalogs.FirstOrDefault(item => item.GetProperty("baseUrl").GetString() == url);
-                if (entry.ValueKind == JsonValueKind.Undefined)
+                var entry = catalogs.FirstOrDefault(item => item.BaseUrl == url);
+                if (entry is null)
                     issues.Add(new($"cliproxy_discovery_pending:{url}", "cliproxy_discovery_pending", "warning",
                         "Model discovery has not completed", url,
                         "Refresh models or wait for the next discovery check. Initial discovery normally starts within 30 seconds.", "models",
                         null, null, null, null, null, ["fleet models refresh"]));
-                else if (entry.GetProperty("errorCode").GetString() is { } error)
+                else if (entry.ErrorCode is { } error)
                 {
-                    var cached = entry.GetProperty("modelCount").GetInt32() > 0;
+                    var cached = entry.ModelCount > 0;
                     var action = error is "upstream_http_401" or "upstream_http_403"
                         ? "Check that CLIProxy accepts the dedicated Fleet key, then refresh models."
                         : error == "invalid_catalog" ? "Check CLIProxy's model response. It must contain a valid, non-empty model list."

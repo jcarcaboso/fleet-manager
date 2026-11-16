@@ -13,7 +13,7 @@ public static class FleetEndpoints
 {
     public static void MapFleetEndpoints(this WebApplication app)
     {
-        var operators = app.MapGroup("/operator/v1").RequireAuthorization("Operator").WithGroupName("operator");
+        var operators = app.MapGroup("/operator/v1").RequireAuthorization(FleetAuthenticationHandler.OperatorPolicy).WithGroupName("operator");
         var operatorApi = OperatorApi.Map(operators, TimeSpan.FromSeconds(app.Configuration.GetValue("Source:ScanTimeoutSeconds", 180) + 30));
         operatorApi.MapGet("/metrics", (FleetMetrics metrics) => Results.Ok(metrics.Snapshot()))
             .WithMetadata(new RequiredScope(OperatorScope.Read));
@@ -36,7 +36,7 @@ public static class FleetEndpoints
             return Results.Bytes(result.DeliveryPayload, "application/json");
         }).RequireRateLimiting("enrollment").WithGroupName("agent");
 
-        var agents = app.MapGroup("/agent/v1").RequireAuthorization("Node").WithGroupName("agent");
+        var agents = app.MapGroup("/agent/v1").RequireAuthorization(FleetAuthenticationHandler.NodePolicy).WithGroupName("agent");
         agents.MapPost("/poll", async (HttpContext context, IFleetCoordinator coordinator, IOptions<FleetOptions> options,
             TimeProvider time, CancellationToken ct) =>
         {
