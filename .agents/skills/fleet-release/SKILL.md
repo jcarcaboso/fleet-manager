@@ -101,7 +101,7 @@ For a breaking release, before publishing:
 
 1. List the breaking changes by reading the merged PRs and
    `git diff vX.Y.Z..origin/master` for `clients/bins/fleet/`,
-   `server/Fleet.Server/Transport/`, `server/Fleet.Server/Dashboard/`,
+   `server/Fleet.Server/Transport/`, `server/Fleet.Server/Http/`, `server/Fleet.Server/Dashboard/`,
    `server/Fleet.Server/Persistence/Migrations/`, `dashboard/`, `deploy/homelab/`,
    `contracts/` and `docs/technical-design/operator-*.md`. Do not rely on PR titles.
    Removing the Server-served dashboard (a new container, a new published port, a

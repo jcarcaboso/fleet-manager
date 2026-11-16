@@ -18,6 +18,71 @@ the safety-critical code deliberately left together.
 | New published target | [Source target publishers](../../server/Fleet.Server/Source/SourceTargetPublishers.cs) | Git access, source validation, snapshot acceptance, and database transactions |
 | Server service or route | [Hosting composition](../../server/Fleet.Server/Hosting/FleetServerHosting.cs) and the relevant endpoint module | Middleware order, authentication schemes, and authorization policies |
 
+## Module map
+
+Read the row for the module you are changing. A module may use the modules in
+its last column and nothing else, so a change stays inside one folder plus the
+files it names. Neither the Server namespaces nor the Agent modules form a
+cycle; keep it that way.
+
+### Server (`server/Fleet.Server`)
+
+| Folder | Owns | Uses |
+| --- | --- | --- |
+| `Http` | API error types, the error-code to status table, error bodies | nothing |
+| `Metrics` | Meter, counters, the database command interceptor | nothing |
+| `Persistence` | `FleetDbContext`, migrations, `PostgresFleetCoordinator` | `Fleet.Core` |
+| `Security` | Node and Operator authentication, certificates, Operator accounts, `FleetOptions` | `Http`, `Metrics`, `Persistence` |
+| `Source` | Git mirror, manifest parsing, target publishers, scan polling, `SourceSettings` | `Metrics`, `Persistence`, `Security` |
+| `AgentReleases` | Signed Agent release mirror | `Http`, `Security` |
+| `CliProxy` | Model catalog, selections, catalog sync | `Persistence`, `Security`, `Source` |
+| `Transport` | Agent routes, Operator API, issues, wire JSON | all of the above |
+| `Dashboard` | Dashboard sessions, security filters, routes | `Http`, `Persistence`, `Security`, `Source`, `Transport` |
+| `Hosting` | Service registration, middleware order, maintenance | everything; only `Program.cs` uses it |
+
+`Fleet.Core/Coordination` holds the records and rules that cross the wire.
+`IFleetCoordinator` inherits one interface per caller:
+`INodeCredentialLookup` (authentication), `IAgentProtocol` (Agent routes),
+`ISourcePublication` (scan polling), `IOperatorCommands` and
+`IOperatorQueries` (Operator API and issues), and `IPersistenceMaintenance`.
+Ask for the narrowest one. The `PostgresFleetCoordinator.*.cs` partial files
+follow the same roles. Records live in `*Models.cs` files named after those
+roles, and shared validation lives in the `*Rules` classes.
+
+### Agent (`clients/bins/fleet-agent/src`)
+
+| Module | Owns | Uses |
+| --- | --- | --- |
+| `protocol` (`protocol/wire.rs`) | HTTPS client and every JSON shape exchanged with the Server | nothing |
+| `state` | State directory, lock, atomic writes, `Config` | nothing |
+| `worker` | Detached single-slot background worker | nothing |
+| `managed` | Installed Agent versions and the `current` link | `state` |
+| `credentials` | Node key, certificate, stored identity | `protocol`, `state` |
+| `run_state` | `run.json` and its legacy migration | `protocol`, `state` |
+| `ai_client` (`catalog`, `config_file`, `adapters`) | AI client connection transactions | `protocol`, `state` |
+| `actions` | Assignment action registry (Skills, Managed files, AI clients) | `ai_client`, `protocol`, `state`, `fleet-reconcile` |
+| `detail` (`detail/redact.rs`) | Failure detail, redaction, pending detail | `actions`, `protocol`, `state` |
+| `drift`, `repair` | Drift and repair-failure reports | `protocol` (`repair` also `actions`, `detail`) |
+| `disk`, `telemetry` | Measurements and their report steps | `protocol`, `worker` (`telemetry` also `disk`, `managed`, `state`) |
+| `updater` | Self-update, signature checks, rollback | `managed`, `protocol`, `state` |
+| `service` | systemd and launchd service management | `credentials`, `managed`, `updater` |
+| `enroll`, `cli` | Enrollment command and clap types | `credentials`, `protocol`, `state`, `service` |
+| `inspect` | Read-only `status` and `check` | most modules, read-only |
+| `agent_loop` | Poll loop, cycle, side-report order | most modules |
+| `main` | Module list, argument parsing, dispatch | `agent_loop`, `cli`, `enroll`, `inspect`, `service` |
+
+`clients/crates/fleet-reconcile` keeps its public API and error table in
+`lib.rs`. `bundle` parses and validates Bundles, `observe` digests trees,
+`fsx` holds the filesystem safety checks, locks and atomic JSON writes, and
+`skills` and `managed_file` each hold one transaction with its receipt and
+journal.
+
+Three places are read as text by tests or scripts. `ErrorCode::as_str` must
+stay in `fleet-reconcile/src/lib.rs` between `impl ReconcileError` and
+`impl fmt::Display`. The `agent_update_*` literals must stay in `updater.rs`.
+`scripts/smoke-agent-update.sh` patches the line that creates the `Updater`
+in `agent_loop.rs`.
+
 ## Add an Operator command
 
 Declare its arguments and dispatch it in the commands module.

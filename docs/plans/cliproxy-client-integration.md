@@ -262,7 +262,7 @@ The main Fleet touch points are deliberately narrow:
 |---|---|
 | `server/Fleet.Server/Source` | Parse and validate the new manifest fields and build AI-client Targets. |
 | `server/Fleet.Core/Coordination` and persistence | Add the structured Assignment payload and its one-to-one persisted row. |
-| `server/Fleet.Server/Transport` and security options | Expose the authorized credential endpoint and API-key setting. |
+| `server/Fleet.Server/Transport`, `server/Fleet.Server/CliProxy` and security options | Expose the authorized credential endpoint and API-key setting. |
 | `clients/bins/fleet-agent` | Fetch the key and models, dispatch the new Target type, and maintain its refresh interval. |
 | `clients/crates/fleet-reconcile` | Apply and restore semantic Codex and OpenCode configuration transactions. |
 | homelab deployment and technical design docs | Inject the setting and record the changed security boundary. |

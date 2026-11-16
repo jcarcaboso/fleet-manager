@@ -205,11 +205,11 @@ is ignored; control characters are removed and strings are capped to the
 Server's limits before sending. A field that cannot be read is `null`, as are
 all fields on other platforms.
 
-The reads run on a second detached worker thread named `fleet-telemetry`, built
-from the disk usage worker with the same single-slot channel, 2-second wait and
-60-second stuck rule, because `getpwuid_r` can block on a hung directory
-service. The report is a side task with the 10-second request timeout and at
-most one in flight, so it never delays a poll or fails a cycle.
+The reads run on a second detached worker thread named `fleet-telemetry`. It
+uses the same `worker::Worker` as disk usage, with the same single-slot channel,
+2-second wait and 60-second stuck rule, because `getpwuid_r` can block on a
+hung directory service. The report is a side task with the 10-second request
+timeout and at most one in flight, so it never delays a poll or fails a cycle.
 
 It is sent after the first successful poll. At each following 4-hour slot, the
 disk usage schedule's, the Agent collects again and sends only if the report
