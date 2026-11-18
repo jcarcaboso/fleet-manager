@@ -8,7 +8,7 @@ import tarfile
 from pathlib import Path
 
 
-PLATFORMS = ("linux-amd64", "macos-arm64", "macos-amd64")
+PLATFORMS = ("linux-amd64", "linux-arm64", "macos-arm64", "macos-amd64")
 VERSION_RE = re.compile(r"^v?(\d+)\.(\d+)\.(\d+)$")
 
 
@@ -85,10 +85,13 @@ def formula(binary: str, version: str, repository: str, sums: dict[str, str]) ->
   end
 
   on_linux do
-    depends_on arch: :x86_64
-
-    url "{base}/{binary}-linux-amd64.tar.gz"
-    sha256 "{sums['linux-amd64']}"
+    if Hardware::CPU.arm?
+      url "{base}/{binary}-linux-arm64.tar.gz"
+      sha256 "{sums['linux-arm64']}"
+    else
+      url "{base}/{binary}-linux-amd64.tar.gz"
+      sha256 "{sums['linux-amd64']}"
+    end
   end
 
   def install

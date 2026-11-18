@@ -24,7 +24,7 @@ from pathlib import Path
 
 SCHEMA = 1
 NAME = "fleet-agent"
-PLATFORMS = (("linux", "amd64"), ("macos", "arm64"), ("macos", "amd64"))
+PLATFORMS = (("linux", "amd64"), ("linux", "arm64"), ("macos", "arm64"), ("macos", "amd64"))
 VERSION_RE = re.compile(r"^v?(\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?)$")
 COMMIT_RE = re.compile(r"^[0-9a-f]{40}$")
 # The Agent refuses larger executables; fail the release instead.

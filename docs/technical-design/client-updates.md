@@ -12,8 +12,8 @@ development or when a matching binary is unavailable. The project is not
 published to crates.io, so plain `cargo install fleet-agent` is not the project's
 installation command.
 
-Homebrew installs the same release archives on Linux amd64 and macOS. The
-repository is its own tap, so a separate tap repository is not required.
+Homebrew installs the same release archives on Linux and macOS for amd64 and
+ARM64. The repository is its own tap, so a separate tap repository is not required.
 
 [Cargo supports Git sources, tag selection, locked dependencies, and forced
 reinstallation](https://doc.rust-lang.org/cargo/commands/cargo-install.html).
@@ -66,7 +66,7 @@ the Server's own version, so upgrade the Server first.
    Agents that already run its version and Agents that did not announce the
    `agent-update` capability (0.11 and earlier).
 2. **Mirror.** On the first request for its version, the Server downloads
-   `fleet-agent-release.json`, its signature and the three archives from
+   `fleet-agent-release.json`, its signature and the archives listed in the manifest from
    `Fleet:AgentReleases:BaseUrl` (default: this repository's GitHub releases),
    verifies the signature with the trusted keys before it downloads any archive,
    extracts each `fleet-agent`, checks its digest and size against the manifest,
@@ -100,8 +100,8 @@ Server settings, under `Fleet:AgentReleases`:
 | `DownloadTimeoutSeconds` | `300` | Time limit of one mirror run. |
 
 For a Server without internet access, place the release files
-(`fleet-agent-release.json`, `fleet-agent-release.json.sig` and the three
-`fleet-agent-*.tar.gz` archives) in `<CacheDirectory>/v<version>/`, on a
+(`fleet-agent-release.json`, `fleet-agent-release.json.sig` and the
+`fleet-agent-*.tar.gz` archives listed in the manifest) in `<CacheDirectory>/v<version>/`, on a
 persistent volume, before the first request. The Server verifies them exactly
 like downloaded files and keeps the archives.
 
@@ -147,17 +147,17 @@ manifest without the real key. Creating and rotating the key is described in the
 ## Build artifacts
 
 The `Build and release client artifacts` GitHub Actions workflow prepares Linux
-amd64 static archives and native macOS Apple silicon and Intel archives. A
-manual run uploads temporary workflow artifacts for review. Pushing a semantic
+amd64 and ARM64 static archives and native macOS Apple silicon and Intel archives.
+A manual run uploads temporary workflow artifacts for review. Pushing a semantic
 version tag such as `v0.3.0` first checks that the tag matches every Cargo
 package version, then creates a GitHub release containing all archives and their
 adjacent SHA-256 files. Only the release job receives `contents: write` access.
 
-After GitHub creates the release, a separate job verifies all six downloaded
+After GitHub creates the release, a separate job verifies all eight downloaded
 archives against their checksum files and generates `Formula/fleet.rb` and
-`Formula/fleet-agent.rb`. Apple silicon and Intel macOS jobs install and run the
-tests from both generated formulas. After those tests pass, the publishing job
-checks out the current `master`, refuses to replace a newer formula, and uses a
+`Formula/fleet-agent.rb`. Native Linux and macOS jobs install and run the tests
+from both generated formulas on amd64 and ARM64. After those tests pass, the
+publishing job checks out the current `master`, refuses to replace a newer formula, and uses a
 normal push so a concurrent branch update stops the job instead of being
 overwritten. The publishing job needs `contents: write`; branch rules must allow
 GitHub Actions to make this formula-only commit.
@@ -202,7 +202,7 @@ Preparing a release does not publish it; publishing does not deploy it.
 5. Wait for the tag workflow. It publishes the GitHub release only after all
    Linux and macOS build, lint, and test jobs pass and the Agent release manifest
    is signed. It then updates the formulas from the published archive checksums.
-6. Check that the release has all six archives and six adjacent checksum files,
+6. Check that the release has all eight archives and eight adjacent checksum files,
    `fleet-agent-release.json` and a signature that verifies with a committed key,
    both formulas name the release version, and archive provenance matches the
    tagged commit. Verify downloaded checksums and the published Server and dashboard images.

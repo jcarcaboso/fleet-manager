@@ -13,7 +13,7 @@ matches the machine, or ask Cargo to build a reviewed release tag from Git.
 ## Install with Homebrew
 
 The repository is also its own Homebrew tap. After a release has published its
-Linux amd64 and macOS archives, install either command with:
+Linux and macOS archives for amd64 and ARM64, install either command with:
 
 ```sh
 brew tap jcarcaboso/fleet https://github.com/jcarcaboso/fleet-manager
@@ -24,8 +24,8 @@ fleet-agent --version
 ```
 
 Homebrew uses the prebuilt release for the current operating system and CPU.
-The formulas support Linux amd64 plus macOS 13 or newer on Apple silicon and
-Intel. They do not build Rust source or install credentials.
+The formulas support Linux on amd64 or ARM64, and macOS 13 or newer on Apple
+silicon or Intel. They do not build Rust source or install credentials.
 
 Enroll the Agent, then install its service. `fleet-agent service install`
 copies the executable into the state directory (`versions/<version>/fleet-agent`
@@ -124,6 +124,7 @@ The prepared release workflow publishes separate archives on
 `fleet-agent-linux-amd64.tar.gz`. Download an archive and its adjacent
 `.sha256` file, then run the following commands in the download directory.
 Replace `fleet` with `fleet-agent` when installing the agent archive.
+On Linux ARM64, use `linux-arm64` instead of `linux-amd64` in the filenames below.
 
 ```sh
 sha256sum --check fleet-linux-amd64.tar.gz.sha256
@@ -221,6 +222,9 @@ The build requires Docker with BuildKit support. From the repository root, run:
 ```sh
 ./scripts/build-cli.sh
 ```
+
+The script builds for the host CPU, amd64 or ARM64. Release automation runs it
+on native runners for both architectures.
 
 The script builds locked dependencies from `clients/Cargo.lock`, runs the Rust
 workspace tests, and writes both archives and their checksums under
