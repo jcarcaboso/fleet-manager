@@ -140,7 +140,7 @@ release() {
     local binary=$1 out=$2 staging
     staging=$(mktemp -d "$work/package.XXXXXX")
     mkdir -p "$out"
-    for platform in linux-amd64 macos-arm64 macos-amd64; do
+    for platform in linux-amd64 linux-arm64 macos-arm64 macos-amd64; do
         rm -rf "$staging"/*
         if [ "$platform" = linux-amd64 ]; then cp "$binary" "$staging/fleet-agent"; else
             printf '#!/bin/sh\necho "fleet-agent %s"\n' "$next" >"$staging/fleet-agent"; fi
