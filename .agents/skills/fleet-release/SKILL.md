@@ -254,9 +254,10 @@ If the tag already exists, check its peeled commit and resume the existing
 workflow instead of moving or recreating it. Never force-push release tags.
 
 Watch the tag-triggered `client-artifacts.yml` run. It signs the Agent release
-manifest, creates the GitHub release and uploads six archives plus six adjacent
+manifest, creates the GitHub release and uploads eight archives plus eight adjacent
 checksums, `fleet-agent-release.json` and its `.sig`, tests generated Homebrew
-formulas on both macOS architectures, then updates the formulas on `master`.
+formulas on Linux amd64 and ARM64 and both macOS architectures, then updates the
+formulas on `master`.
 Do not create a competing GitHub release or draft before that workflow.
 
 Verify the release assets, their checksums and `BUILD.json` provenance, the

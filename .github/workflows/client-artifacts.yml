@@ -53,9 +53,17 @@ jobs:
           PY
 
   linux:
-    name: Linux amd64 static clients
+    name: Linux ${{ matrix.arch }} static clients
     needs: version
-    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: ubuntu-24.04
+            arch: amd64
+          - runner: ubuntu-24.04-arm
+            arch: arm64
+    runs-on: ${{ matrix.runner }}
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
       - run: rustup toolchain install 1.95.0 --profile minimal --component rustfmt,clippy
@@ -67,10 +75,10 @@ jobs:
         run: ./scripts/build-cli.sh
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
-          name: clients-linux-amd64
+          name: clients-linux-${{ matrix.arch }}
           path: |
-            artifacts/fleet-linux-amd64.tar.gz*
-            artifacts/fleet-agent-linux-amd64.tar.gz*
+            artifacts/fleet-linux-${{ matrix.arch }}.tar.gz*
+            artifacts/fleet-agent-linux-${{ matrix.arch }}.tar.gz*
           if-no-files-found: error
           retention-days: 14
 
@@ -215,7 +223,7 @@ jobs:
           fi
 
   homebrew-test:
-    name: Test Homebrew formulas on macOS ${{ matrix.arch }}
+    name: Test Homebrew formulas on ${{ matrix.os }} ${{ matrix.arch }}
     if: github.ref_type == 'tag'
     needs: release
     strategy:
@@ -223,9 +231,17 @@ jobs:
       matrix:
         include:
           - runner: macos-15
+            os: macos
             arch: arm64
           - runner: macos-15-intel
+            os: macos
             arch: amd64
+          - runner: ubuntu-24.04
+            os: linux
+            arch: amd64
+          - runner: ubuntu-24.04-arm
+            os: linux
+            arch: arm64
     runs-on: ${{ matrix.runner }}
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
@@ -236,6 +252,9 @@ jobs:
           pattern: clients-*
           path: artifacts
           merge-multiple: true
+      - name: Add Homebrew to PATH on Linux
+        if: runner.os == 'Linux'
+        run: echo /home/linuxbrew/.linuxbrew/bin >> "$GITHUB_PATH"
       - name: Generate, install, and test formulas
         env:
           RELEASE_TAG: ${{ github.ref_name }}

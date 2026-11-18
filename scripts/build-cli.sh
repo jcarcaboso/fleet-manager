@@ -1,6 +1,12 @@
 #!/bin/sh
 set -eu
 
+case "$(uname -m)" in
+    x86_64|amd64) architecture=amd64 ;;
+    aarch64|arm64) architecture=arm64 ;;
+    *) printf 'Unsupported Linux architecture\n' >&2; exit 1 ;;
+esac
+
 repo_dir=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
 output_dir="$repo_dir/artifacts"
 release_commit=$(git -C "$repo_dir" rev-parse HEAD)
@@ -54,13 +60,13 @@ install -m 0644 \
     "$work_dir/context/contracts/operator/enrollment-token-response.json"
 
 docker build \
-    --platform linux/amd64 \
+    --platform "linux/$architecture" \
     --file "$work_dir/context/clients/Dockerfile.release" \
     --output "type=local,dest=$work_dir/export" \
     "$work_dir/context"
 
 for binary in fleet fleet-agent; do
-    archive_name="$binary-linux-amd64.tar.gz"
+    archive_name="$binary-linux-$architecture.tar.gz"
     package_dir="$work_dir/package/$binary"
     mkdir -p "$package_dir"
     install -m 0755 "$work_dir/export/$binary" "$package_dir/$binary"
@@ -70,8 +76,8 @@ for binary in fleet fleet-agent; do
         exit 1
     fi
     install -m 0644 "$repo_dir/LICENSE" "$package_dir/LICENSE"
-    printf '{"version":"%s","gitCommit":"%s","dirty":%s,"platform":"linux-amd64"}\n' \
-        "$binary_version" "$release_commit" "$release_dirty" > "$package_dir/BUILD.json"
+    printf '{"version":"%s","gitCommit":"%s","dirty":%s,"platform":"linux-%s"}\n' \
+        "$binary_version" "$release_commit" "$release_dirty" "$architecture" > "$package_dir/BUILD.json"
     (
         cd "$package_dir"
         sha256sum "$binary" LICENSE BUILD.json > SHA256SUMS

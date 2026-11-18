@@ -90,9 +90,9 @@ These Node actions are available in Server `0.4.0`.
 
 ## Install the clients with Homebrew
 
-This repository is also the Homebrew tap. The v0.3 release automation publishes
+This repository is also the Homebrew tap. The release automation publishes
 formulas only after all Linux and native macOS archives exist and both formulas
-pass Apple silicon and Intel Homebrew tests.
+pass Linux amd64 and ARM64, Apple silicon and Intel Homebrew tests.
 
 ```sh
 brew tap jcarcaboso/fleet https://github.com/jcarcaboso/fleet-manager
@@ -102,8 +102,8 @@ fleet --version
 fleet-agent --version
 ```
 
-The formulas install prebuilt clients for Linux amd64 and macOS 13 or newer on
-Apple silicon or Intel. Homebrew verifies the selected archive checksum. The
+The formulas install prebuilt clients for Linux on amd64 or ARM64, and macOS 13
+or newer on Apple silicon or Intel. Homebrew verifies the selected archive checksum. The
 [CLI installation guide](docs/technical-design/cli-installation.md) also covers
 direct archives and Cargo builds from a release tag.
 
