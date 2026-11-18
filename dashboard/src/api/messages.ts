@@ -39,7 +39,7 @@ export const MESSAGES: Readonly<Record<string, string>> = {
   agent_release_unavailable: 'The Server could not get the Agent release. It may not be published yet.',
   agent_release_invalid: 'The Agent release failed verification. The Server did not keep it.',
   pinned_model_excluded:
-    'A pinned default model cannot be excluded. Keep it selected, change the pinned default, or turn off the Claude restriction for other clients.',
+    'A pinned default model cannot be excluded. Keep it selected and published to its assigned client, or change the pinned default.',
 };
 
 /** Shown when a login succeeded but the next call carries no session: the browser dropped the `SameSite=Strict` cookie. */

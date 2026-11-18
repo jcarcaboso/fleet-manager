@@ -10,8 +10,9 @@
  */
 import type {
   AgentUpdate, AssignmentState, CatalogSelection, CliProxyStatus, CommitInfo, DiskVolume, Issue, NodeAgent, NodeAttempt, NodeDetail, NodeDisk, NodeListItem, NodeTarget,
-  RolloutDetail, Scope, SelectionPolicy,
+  ModelClient, RolloutDetail, Scope, SelectionPolicy,
 } from '../types';
+import { allModelClients, allRoutingGroups, routedClients, routingGroup } from '../modelRouting';
 import { ANCHOR, buildDataset, type DataAttempt, type DataCatalog, type DataCatalogModel, type DataLink, type DataNode, type DataRevision, type DataRollout, type DataTarget, type Dataset } from './dataset';
 import { bindBody, shapeFor } from './bind';
 import { defaultMockOptions, type MockOptions } from './options';
@@ -1251,7 +1252,10 @@ export function createMockServer(overrides: Partial<MockOptions> = {}): MockServ
       if (typeof body.baseUrl !== 'string' || !body.baseUrl.trim() || body.baseUrl.length > 2048 || !p || (body.version ?? 0) < 0
         || !Array.isArray(p.disabledFamilies) || !Array.isArray(p.enabledFamilies) || !p.modelOverrides || typeof p.modelOverrides !== 'object'
         || !p.disabledFamilies.every(id) || !p.enabledFamilies.every(id) || p.disabledFamilies.some((k: string) => p.enabledFamilies.includes(k))
-        || !Object.keys(p.modelOverrides).every(id)) return invalid();
+        || !Object.keys(p.modelOverrides).every(id)
+        || (p.clientRouting && Object.entries(p.clientRouting).some(([key, clients]) =>
+          !allRoutingGroups.some(group => group === key) || !Array.isArray(clients) || !clients.length
+          || clients.some(client => !allModelClients.includes(client)) || new Set(clients).size !== clients.length))) return invalid();
       const c = catalogs.find(x => x.baseUrl === body.baseUrl);
       if (!c) return err(404, 'catalog_unavailable', 'No model catalog is available for that proxy yet.');
       const en = new Set<string>(p.enabledFamilies);
@@ -1261,10 +1265,11 @@ export function createMockServer(overrides: Partial<MockOptions> = {}): MockServ
         if (!en.has(k) && !dis.has(k)) (p.includeNew ? en : dis).add(k);
       }
       const saved: SelectionPolicy = { ...p, enabledFamilies: [...en].sort(), disabledFamilies: [...dis].sort(), skipClaudeModelsForOtherClients: p.skipClaudeModelsForOtherClients !== false };
+      saved.clientRouting = saved.clientRouting ?? policyFor(c).clientRouting;
       const pinned = nodes.flatMap(n => n.targets).filter(t => t.aiClient?.mode === 'cliproxy' && t.aiClient.baseUrl === c.baseUrl && t.aiClient.model)
-        .filter(t => (saved.skipClaudeModelsForOtherClients && t.aiClient!.client !== 'claude' && /^claude-/i.test(t.aiClient!.model!))
+        .filter(t => !routedClients(saved, routingGroup(t.aiClient!.model!)).includes(t.aiClient!.client as ModelClient)
           || c.models.some(mm => mm.id === t.aiClient!.model && !selected(saved, mm))).map(t => t.aiClient!.model);
-      if (pinned.length) return json({ code: 'pinned_model_excluded', message: 'The selection excludes a model that a Node is assigned.', models: [...new Set(pinned)] }, 409);
+      if (pinned.length) return json({ code: 'pinned_model_excluded', message: 'A model pinned in fleet.yml must stay selected and available to its assigned client.', models: [...new Set(pinned)] }, 409);
       if (!c.models.some(mm => selected(saved, mm))) return invalid();
       if ((body.version ?? 0) !== c.version) return err(409, 'stale_selection', 'The selection changed since it was loaded. Reload it and try again.');
       policies.set(c.baseUrl, saved);

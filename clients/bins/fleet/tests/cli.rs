@@ -585,7 +585,8 @@ fn selection_json() -> String {
         "policy": {
             "includeNew": true, "disabledFamilies": ["gemini"], "enabledFamilies": ["gpt-5"],
             "modelOverrides": {"gpt-5-codex": false, "claude-x": true},
-            "skipClaudeModelsForOtherClients": true
+            "skipClaudeModelsForOtherClients": true,
+            "clientRouting": {"claude": ["claude", "opencode"], "other": ["codex", "opencode"]}
         },
         "version": 4
     }]})
@@ -636,7 +637,8 @@ fn models_select_applies_changes_to_the_current_policy_with_its_version() {
                 "disabledFamilies": ["claude"],
                 "enabledFamilies": ["gemini", "gpt-5"],
                 "modelOverrides": {"gpt-5-codex": false, "gpt-5.1": false},
-                "skipClaudeModelsForOtherClients": true
+                "skipClaudeModelsForOtherClients": true,
+                "clientRouting": {"claude": ["claude", "opencode"], "other": ["codex", "opencode"]}
             }
         })
     );

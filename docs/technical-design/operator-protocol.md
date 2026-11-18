@@ -203,14 +203,22 @@ caller supplies the version it read (`stale_selection`, HTTP 409, otherwise). Th
 CLI therefore reads `GET cliproxy/selection`, applies the flags on top of the
 current policy, and posts `{"baseUrl", "version", "policy": {"includeNew",
 "disabledFamilies", "enabledFamilies", "modelOverrides",
-"skipClaudeModelsForOtherClients"}}`.
+"skipClaudeModelsForOtherClients", "clientRouting?"}}`.
+
+Use the dashboard to set routes, or send `clientRouting` as a map from `claude`,
+`gpt`, or `other` to one or more distinct client IDs (`claude`, `codex`,
+`opencode`). This map replaces all explicit routes. Omit it to keep existing
+overrides; send `{}` to clear them. The
+defaults are Claude Code for `claude`, Codex and OpenCode for `gpt`, and OpenCode
+for `other`. The legacy skip flag still determines the Claude route when it has
+no explicit override.
 
 | Flag | Effect |
 |---|---|
 | `--base-url URL` | Catalog to edit. Optional when exactly one catalog exists |
 | `--selection-version N` | Replace this version instead of the one just read |
 | `--include-new true\|false` | Policy `includeNew` |
-| `--skip-claude-models-for-other-clients true\|false` | Policy flag of the same name |
+| `--skip-claude-models-for-other-clients true\|false` | Route Claude models to Claude Code only or to all clients. Replaces only the Claude route |
 | `--enable-family F`, `--disable-family F` | Move a family between `enabledFamilies` and `disabledFamilies` (repeatable) |
 | `--enable-model M`, `--disable-model M` | Set `modelOverrides[M]` to true or false (repeatable) |
 | `--clear-model-override M` | Remove `modelOverrides[M]` (repeatable) |

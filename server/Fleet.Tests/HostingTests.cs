@@ -546,6 +546,13 @@ public sealed class HostingTests : IAsyncLifetime
             Assert.Equal(872000, catalog.GetProperty("models")[0].GetProperty("maxContextWindow").GetInt64());
             Assert.Equal(200000, catalog.GetProperty("models")[0].GetProperty("autoCompactTokenLimit").GetInt64());
             Assert.False(catalog.GetProperty("skipClaudeModelsForOtherClients").GetBoolean());
+            Assert.False(catalog.TryGetProperty("clientRouting", out _));
+            var routed = await SendNodeAsync($"{route}?clientRouting=true", assigned.Certificate, method: "GET");
+            Assert.Equal(200, routed.Response.StatusCode);
+            var routing = (await JsonSerializer.DeserializeAsync<JsonElement>(routed.Response.Body)).GetProperty("clientRouting");
+            Assert.Equal(["claude", "codex", "opencode"], routing.GetProperty("claude").Deserialize<string[]>()!);
+            Assert.Equal(["codex", "opencode"], routing.GetProperty("gpt").Deserialize<string[]>()!);
+            Assert.Equal(["opencode"], routing.GetProperty("other").Deserialize<string[]>()!);
         }
         Assert.Equal("no-store", allowed.Response.Headers.CacheControl.ToString());
         Assert.Equal(403, (await SendNodeAsync(route, unassigned.Certificate, method: "GET")).Response.StatusCode);
@@ -577,18 +584,20 @@ public sealed class HostingTests : IAsyncLifetime
     }
 
     [Theory]
-    [InlineData("codex", ".codex", 409)]
-    [InlineData("opencode", ".config/opencode", 409)]
-    [InlineData("claude", ".claude", 200)]
-    public async Task Claude_restriction_checks_pinned_models_for_the_assigned_client(string client, string path, int expectedStatus)
+    [InlineData("codex", ".codex", "ClAuDe-one", "claude", 409)]
+    [InlineData("opencode", ".config/opencode", "ClAuDe-one", "claude", 409)]
+    [InlineData("claude", ".claude", "ClAuDe-one", "claude", 200)]
+    [InlineData("claude", ".claude", "GpT-one", "gpt", 409)]
+    [InlineData("codex", ".codex", "gemini-one", "other", 409)]
+    public async Task Routing_checks_pinned_models_for_the_assigned_client(string client, string path, string model, string group, int expectedStatus)
     {
         var node = await EnrollNode("claude-policy");
         using var scope = _factory.Services.CreateScope();
         await scope.ServiceProvider.GetRequiredService<IFleetCoordinator>().AcceptSourceSnapshotAsync(new(
             "claude-pin", [], [new(node.NodeId, $"ai-client/{client}", new("home", path), [],
-                AiClient: new("fleet.ai-client/v1", client, "cliproxy", "https://proxy.example/v1", "ClAuDe-one"))],
+                AiClient: new("fleet.ai-client/v1", client, "cliproxy", "https://proxy.example/v1", model))],
             [], DateTimeOffset.UtcNow));
-        _proxyHandler.Body = """{"data":[{"id":"gpt-one"},{"id":"ClAuDe-one"}]}""";
+        _proxyHandler.Body = """{"data":[{"id":"GpT-one"},{"id":"ClAuDe-one"},{"id":"gemini-one"}]}""";
         (await _operator.PostAsync("/operator/v1/cliproxy/refresh", null)).EnsureSuccessStatusCode();
         var store = scope.ServiceProvider.GetRequiredService<CliProxySelectionStore>();
         var policy = new CliProxySelectionPolicy(true, [], new(StringComparer.Ordinal), []);
@@ -597,7 +606,7 @@ public sealed class HostingTests : IAsyncLifetime
         if (expectedStatus == 409)
             Assert.Equal("pinned_model_excluded", JsonSerializer.SerializeToElement(result.Body).GetProperty("code").GetString());
         Assert.Equal(200, (await store.SaveAsync("https://proxy.example/v1", expectedStatus == 200 ? 1 : 0,
-            policy with { SkipClaudeModelsForOtherClients = false }, default)).Status);
+            policy with { ClientRouting = new() { [group] = [client] } }, default)).Status);
     }
 
     [Fact]

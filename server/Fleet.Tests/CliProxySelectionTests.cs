@@ -97,6 +97,41 @@ public sealed class CliProxySelectionTests : IAsyncLifetime
     }
 
     [Fact]
+    public async Task Routing_overrides_survive_a_legacy_operator_write_and_can_be_reset()
+    {
+        upstream.Body = """{"data":[{"id":"gpt-one"},{"id":"claude-one"},{"id":"gemini-one"}]}""";
+        var catalog = NewCatalog();
+        await catalog.SyncAsync([BaseUrl], true, default);
+        await using var db = Database();
+        var store = new CliProxySelectionStore(db, catalog);
+        var legacy = new CliProxySelectionPolicy(true, [], new(StringComparer.Ordinal), [], SkipClaudeModelsForOtherClients: false);
+
+        foreach (var invalid in new Dictionary<string, string[]>[]
+        {
+            new() { ["gemini"] = ["codex"] },
+            new() { ["gpt"] = ["unknown"] },
+            new() { ["other"] = [] },
+            new() { ["other"] = ["codex", "codex"] }
+        })
+            Assert.Equal(400, (await store.SaveAsync(BaseUrl, 0, legacy with { ClientRouting = invalid }, default)).Status);
+
+        Assert.Equal(200, (await store.SaveAsync(BaseUrl, 0, legacy with
+        {
+            ClientRouting = new() { ["claude"] = ["claude", "opencode"], ["other"] = ["claude", "opencode"] }
+        }, default)).Status);
+        Assert.Equal(200, (await store.SaveAsync(BaseUrl, 1, legacy, default)).Status);
+        var selected = (await store.GetSelectedCatalogAsync(BaseUrl, default, includeRouting: true))!;
+        Assert.Equal(["claude", "opencode"], selected.ClientRouting!["claude"]);
+        Assert.Equal(["claude", "opencode"], selected.ClientRouting!["other"]);
+        Assert.True(selected.SkipClaudeModelsForOtherClients);
+
+        Assert.Equal(200, (await store.SaveAsync(BaseUrl, 2, legacy with { ClientRouting = new() }, default)).Status);
+        selected = (await store.GetSelectedCatalogAsync(BaseUrl, default, includeRouting: true))!;
+        Assert.Equal(["claude", "codex", "opencode"], selected.ClientRouting!["claude"]);
+        Assert.Equal(["opencode"], selected.ClientRouting!["other"]);
+    }
+
+    [Fact]
     public async Task Stale_writes_and_zero_selection_are_rejected()
     {
         upstream.Body = """{"data":[{"id":"gpt-6-codex"},{"id":"claude-opus-4-1"}]}""";

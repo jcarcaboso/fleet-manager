@@ -84,14 +84,17 @@ server.serve_forever()
 
     def catalog(model, efforts):
         path = root / 'catalog.next'
-        path.write_text(json.dumps({'models': [{'slug': model, 'supported_reasoning_levels': [{'effort': effort} for effort in efforts]}]}))
+        path.write_text(json.dumps({'models': [
+            {'slug': model, 'supported_reasoning_levels': [{'effort': effort} for effort in efforts]},
+            {'slug': 'gemini-smoke'},
+        ]}))
         path.replace(root / 'catalog.json')
 
     def requests():
         path = root / 'requests'
         return int(path.read_text() or '0') if path.exists() else 0
 
-    catalog('model-one', ['low', 'high'])
+    catalog('gpt-model-one', ['low', 'high'])
     operator_env = {}
     for line in (root / 'operator.env').read_text().splitlines():
         name, value = line.removeprefix('export ').split('=', 1)
@@ -177,7 +180,7 @@ nodes:
             assert '// Keep this comment' in text
             opencode = json.loads('\n'.join(line for line in text.splitlines() if not line.strip().startswith('//')))
             entries = opencode['provider']['fleet-cliproxy']['models']
-            assert list(entries) == [model]
+            assert set(entries) == {model, 'gemini-smoke'}
             assert list(entries[model]['variants']) == efforts
             assert opencode['model'] == 'fleet-cliproxy/' + model
             assert not (config.parent / 'opencode.json').exists(), 'Wrote lower-priority OpenCode configuration'
@@ -197,7 +200,7 @@ nodes:
         wait_for(lambda: requests() >= 1, 'initial discovery without an Agent model request')
         failed = subprocess.run([str(agent_binary), '--state-dir', str(state), 'run', '--once'], capture_output=True, text=True, timeout=90)
         assert failed.returncode != 0, 'Initial unavailable catalog unexpectedly succeeded'
-        catalog('model-one', ['low', 'high'])
+        catalog('gpt-model-one', ['low', 'high'])
         api('cliproxy/refresh', {})
         def recovered():
             result = subprocess.run([str(agent_binary), '--state-dir', str(state), 'run', '--once'], capture_output=True, text=True, timeout=90)
@@ -205,24 +208,24 @@ nodes:
                 return False
             return 'fleet-cliproxy' in (home / '.codex/config.toml').read_text() and 'fleet-cliproxy' in config.read_text()
         wait_for(recovered, 'failed initial assignment retries without a source commit', timeout=100)
-        check_clients('model-one', ['low', 'high'])
+        check_clients('gpt-model-one', ['low', 'high'])
         revision = run('git', '-C', str(source), 'rev-parse', 'HEAD')
         assignments = api('desired-revisions')
         count = requests()
-        catalog('model-two', ['medium', 'xhigh'])
+        catalog('gpt-model-two', ['medium', 'xhigh'])
         wait_for(lambda: requests() > count, 'scheduled discovery while Agent is stopped')
         agent('run', '--once')
-        check_clients('model-two', ['medium', 'xhigh'])
+        check_clients('gpt-model-two', ['medium', 'xhigh'])
         assert api('desired-revisions') == assignments, 'Model refresh published a repository revision'
         assert run('git', '-C', str(source), 'rev-parse', 'HEAD') == revision
-        catalog('model-three', ['high'])
+        catalog('gpt-model-three', ['high'])
         api('cliproxy/refresh', {})
         agent('run', '--once')
-        check_clients('model-three', ['high'])
+        check_clients('gpt-model-three', ['high'])
         (root / 'catalog.json').write_text('{"models":[]}')
         api('cliproxy/refresh', {})
         agent('run', '--once')
-        check_clients('model-three', ['high'])
+        check_clients('gpt-model-three', ['high'])
         publish('native')
         agent('run', '--once')
         check_native()

@@ -21,6 +21,21 @@ fn helper(key_path: &str) -> String {
     format!("cat '{}'", key_path.replace('\'', "'\\''"))
 }
 
+fn model_picker(models: &[String]) -> Value {
+    serde_json::json!({
+        "options": models.iter().map(|id| serde_json::json!({ "value": id })).collect::<Vec<_>>(),
+        "replaceBuiltInOptions": true,
+    })
+}
+
+fn restore_value(root: &mut Map<String, Value>, key: &str, original: Option<Value>) {
+    if let Some(value) = original {
+        root.insert(key.to_owned(), value);
+    } else {
+        root.remove(key);
+    }
+}
+
 /// Whether the Fleet-owned settings still hold what Fleet wrote.
 fn owned_settings_match(settings: &Map<String, Value>, receipt: &Receipt) -> bool {
     settings.get("apiKeyHelper") == Some(&Value::String(helper(&receipt.expected_key_path)))
@@ -30,6 +45,8 @@ fn owned_settings_match(settings: &Map<String, Value>, receipt: &Receipt) -> boo
             == Some(&Value::String(receipt.expected_base_url.clone()))
         && (receipt.automatic_model
             || settings.get("model") == Some(&Value::String(receipt.expected_model.clone())))
+        && (!receipt.original_settings.contains_key("modelPicker")
+            || settings.get("modelPicker") == Some(&model_picker(&receipt.expected_models)))
 }
 
 /// The settings to restore when Fleet finds no receipt. When `apiKeyHelper` is
@@ -92,6 +109,7 @@ pub(in crate::ai_client) fn render_claude(
     model: Option<&str>,
     models: &[String],
     key_path: &Path,
+    use_model_picker: bool,
 ) -> Result<Rendered> {
     let mut root = settings(old)?;
     let drifted = match previous {
@@ -132,10 +150,18 @@ pub(in crate::ai_client) fn render_claude(
         .to_str()
         .context("Claude key path is not UTF-8")?
         .to_owned();
-    let original_settings = match previous {
+    let mut original_settings = match previous {
         Some(receipt) => receipt.original_settings.clone(),
         None => unowned_originals(&root, &key_path),
     };
+    if use_model_picker {
+        original_settings
+            .entry("modelPicker".to_owned())
+            .or_insert_with(|| root.get("modelPicker").cloned());
+        root.insert("modelPicker".to_owned(), model_picker(models));
+    } else if let Some(original) = original_settings.remove("modelPicker") {
+        restore_value(&mut root, "modelPicker", original);
+    }
     env.insert("ANTHROPIC_BASE_URL".to_owned(), base_url.clone().into());
     root.insert("env".to_owned(), env.into());
     root.insert("apiKeyHelper".to_owned(), helper(&key_path).into());
@@ -175,14 +201,9 @@ pub(in crate::ai_client) fn restore_claude(
             bail!("invalid Claude settings receipt");
         }
     }
-    for key in ["apiKeyHelper", "model"] {
-        match &receipt.original_settings[key] {
-            Some(value) => {
-                root.insert(key.to_owned(), value.clone());
-            }
-            None => {
-                root.remove(key);
-            }
+    for key in ["apiKeyHelper", "model", "modelPicker"] {
+        if let Some(original) = receipt.original_settings.get(key) {
+            restore_value(&mut root, key, original.clone());
         }
     }
     let base_url = &receipt.original_settings["baseUrl"];
@@ -224,6 +245,7 @@ mod tests {
             model,
             &["claude-one".to_owned(), "claude-two".to_owned()],
             Path::new("/private/fleet's key"),
+            false,
         )
         .unwrap();
         (rendered.bytes, rendered.receipt)
@@ -269,7 +291,8 @@ mod tests {
                 "https://proxy.example/v1",
                 None,
                 &["claude-one".to_owned()],
-                Path::new("/key")
+                Path::new("/key"),
+                false,
             )
             .is_err()
         );
@@ -294,6 +317,7 @@ mod tests {
             Some("claude-one"),
             &["claude-one".to_owned()],
             Path::new("/private/fleet's key"),
+            false,
         )
         .unwrap();
         assert!(rendered.drifted);

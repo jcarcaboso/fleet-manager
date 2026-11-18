@@ -1,4 +1,5 @@
 import type { CatalogSelection, SelectionModel, SelectionPolicy } from '@/api/types';
+import { allRoutingGroups, routedClients } from '@/api/modelRouting';
 import { plural } from '@/lib/format';
 
 /** Policy logic of the Models page: the same rules as the Server's selection (ported from view-models.js). */
@@ -24,7 +25,7 @@ export const effective = (policy: SelectionPolicy, model: Pick<SelectionModel, '
 
 export const snapshot = (p: SelectionPolicy): string => JSON.stringify({
   includeNew: p.includeNew,
-  skip: p.skipClaudeModelsForOtherClients,
+  routing: allRoutingGroups.map(group => [...routedClients(p, group)].sort()),
   en: [...p.enabledFamilies].sort(),
   dis: [...p.disabledFamilies].sort(),
   ov: Object.fromEntries(Object.entries(p.modelOverrides).sort(([a], [b]) => a.localeCompare(b))),
@@ -33,6 +34,7 @@ export const snapshot = (p: SelectionPolicy): string => JSON.stringify({
 export const normPolicy = (p: Partial<SelectionPolicy>): SelectionPolicy => ({
   includeNew: !!p.includeNew,
   skipClaudeModelsForOtherClients: p.skipClaudeModelsForOtherClients ?? true,
+  clientRouting: p.clientRouting ?? undefined,
   enabledFamilies: [...(p.enabledFamilies || [])],
   disabledFamilies: [...(p.disabledFamilies || [])],
   modelOverrides: { ...(p.modelOverrides || {}) },
@@ -64,10 +66,15 @@ export function preserveVisible(e: SelectionEntry): void {
   e.policy.disabledFamilies = [...dis];
 }
 
-/** How many settings differ from the saved policy: the two switches plus every model whose effective state changed. */
+/** Count the default, each changed route, and each model whose effective state changed. */
 export function changedCount(e: SelectionEntry): number {
   const old = JSON.parse(e.saved) as SelectionPolicy;
-  let d = Number(old.includeNew !== e.policy.includeNew) + Number(old.skipClaudeModelsForOtherClients !== e.policy.skipClaudeModelsForOtherClients);
+  let d = Number(old.includeNew !== e.policy.includeNew);
+  for (const group of allRoutingGroups) {
+    const before = routedClients(old, group);
+    const after = routedClients(e.policy, group);
+    if (before.length !== after.length || before.some(client => !after.includes(client))) d++;
+  }
   for (const m of e.models) if (effective(old, m) !== effective(e.policy, m)) d++;
   return d;
 }

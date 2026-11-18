@@ -58,6 +58,11 @@ The bearer API key accepted by CLIProxyAPI. It is distinct from Node, Operator,
 and AI-client OAuth credentials and must not enter the source repository.
 _Avoid_: Node credential, API key
 
+**Model routing**:
+The choice of which AI clients receive a group of selected CLIProxy models.
+Each proxy has its own routes.
+_Avoid_: Proxy authorization
+
 **Agent source**:
 A named `agents/<source>/AGENTS.md` file discovered from the canonical source
 repository and selected by a Node's desired state.

@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { computed, ref, shallowRef } from 'vue';
-import type { CatalogStatus, CliProxySelectionResponse, CliProxyStatus, PinnedModelExcludedBody, SaveSelectionResponse } from '@/api/types';
+import { allModelClients, allRoutingGroups, modelClients, routedClients, routingGroup, routingGroups } from '@/api/modelRouting';
+import type { CatalogStatus, CliProxySelectionResponse, CliProxyStatus, ModelClient, ModelRoutingGroup, PinnedModelExcludedBody, SaveSelectionResponse } from '@/api/types';
 import EmptyState from '@/components/EmptyState.vue';
 import ErrorState from '@/components/ErrorState.vue';
 import Icon from '@/components/Icon.vue';
@@ -73,6 +74,14 @@ registerModelsPage(() => { void load.run({ quiet: true }); });
 
 const cur = computed(() => Math.min(tab.value, Math.max(0, sel.value.length - 1)));
 const entry = computed(() => sel.value[cur.value]);
+const groups = computed(() => {
+  const current = entry.value;
+  if (!current) return [];
+  return allRoutingGroups.map(key => ({
+    key, label: routingGroups[key], clients: routedClients(current.policy, key),
+    families: families({ models: current.models.filter(model => routingGroup(model.id) === key) }),
+  })).filter(group => group.families.length);
+});
 const cats = computed(() => status.value?.catalogs ?? []);
 const refreshing = computed(() => shared.refreshing);
 
@@ -81,13 +90,20 @@ const lastOld = (c: CatalogStatus): string | null => (c.lastSuccess ? span(now()
 
 /* ------------------------------------------------------------------ editor */
 const off = computed(() => !session.can('operate') || saving.value);
-function toggleFlag(flag: 'includeNew' | 'skipClaudeModelsForOtherClients'): void {
+function toggleIncludeNew(): void {
   const e = entry.value;
   if (!e) return;
-  if (flag === 'includeNew') {
-    preserveVisible(e);
-    e.policy.includeNew = !e.policy.includeNew;
-  } else e.policy.skipClaudeModelsForOtherClients = !e.policy.skipClaudeModelsForOtherClients;
+  preserveVisible(e);
+  e.policy.includeNew = !e.policy.includeNew;
+}
+function setRoute(group: ModelRoutingGroup, clients: readonly ModelClient[]): void {
+  const e = entry.value;
+  if (e && clients.length) e.policy.clientRouting = { ...e.policy.clientRouting, [group]: [...clients] };
+}
+function toggleClient(group: ModelRoutingGroup, client: ModelClient): void {
+  if (!entry.value) return;
+  const clients = routedClients(entry.value.policy, group);
+  setRoute(group, clients.includes(client) ? clients.filter(item => item !== client) : [...clients, client]);
 }
 function toggleFamily(key: string): void {
   const e = entry.value;
@@ -226,7 +242,7 @@ async function refreshModels(): Promise<void> {
       </div>
       <section class="panel">
         <header class="panel-head row">
-          <div><h2>Model selection</h2><p>Choose which models Fleet sends to assigned Agents. Each proxy address has its own selection. Models pinned in fleet.yml cannot be excluded.</p></div>
+          <div><h2>Model selection</h2><p>Choose which models Fleet publishes to each AI client. Each proxy has its own settings. Models pinned in fleet.yml must stay available to their assigned client.</p></div>
           <div v-if="sel.length > 1" class="seg-ctl" role="group" aria-label="Catalog">
             <button v-for="(e, k) in sel" :key="e.baseUrl" type="button" data-act="sel-tab" :data-v="k" :aria-pressed="k === cur" @click="tab = k">{{ hostOf(e.baseUrl) }}<span v-if="isDirty(e)" class="dirty-dot" aria-label="unsaved changes"></span></button>
           </div>
@@ -236,30 +252,37 @@ async function refreshModels(): Promise<void> {
         <template v-if="entry">
           <div class="sel-opts">
             <div class="opt">
-              <button type="button" role="switch" class="switch" :aria-checked="entry.policy.skipClaudeModelsForOtherClients" data-act="sel-flag" data-flag="skipClaudeModelsForOtherClients" :disabled="off" aria-label="Skip Claude models for other clients" @click="toggleFlag('skipClaudeModelsForOtherClients')"><span></span></button>
-              <div><b>Skip Claude models for other clients</b><p>Codex and OpenCode skip Claude models. Claude Code can still use the selected Claude models.</p></div>
-            </div>
-            <div class="opt">
-              <button type="button" role="switch" class="switch" :aria-checked="entry.policy.includeNew" data-act="sel-flag" data-flag="includeNew" :disabled="off" aria-label="Enable newly discovered families by default" @click="toggleFlag('includeNew')"><span></span></button>
+              <button type="button" role="switch" class="switch" :aria-checked="entry.policy.includeNew" data-act="sel-flag" data-flag="includeNew" :disabled="off" aria-label="Enable newly discovered families by default" @click="toggleIncludeNew()"><span></span></button>
               <div><b>Enable newly discovered families by default</b><p>New models in an enabled family follow its switch. Only families first discovered later use this default.</p></div>
             </div>
           </div>
-          <div class="fams">
-            <fieldset v-for="f in families(entry)" :key="f.key" class="fam">
-              <legend class="sr">{{ f.label }} models</legend>
-              <div class="fam-head">
-                <span class="fam-name">{{ f.label }}</span>
-                <span class="muted small">{{ f.models.filter(m => effective(entry!.policy, m)).length }} of {{ f.models.length }} selected</span>
-                <button type="button" role="switch" class="switch" :aria-checked="familyBase(entry.policy, f.key)" data-act="sel-fam" :data-fam="f.key" :disabled="off" :aria-label="`Sync ${f.label} models`" @click="toggleFamily(f.key)"><span></span></button>
-              </div>
-              <ul class="models">
-                <li v-for="m in f.models" :key="m.id">
-                  <label class="model-check"><input type="checkbox" :data-sel-model="m.id" :data-fam="f.key" :checked="effective(entry.policy, m)" :disabled="off" @change="toggleModel(f.key, m.id, ($event.target as HTMLInputElement).checked)"><span class="mono">{{ m.id }}</span></label>
-                  <span v-if="(m.reasoningLevels || []).length" class="levels" aria-label="Reasoning levels"><span v-for="r in m.reasoningLevels" :key="r" class="lvl">{{ r }}</span></span>
-                </li>
-              </ul>
-            </fieldset>
-          </div>
+          <section v-for="group in groups" :key="group.key" class="model-group" :aria-label="group.label">
+            <h3>{{ group.label }}</h3>
+            <div class="model-routes" role="group" :aria-label="`Publish ${group.label.toLowerCase()} to`">
+              <span class="muted small">Publish to</span>
+              <label v-for="client in allModelClients" :key="client" class="model-check">
+                <input type="checkbox" :value="client" :checked="group.clients.includes(client)" :disabled="off || (group.clients.length === 1 && group.clients.includes(client))" @change="toggleClient(group.key, client)">
+                <span>{{ modelClients[client] }}</span>
+              </label>
+              <button type="button" class="btn btn-secondary btn-sm" :disabled="off || group.clients.length === allModelClients.length" @click="setRoute(group.key, allModelClients)">Publish to all</button>
+            </div>
+            <div class="fams">
+              <fieldset v-for="f in group.families" :key="f.key" class="fam">
+                <legend class="sr">{{ f.label }} models</legend>
+                <div class="fam-head">
+                  <span class="fam-name">{{ f.label }}</span>
+                  <span class="muted small">{{ f.models.filter(m => effective(entry!.policy, m)).length }} of {{ f.models.length }} selected</span>
+                  <button type="button" role="switch" class="switch" :aria-checked="familyBase(entry.policy, f.key)" data-act="sel-fam" :data-fam="f.key" :disabled="off" :aria-label="`Sync ${f.label} models`" @click="toggleFamily(f.key)"><span></span></button>
+                </div>
+                <ul class="models">
+                  <li v-for="m in f.models" :key="m.id">
+                    <label class="model-check"><input type="checkbox" :data-sel-model="m.id" :data-fam="f.key" :checked="effective(entry.policy, m)" :disabled="off" @change="toggleModel(f.key, m.id, ($event.target as HTMLInputElement).checked)"><span class="mono">{{ m.id }}</span></label>
+                    <span v-if="(m.reasoningLevels || []).length" class="levels" aria-label="Reasoning levels"><span v-for="r in m.reasoningLevels" :key="r" class="lvl">{{ r }}</span></span>
+                  </li>
+                </ul>
+              </fieldset>
+            </div>
+          </section>
           <div class="sel-bar" :class="{ 'is-dirty': isDirty(entry) }" role="status">
             <span>{{ isDirty(entry) ? unsavedText(entry, hostOf(entry.baseUrl)) : 'All changes saved' }}</span>
             <button type="button" class="btn btn-secondary btn-sm" data-act="sel-reset" :disabled="!isDirty(entry) || saving" @click="reset()">Reset</button>

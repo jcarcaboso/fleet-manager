@@ -55,7 +55,8 @@ The Server also keeps the source's endpoint in memory and reads it again from
 the repository scan at startup. Until that scan succeeds, only assigned
 endpoints have a catalog.
 Assigned Nodes retrieve the cached catalog from
-`GET /agent/v1/cliproxy/models` over mTLS during their normal reconciliation.
+`GET /agent/v1/cliproxy/models?clientRouting=true` over mTLS during their normal
+reconciliation. Older Agents request the endpoint without the routing flag.
 Catalog changes do not require a YAML commit. The response includes the endpoint
 so an Agent cannot apply a catalog from a different Assignment.
 
@@ -98,11 +99,12 @@ This setting belongs to Server configuration, not `fleet.yml`.
 
 The dashboard has a separate **Refresh models** action and displays model counts,
 last successful refresh, next refresh, and failures. The **Model selection** panel
-groups the current catalog by model family for each proxy endpoint. Operators can
-turn off a family or individual models, then save the selection. Fleet persists the
+groups the current catalog by model family and AI client for each proxy endpoint.
+Operators can turn off a family or individual models, change which clients get
+each group, then save the selection. Fleet persists the
 selection on the Server and sends only selected models to assigned Agents on their
 next poll. At least one model must remain selected; a model pinned as a client's
-default in `fleet.yml` cannot be excluded while that Assignment is current.
+default in `fleet.yml` must stay selected and routed to its assigned client.
 
 Selections follow the live catalog rather than a fixed model list. A new model in
 an existing family inherits that family's setting unless it has an individual
@@ -157,16 +159,29 @@ omitted, Fleet keeps the locally selected proxy model if available, otherwise
 selects the first advertised model. Users can change the selection without a
 Fleet ownership conflict. Reasoning effort selection remains local to the client.
 
-The **Skip Claude models for other clients** checkbox in Model selection is
-checked by default. When enabled, the Agent filters models with a
-case-insensitive `claude-` prefix out of Codex and OpenCode catalogs before
-choosing a default. Claude Code still receives the selected Workspace catalog.
-Uncheck it and save to allow Claude models in every client. The setting is saved
-per proxy endpoint and cached by Agents for offline use. Saving cannot exclude a
-pinned Claude default in another client; change the default or leave the
-checkbox unchecked. If filtering leaves no allowed models, reconciliation fails
-and preserves the previous configuration. Upgrade Server and Agents together
-for the new catalog policy field.
+Model routing has three groups, matched by case-insensitive model ID prefixes:
+
+| Group | Default clients |
+|---|---|
+| Claude (`claude-`) | Claude Code |
+| GPT (`gpt-`) | Codex and OpenCode |
+| Other (all remaining IDs) | OpenCode |
+
+Use the client checkboxes to change a group's destinations, or **Publish to all**
+to select every client. Models still need to be selected within the group.
+A saved setting that previously shared Claude models continues to share those
+models unless the Claude route is edited. Agents cache routing with the model
+catalog for offline use. If a client has no eligible models, reconciliation
+reports an error and keeps its previous settings.
+
+Upgrade both Server and Agents to apply these routes. Before upgrading, check
+for `fleet.yml` pins that need a non-default route. Older Agents still use the
+legacy catalog behavior. Claude Code 2.1.242 and later can show the routed
+models in `/model` through Fleet's managed `modelPicker` setting. Older Claude
+Code versions receive the routed default but not the picker. Switching to
+native restores the previous picker along with the other Fleet-owned settings.
+Routing controls Fleet's generated configuration, not access to the proxy or
+compatibility with a client's API protocol.
 
 The first proxy reconciliation fails if the Node cannot retrieve the key or a
 valid non-empty model list from the Server. A later model-fetch failure keeps

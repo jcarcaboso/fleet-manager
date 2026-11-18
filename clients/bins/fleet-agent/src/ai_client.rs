@@ -70,6 +70,8 @@ struct ModelCache {
     context_limits: BTreeMap<String, ContextLimits>,
     #[serde(default = "default_skip_claude_models")]
     skip_claude_models_for_other_clients: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    client_routing: Option<catalog::ClientRouting>,
 }
 
 #[derive(Clone, Copy, Debug, Default, Deserialize, Serialize)]
@@ -262,8 +264,12 @@ impl Reconciler {
         base_url: &str,
         selected: Option<&str>,
     ) -> Result<ModelCache> {
-        let cache_path = self.state.join("models.json");
-        let cached = state::read_json::<ModelCache>(&cache_path)?;
+        // Older Agents strictly parse models.json, including after a rollback.
+        let cache_path = self.state.join("models-routed.json");
+        let cached = match state::read_json::<ModelCache>(&cache_path)? {
+            Some(cache) => Some(cache),
+            None => state::read_json(&self.state.join("models.json"))?,
+        };
         let fetched = async {
             let bytes = api.cliproxy_models().await?;
             parse_server_catalog(&bytes, base_url)
@@ -276,6 +282,11 @@ impl Reconciler {
             {
                 state::write_json(&cache_path, &cache)?;
                 Ok(cache)
+            }
+            // Do not fall back to a model removed from a fresh routed catalog.
+            Ok(cache) if cache.client_routing.is_some() => {
+                state::write_json(&cache_path, &cache)?;
+                bail!("selected model is not advertised by CLIProxy");
             }
             result => {
                 if let Some(cache) = usable_cache(cached, base_url, selected) {
@@ -785,6 +796,71 @@ mod tests {
     }
 
     #[test]
+    fn routed_catalog_filters_each_client_and_updates_the_claude_picker() {
+        let root = temp_root();
+        let reconciler = disk_reconciler(&root);
+        let base_url = "https://proxy.example/v1";
+        let models = ["gemini-one", "GpT-one", "ClAuDe-one"]
+            .map(|id| serde_json::json!({ "id": id, "reasoningLevels": [] }));
+        let mut response = serde_json::json!({
+            "baseUrl": base_url,
+            "clientRouting": { "claude": ["claude"], "gpt": ["codex", "opencode"], "other": ["opencode"] },
+            "models": models,
+        });
+        let cache =
+            parse_server_catalog(&serde_json::to_vec(&response).unwrap(), base_url).unwrap();
+        let cache_path = reconciler.state.join("models.json");
+        state::write_json(&cache_path, &cache).unwrap();
+        let cached = usable_cache(state::read_json(&cache_path).unwrap(), base_url, None).unwrap();
+
+        let path = reconciler.config_path("claude").unwrap();
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        let native = serde_json::json!({ "modelPicker": { "options": [{ "value": "native" }] } });
+        fs::write(&path, serde_json::to_vec(&native).unwrap()).unwrap();
+        for (client, models) in [
+            ("claude", &["ClAuDe-one"][..]),
+            ("codex", &["GpT-one"][..]),
+            ("opencode", &["gemini-one", "GpT-one"][..]),
+        ] {
+            reconciler
+                .apply_proxy(client, base_url, None, &cached)
+                .unwrap();
+            let receipt = state::read_json::<Receipt>(&reconciler.receipt_path(client).unwrap())
+                .unwrap()
+                .unwrap();
+            assert_eq!(receipt.expected_models, models);
+        }
+        assert!(
+            reconciler
+                .apply_proxy("claude", base_url, Some("gemini-one"), &cached)
+                .is_err()
+        );
+        assert_eq!(
+            state::read_json::<Value>(&path).unwrap().unwrap()["modelPicker"]["options"],
+            serde_json::json!([{ "value": "ClAuDe-one" }])
+        );
+
+        response["clientRouting"]["other"] = serde_json::json!(["claude", "opencode"]);
+        let updated =
+            parse_server_catalog(&serde_json::to_vec(&response).unwrap(), base_url).unwrap();
+        reconciler
+            .apply_proxy("claude", base_url, Some("gemini-one"), &updated)
+            .unwrap();
+        let settings = state::read_json::<Value>(&path).unwrap().unwrap();
+        assert_eq!(settings["model"], "gemini-one");
+        assert_eq!(
+            settings["modelPicker"],
+            serde_json::json!({
+                "options": [{ "value": "gemini-one" }, { "value": "ClAuDe-one" }],
+                "replaceBuiltInOptions": true,
+            })
+        );
+        reconciler.restore_native("claude").unwrap();
+        assert_eq!(state::read_json::<Value>(&path).unwrap().unwrap(), native);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
     fn codex_apply_restart_and_native_restore_preserve_unowned_content() {
         let root = temp_root();
         let reconciler = disk_reconciler(&root);
@@ -1060,6 +1136,7 @@ mod tests {
             reasoning_levels: BTreeMap::new(),
             context_limits: BTreeMap::new(),
             skip_claude_models_for_other_clients: true,
+            client_routing: None,
         }
     }
 

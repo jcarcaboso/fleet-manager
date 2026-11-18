@@ -1,4 +1,5 @@
 using System.Text.Json;
+using System.Text.Json.Serialization;
 using System.Text.RegularExpressions;
 using Fleet.Core.Coordination;
 using Fleet.Server.Persistence;
@@ -7,9 +8,11 @@ using Microsoft.EntityFrameworkCore;
 namespace Fleet.Server.CliProxy;
 
 public sealed record CliProxySelectionPolicy(bool IncludeNew, string[] DisabledFamilies, Dictionary<string, bool> ModelOverrides,
-    string[] EnabledFamilies, bool SkipClaudeModelsForOtherClients = true);
+    string[] EnabledFamilies, bool SkipClaudeModelsForOtherClients = true,
+    [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] Dictionary<string, string[]>? ClientRouting = null);
 public sealed record CliProxySelectedCatalog(string BaseUrl, IReadOnlyList<CliProxyModel> Models,
-    bool SkipClaudeModelsForOtherClients);
+    bool SkipClaudeModelsForOtherClients,
+    [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] Dictionary<string, string[]>? ClientRouting = null);
 public sealed record CliProxySelectionModel(string Id, IReadOnlyList<string> ReasoningLevels, string FamilyKey,
     string FamilyLabel, bool Selected);
 
@@ -19,6 +22,13 @@ public sealed class CliProxySelectionStore(FleetDbContext database, CliProxyCata
     private const string InvalidSelection = "The selection is malformed or leaves no model selected.";
     private static readonly JsonSerializerOptions JsonOptions = new(JsonSerializerDefaults.Web);
     private static readonly Regex GptFamily = new("^gpt-(\\d+)(?:\\.\\d+)?(?:-|$)", RegexOptions.IgnoreCase | RegexOptions.CultureInvariant | RegexOptions.Compiled);
+    private static readonly string[] AllClients = ["claude", "codex", "opencode"];
+    private static readonly Dictionary<string, string[]> DefaultRouting = new(StringComparer.Ordinal)
+    {
+        ["claude"] = ["claude"],
+        ["gpt"] = ["codex", "opencode"],
+        ["other"] = ["opencode"]
+    };
 
     public async Task<object> ListAsync(CancellationToken ct)
     {
@@ -50,11 +60,17 @@ public sealed class CliProxySelectionStore(FleetDbContext database, CliProxyCata
             policy.DisabledFamilies.Any(key => !ValidFamilyKey(key)) ||
             policy.EnabledFamilies.Any(key => !ValidFamilyKey(key)) ||
             policy.DisabledFamilies.Intersect(policy.EnabledFamilies, StringComparer.Ordinal).Any() ||
-            policy.ModelOverrides.Any(pair => !CliProxyRules.IsValidModelId(pair.Key)))
+            policy.ModelOverrides.Any(pair => !CliProxyRules.IsValidModelId(pair.Key)) ||
+            policy.ClientRouting?.Any(pair => !DefaultRouting.ContainsKey(pair.Key) ||
+                pair.Value is not { Length: > 0 and <= 3 } ||
+                pair.Value.Except(AllClients, StringComparer.Ordinal).Any() ||
+                pair.Value.Distinct(StringComparer.Ordinal).Count() != pair.Value.Length) == true)
             return (400, new { code = "invalid_selection", message = InvalidSelection });
 
         var models = await catalog.GetAsync(baseUrl, ct);
         if (models is null) return (404, new { code = "catalog_unavailable", message = "No model catalog is available for that proxy yet." });
+        // Older operators can still edit model selection without discarding explicit routing.
+        var clientRouting = policy.ClientRouting ?? (version > 0 ? (await GetPolicyAsync(baseUrl, ct)).ClientRouting : null);
         var pinned = await database.AssignmentAiClients.AsNoTracking()
             .Join(database.Assignments.AsNoTracking().Where(x => x.IsCurrent), client => client.AssignmentId,
                 assignment => assignment.Id, (client, assignment) => client)
@@ -74,17 +90,17 @@ public sealed class CliProxySelectionStore(FleetDbContext database, CliProxyCata
         var savedPolicy = policy with
         {
             DisabledFamilies = disabled.Order(StringComparer.Ordinal).ToArray(),
-            EnabledFamilies = enabled.Order(StringComparer.Ordinal).ToArray()
+            EnabledFamilies = enabled.Order(StringComparer.Ordinal).ToArray(),
+            ClientRouting = clientRouting
         };
-        var pinnedExcluded = pinned.Where(client =>
-            savedPolicy.SkipClaudeModelsForOtherClients && client.Client != "claude" &&
-                client.Model.StartsWith("claude-", StringComparison.OrdinalIgnoreCase) ||
-            models.Any(model => model.Id == client.Model) && !Describe(
-                models.First(model => model.Id == client.Model), savedPolicy).Selected)
-            .Select(client => client.Model).Distinct().ToArray();
-        if (pinnedExcluded.Length > 0) return (409, new { code = "pinned_model_excluded", message = "The selection excludes a model that a Node is assigned.", models = pinnedExcluded });
-
+        var routing = ResolveRouting(savedPolicy);
         var described = models.Select(model => Describe(model, savedPolicy)).ToArray();
+        var excluded = described.Where(model => !model.Selected).Select(model => model.Id).ToHashSet(StringComparer.Ordinal);
+        var pinnedExcluded = pinned.Where(client =>
+            excluded.Contains(client.Model) || !routing[RoutingGroup(client.Model)].Contains(client.Client, StringComparer.Ordinal))
+            .Select(client => client.Model).Distinct().ToArray();
+        if (pinnedExcluded.Length > 0) return (409, new { code = "pinned_model_excluded", message = "A model pinned in fleet.yml must stay selected and available to its assigned client.", models = pinnedExcluded });
+
         if (described.All(model => !model.Selected)) return (400, new { code = "invalid_selection", message = InvalidSelection });
         var json = JsonSerializer.Serialize(savedPolicy, JsonOptions);
         int affected;
@@ -102,7 +118,7 @@ public sealed class CliProxySelectionStore(FleetDbContext database, CliProxyCata
         var entry = new
         {
             baseUrl,
-            models = models.Select(model => Describe(model, savedPolicy)).ToArray(),
+            models = described,
             policy = savedPolicy,
             version = version + 1
         };
@@ -112,15 +128,31 @@ public sealed class CliProxySelectionStore(FleetDbContext database, CliProxyCata
     public async Task<IReadOnlyList<CliProxyModel>?> GetSelectedAsync(string baseUrl, CancellationToken ct) =>
         (await GetSelectedCatalogAsync(baseUrl, ct))?.Models;
 
-    public async Task<CliProxySelectedCatalog?> GetSelectedCatalogAsync(string baseUrl, CancellationToken ct)
+    public async Task<CliProxySelectedCatalog?> GetSelectedCatalogAsync(string baseUrl, CancellationToken ct, bool includeRouting = false)
     {
         var models = await catalog.GetAsync(baseUrl, ct);
         if (models is null) return null;
-        var policy = ReadPolicy(await database.CliProxySelections.AsNoTracking()
-            .Where(x => x.BaseUrl == baseUrl).Select(x => x.PolicyJson).SingleOrDefaultAsync(ct));
+        var policy = await GetPolicyAsync(baseUrl, ct);
         var selected = models.Where(model => Describe(model, policy).Selected).ToArray();
-        return selected.Length == 0 ? null : new(baseUrl, selected, policy.SkipClaudeModelsForOtherClients);
+        var routing = ResolveRouting(policy);
+        return selected.Length == 0 ? null : new(baseUrl, selected,
+            routing["claude"].Length != AllClients.Length, includeRouting ? routing : null);
     }
+
+    private async Task<CliProxySelectionPolicy> GetPolicyAsync(string baseUrl, CancellationToken ct) =>
+        ReadPolicy(await database.CliProxySelections.AsNoTracking()
+            .Where(x => x.BaseUrl == baseUrl).Select(x => x.PolicyJson).SingleOrDefaultAsync(ct));
+
+    private static Dictionary<string, string[]> ResolveRouting(CliProxySelectionPolicy policy) =>
+        DefaultRouting.ToDictionary(pair => pair.Key, pair =>
+            policy.ClientRouting?.GetValueOrDefault(pair.Key) ??
+            (pair.Key == "claude" && !policy.SkipClaudeModelsForOtherClients ? AllClients : pair.Value),
+            StringComparer.Ordinal);
+
+    // The Agent uses the same prefixes when applying the catalog's routes.
+    private static string RoutingGroup(string model) =>
+        model.StartsWith("claude-", StringComparison.OrdinalIgnoreCase) ? "claude" :
+        model.StartsWith("gpt-", StringComparison.OrdinalIgnoreCase) ? "gpt" : "other";
 
     private static CliProxySelectionPolicy ReadPolicy(string? json)
     {

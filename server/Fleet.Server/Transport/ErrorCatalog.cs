@@ -266,7 +266,7 @@ public static class ErrorCatalog
             ["Load the selection again with `fleet models selection` and repeat the change."]),
         new("pinned_model_excluded", Server, "A selection excludes an assigned model",
             "The selection would exclude a model that a Node is currently assigned.",
-            ["Choose a different model for the affected Targets in fleet.yml first, or keep the model selected."]),
+            ["Choose a different model in fleet.yml, or keep the model selected and published to its assigned client."]),
         new("invalid_expiry", Server, "Invalid expiry",
             "Enrollment tokens and links must expire between 60 and 3600 seconds from now.",
             ["Use an expiry between 60 and 3600 seconds."]),

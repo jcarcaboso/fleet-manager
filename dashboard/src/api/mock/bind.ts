@@ -16,7 +16,7 @@
 type Json = any;
 
 /** `string` and the collections accept `null` (nullable reference types); `int` is an Int32, `long` an Int64 (JSON numbers only, no strings). */
-export type Kind = 'string' | 'int' | 'int?' | 'long' | 'bool' | 'bool?' | 'strings' | 'boolMap' | Shape;
+export type Kind = 'string' | 'int' | 'int?' | 'long' | 'bool' | 'bool?' | 'strings' | 'boolMap' | 'stringsMap' | Shape;
 
 export interface Shape {
   /** C# member name in camelCase -> type. */
@@ -26,7 +26,7 @@ export interface Shape {
 }
 
 const POLICY: Shape = {
-  fields: { includeNew: 'bool', disabledFamilies: 'strings', modelOverrides: 'boolMap', enabledFamilies: 'strings', skipClaudeModelsForOtherClients: 'bool' },
+  fields: { includeNew: 'bool', disabledFamilies: 'strings', modelOverrides: 'boolMap', enabledFamilies: 'strings', skipClaudeModelsForOtherClients: 'bool', clientRouting: 'stringsMap' },
 };
 
 export const SHAPES = {
@@ -84,6 +84,7 @@ function valueFits(kind: Kind, v: unknown): boolean {
     case 'bool?': return v === null || typeof v === 'boolean';
     case 'strings': return v === null || (Array.isArray(v) && v.every(x => x === null || typeof x === 'string'));
     case 'boolMap': return v === null || (isObject(v) && Object.values(v).every(x => typeof x === 'boolean'));
+    case 'stringsMap': return v === null || (isObject(v) && Object.values(v).every(x => valueFits('strings', x)));
   }
 }
 

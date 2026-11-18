@@ -383,7 +383,7 @@ Member names match without regard to case. The shapes are `login {name, password
 `accounts {name, password, scope}`, `accounts/{name}/scope {scope}`, `accounts/{name}/password {password}`, `nodes/rename {currentAlias, alias}`,
 `nodes/{id}/retry {target}`, `nodes/{id}/remove {alias}`, `issues/state {id, action, hours?}`, `enrollment-links {alias, expiresInSeconds}`,
 `agent-updates {nodes, allOutdated}` and `cliproxy/selection {baseUrl, version, policy {includeNew, disabledFamilies, modelOverrides, enabledFamilies,
-skipClaudeModelsForOtherClients}}`; the routes without a body parameter (`revoke`, `disk-usage/refresh`, `agent-update`, `agent-update/cancel`, `logout`, `source/rescan`,
+skipClaudeModelsForOtherClients, clientRouting?}}`; the routes without a body parameter (`revoke`, `disk-usage/refresh`, `agent-update`, `agent-update/cancel`, `logout`, `source/rescan`,
 `cliproxy/refresh`, `accounts/{name}/delete`) ignore what is posted, like the Server. When a route changes in `OperatorApi.cs` / `WireModels.cs`, change `SHAPES`.
 A refused call has `call.malformed === true`.
 
