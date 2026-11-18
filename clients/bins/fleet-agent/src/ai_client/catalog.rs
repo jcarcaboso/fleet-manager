@@ -3,15 +3,45 @@
 //! model names, reasoning efforts and the CLIProxy URL. Pure functions; the
 //! cache types are on-disk formats and stay in the parent module.
 
-use super::{ContextLimits, ModelCache, default_skip_claude_models};
+use super::{ContextLimits, ModelCache, adapters::Adapter, default_skip_claude_models};
 use crate::state;
 use anyhow::{Context, Result, bail};
 use reqwest::Url;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, HashSet};
 
 /// Largest Codex model catalog Fleet generates from the cache.
 pub(super) const MAX_MODEL_RESPONSE_BYTES: usize = 4 * 1024 * 1024;
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub(super) struct ClientRouting {
+    claude: Vec<Adapter>,
+    gpt: Vec<Adapter>,
+    other: Vec<Adapter>,
+}
+
+impl ClientRouting {
+    pub(super) fn allows(&self, client: Adapter, model: &str) -> bool {
+        let model = model.to_ascii_lowercase();
+        let clients = if model.starts_with("claude-") {
+            &self.claude
+        } else if model.starts_with("gpt-") {
+            &self.gpt
+        } else {
+            &self.other
+        };
+        clients.contains(&client)
+    }
+
+    fn is_valid(&self) -> bool {
+        [&self.claude, &self.gpt, &self.other]
+            .into_iter()
+            .all(|clients| {
+                !clients.is_empty() && clients.iter().collect::<HashSet<_>>().len() == clients.len()
+            })
+    }
+}
 
 impl ContextLimits {
     pub(super) fn is_valid(self) -> bool {
@@ -47,6 +77,7 @@ pub(super) fn parse_server_catalog(bytes: &[u8], base_url: &str) -> Result<Model
         models: Vec<Model>,
         #[serde(default = "default_skip_claude_models")]
         skip_claude_models_for_other_clients: bool,
+        client_routing: Option<ClientRouting>,
     }
     let catalog: Catalog = serde_json::from_slice(bytes).map_err(|error| {
         anyhow::anyhow!(
@@ -56,6 +87,13 @@ pub(super) fn parse_server_catalog(bytes: &[u8], base_url: &str) -> Result<Model
     })?;
     if catalog.base_url != base_url || catalog.models.is_empty() {
         bail!("Server model catalog does not match the assignment");
+    }
+    if catalog
+        .client_routing
+        .as_ref()
+        .is_some_and(|routing| !routing.is_valid())
+    {
+        bail!("invalid Server model client routing");
     }
     let mut models = Vec::new();
     let mut reasoning_levels = BTreeMap::new();
@@ -88,6 +126,7 @@ pub(super) fn parse_server_catalog(bytes: &[u8], base_url: &str) -> Result<Model
         reasoning_levels,
         context_limits,
         skip_claude_models_for_other_clients: catalog.skip_claude_models_for_other_clients,
+        client_routing: catalog.client_routing,
     })
 }
 
@@ -148,6 +187,10 @@ pub(super) fn usable_cache(
             && !cache.models.is_empty()
             && cache.models.iter().all(|model| valid_model_id(model))
             && selected.is_none_or(|selected| cache.models.iter().any(|model| model == selected))
+            && cache
+                .client_routing
+                .as_ref()
+                .is_none_or(ClientRouting::is_valid)
             && cache
                 .reasoning_levels
                 .values()
@@ -245,6 +288,7 @@ mod tests {
             reasoning_levels: BTreeMap::new(),
             context_limits: BTreeMap::new(),
             skip_claude_models_for_other_clients: true,
+            client_routing: None,
         };
         assert!(
             usable_cache(

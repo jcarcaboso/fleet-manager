@@ -127,7 +127,7 @@ pub(crate) fn build_body(selection: &Value, args: &SelectArgs) -> Result<Value, 
                 .and_then(Value::as_bool)
         })
         .unwrap_or(true);
-    Ok(json!({
+    let mut body = json!({
         "baseUrl": base_url,
         "version": version,
         "policy": {
@@ -137,5 +137,16 @@ pub(crate) fn build_body(selection: &Value, args: &SelectArgs) -> Result<Value, 
             "modelOverrides": overrides,
             "skipClaudeModelsForOtherClients": skip_claude,
         }
-    }))
+    });
+    if let Some(mut routes) = policy
+        .get("clientRouting")
+        .and_then(Value::as_object)
+        .cloned()
+    {
+        if args.skip_claude_models_for_other_clients.is_some() {
+            routes.remove("claude");
+        }
+        body["policy"]["clientRouting"] = Value::Object(routes);
+    }
+    Ok(body)
 }

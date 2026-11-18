@@ -199,8 +199,11 @@ impl Api {
     }
 
     pub async fn cliproxy_models(&self) -> Result<Vec<u8>, ProtocolError> {
-        self.get_bytes(self.endpoint("agent/v1/cliproxy/models"), 4 * 1024 * 1024)
-            .await
+        let endpoint = self.endpoint("agent/v1/cliproxy/models").map(|mut url| {
+            url.query_pairs_mut().append_pair("clientRouting", "true");
+            url
+        });
+        self.get_bytes(endpoint, 4 * 1024 * 1024).await
     }
 
     pub async fn bundle(&self, skill: &AssignmentSkill) -> Result<Bundle, ProtocolError> {

@@ -553,12 +553,15 @@ export interface CliProxyStatus {
   errorCode: string | null;
   catalogs: CatalogStatus[];
 }
+export type ModelRoutingGroup = 'claude' | 'gpt' | 'other';
+export type ModelClient = 'claude' | 'codex' | 'opencode';
 export interface SelectionPolicy {
   includeNew: boolean;
   disabledFamilies: string[];
   enabledFamilies: string[];
   modelOverrides: Record<string, boolean>;
   skipClaudeModelsForOtherClients: boolean;
+  clientRouting?: Partial<Record<ModelRoutingGroup, ModelClient[]>> | null;
 }
 export interface SelectionModel {
   id: string;

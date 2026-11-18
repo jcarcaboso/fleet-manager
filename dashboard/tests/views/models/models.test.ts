@@ -15,6 +15,9 @@ const w = () => app!.wrapper;
 const toasts = () => textOf(w().find('#toasts').element);
 const box = (id: string) => w().find(`input[data-sel-model="${id}"]`);
 const checked = (id: string) => (box(id).element as HTMLInputElement).checked;
+const group = (label: string) => w().find(`.model-group[aria-label="${label}"]`);
+const route = (label: string, client: string) => group(label).find<HTMLInputElement>(`.model-routes input[value="${client}"]`);
+const routes = (label: string) => group(label).findAll<HTMLInputElement>('.model-routes input').filter(box => box.element.checked).map(box => box.element.value);
 const sw = (label: string) => w().find(`button[role=switch][aria-label="${label}"]`);
 const bar = () => w().find('.sel-bar');
 const saveBtn = () => w().find('[data-act=sel-save]');
@@ -97,10 +100,14 @@ describe('Models page: catalogs', () => {
 });
 
 describe('Models page: the selection editor', () => {
-  it('lists families alphabetically with models, reasoning levels, counts and switches', async () => {
+  it('groups families by routing with default destinations, models, counts and switches', async () => {
     app = await mountApp({ path: '/models' });
-    expect(w().findAll('fieldset.fam .fam-name').map(n => n.text())).toEqual(['Claude', 'Gemini', 'GPT 6']);
-    expect(w().findAll('fieldset.fam .fam-head .muted').map(n => n.text())).toEqual(['3 of 4 selected', '2 of 2 selected', '1 of 2 selected']);
+    expect(w().findAll('fieldset.fam .fam-name').map(n => n.text())).toEqual(['Claude', 'GPT 6', 'Gemini']);
+    expect(w().findAll('fieldset.fam .fam-head .muted').map(n => n.text())).toEqual(['3 of 4 selected', '1 of 2 selected', '2 of 2 selected']);
+    expect(routes('Claude models')).toEqual(['claude']);
+    expect(routes('GPT models')).toEqual(['codex', 'opencode']);
+    expect(routes('Other models')).toEqual(['opencode']);
+    expect(route('Other models', 'opencode').element.disabled).toBe(true);
     expect(w().find('fieldset.fam legend').text()).toBe('Claude models');
     expect(checked('claude-opus-4-1')).toBe(true);
     expect(checked('claude-sonnet-4-20250514')).toBe(false);
@@ -108,7 +115,6 @@ describe('Models page: the selection editor', () => {
     expect([...box('gpt-6-codex').element.closest('li')!.querySelectorAll('.lvl')].map(l => l.textContent)).toEqual(['low', 'medium', 'high', 'xhigh']);
     expect(box('gpt-6-codex').element.closest('li')!.querySelector('.levels')!.getAttribute('aria-label')).toBe('Reasoning levels');
     expect(sw('Sync Claude models').attributes('aria-checked')).toBe('true');
-    expect(sw('Skip Claude models for other clients').attributes('aria-checked')).toBe('true');
     expect(sw('Enable newly discovered families by default').attributes('aria-checked')).toBe('true');
     expect(bar().text()).toContain('All changes saved');
     expect(bar().attributes('role')).toBe('status');
@@ -148,21 +154,23 @@ describe('Models page: the selection editor', () => {
     await sw('Sync GPT 6 models').trigger('click');
     expect(sw('Sync GPT 6 models').attributes('aria-checked')).toBe('false');
     expect(checked('gpt-6-codex') || checked('gpt-6-chat-latest')).toBe(false);
-    expect(w().findAll('fieldset.fam .fam-head .muted')[2]!.text()).toBe('0 of 2 selected');
+    expect(group('GPT models').find('.fam-head .muted').text()).toBe('0 of 2 selected');
     await sw('Sync GPT 6 models').trigger('click');
     expect(sw('Sync GPT 6 models').attributes('aria-checked')).toBe('true');
     expect(checked('gpt-6-codex') && checked('gpt-6-chat-latest'), 'the override that excluded gpt-6-chat-latest is gone').toBe(true);
     expect(bar().text()).toContain('1 unsaved change');
   });
 
-  it('the two options toggle and count as changes', async () => {
+  it('publishing to all and changing the family default count as changes and reset together', async () => {
     app = await mountApp({ path: '/models' });
-    await sw('Skip Claude models for other clients').trigger('click');
-    expect(sw('Skip Claude models for other clients').attributes('aria-checked')).toBe('false');
+    await group('Claude models').find('.model-routes button').trigger('click');
+    expect(routes('Claude models')).toEqual(['claude', 'codex', 'opencode']);
     await sw('Enable newly discovered families by default').trigger('click');
     expect(sw('Enable newly discovered families by default').attributes('aria-checked')).toBe('false');
     expect(bar().text()).toContain('2 unsaved changes');
-    expect(w().findAll('.opt b').map(b => b.text())).toEqual(['Skip Claude models for other clients', 'Enable newly discovered families by default']);
+    await resetBtn().trigger('click');
+    expect(routes('Claude models')).toEqual(['claude']);
+    expect(bar().text()).toContain('All changes saved');
   });
 
   it('with two catalogs, tabs switch the editor and mark unsaved changes; each keeps its own edits', async () => {
@@ -177,7 +185,7 @@ describe('Models page: the selection editor', () => {
     expect(tabs().map(t => t.attributes('aria-pressed'))).toEqual(['false', 'true']);
     expect(box('claude-opus-4-1').exists() && !checked('claude-opus-4-1')).toBe(true);
     expect(bar().text()).toContain('All changes saved');
-    expect(sw('Skip Claude models for other clients').attributes('aria-checked')).toBe('false');
+    expect(routes('Claude models')).toEqual(['claude', 'codex', 'opencode']); // legacy sharing
     await tabs()[0]!.trigger('click');
     expect(checked('gemini-2.5-pro')).toBe(false);
     expect(bar().text()).toContain('1 unsaved change for proxy.lab.internal');
@@ -185,6 +193,21 @@ describe('Models page: the selection editor', () => {
 });
 
 describe('Models page: saving (models)', () => {
+  it('saves a specific extra client and refuses to unroute a pinned model', async () => {
+    app = await mountApp({ path: '/models' });
+    await route('Other models', 'codex').setValue(true);
+    await saveBtn().trigger('click');
+    await waitFor(() => bar().text().includes('All changes saved'));
+    expect((await selection())[0]!.policy.clientRouting?.other).toEqual(['opencode', 'codex']);
+    expect(routes('Other models')).toEqual(['codex', 'opencode']);
+
+    await route('GPT models', 'codex').setValue(false);
+    await saveBtn().trigger('click');
+    await waitFor(() => msg().includes('Pinned models: gpt-6-codex'));
+    expect(routes('GPT models')).toEqual(['opencode']);
+    expect((await selection())[0]!.policy.clientRouting?.gpt).toBeUndefined();
+  });
+
   it('Save posts the base URL, version and policy, then shows the saved state and tells the user', async () => {
     app = await mountApp({ path: '/models' });
     const before = (await selection())[0]!;
@@ -410,7 +433,7 @@ describe('Models page: scope (scopeRead)', () => {
     expect(w().find('.lock-note').text()).toBe('Needs the operate scope. Your account has read access.');
     expect(box('claude-opus-4-1').attributes('disabled')).toBeDefined();
     expect(sw('Sync Claude models').attributes('disabled')).toBeDefined();
-    expect(sw('Skip Claude models for other clients').attributes('disabled')).toBeDefined();
+    expect(route('Claude models', 'codex').element.disabled).toBe(true);
     await locked[0]!.trigger('click');
     await app.settle();
     expect(toasts()).toContain('Not available');

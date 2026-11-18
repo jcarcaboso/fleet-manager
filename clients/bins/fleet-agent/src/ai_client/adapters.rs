@@ -17,7 +17,8 @@ pub(super) struct Rendered {
     pub(super) drifted: bool,
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq, serde::Deserialize, serde::Serialize)]
+#[serde(rename_all = "lowercase")]
 pub(super) enum Adapter {
     Codex,
     OpenCode,
@@ -78,23 +79,26 @@ impl Adapter {
     ) -> Result<Rendered> {
         // Per-model metadata is only used for the endpoint it was cached for.
         let metadata = Some(cache).filter(|cache| cache.base_url == base_url);
+        let routing = metadata.and_then(|cache| cache.client_routing.as_ref());
         let skip_claude = metadata.is_none_or(|cache| cache.skip_claude_models_for_other_clients);
         let allowed_models: Vec<String> = cache
             .models
             .iter()
             .filter(|model| {
-                !skip_claude
-                    || self == Self::Claude
-                    || !model.to_ascii_lowercase().starts_with("claude-")
+                routing.map_or_else(
+                    || {
+                        !skip_claude
+                            || self == Self::Claude
+                            || !model.to_ascii_lowercase().starts_with("claude-")
+                    },
+                    |routing| routing.allows(self, model),
+                )
             })
             .cloned()
             .collect();
         let models = allowed_models.as_slice();
         if models.is_empty() {
-            bail!(
-                "no allowed CLIProxy models for {}; Claude models are restricted to Claude Code",
-                self.name()
-            );
+            bail!("no allowed CLIProxy models for {}", self.name());
         }
         if model.is_some_and(|selected| !models.iter().any(|model| model == selected)) {
             bail!("selected CLIProxy model is not allowed for {}", self.name());
@@ -122,9 +126,15 @@ impl Adapter {
             Self::OpenCode => opencode::render_opencode(
                 old, previous, base_url, model, models, &key_path, &efforts,
             ),
-            Self::Claude => {
-                claude::render_claude(old, previous, base_url, model, models, &key_path)
-            }
+            Self::Claude => claude::render_claude(
+                old,
+                previous,
+                base_url,
+                model,
+                models,
+                &key_path,
+                routing.is_some(),
+            ),
         }
     }
 
