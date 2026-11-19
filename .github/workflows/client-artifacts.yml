@@ -264,6 +264,8 @@ jobs:
             --version "$RELEASE_TAG" \
             --artifacts artifacts \
             --repository "$GITHUB_REPOSITORY"
+          git config --global user.name github-actions[bot]
+          git config --global user.email 41898282+github-actions[bot]@users.noreply.github.com
           brew tap-new fleet-release/check
           tap_dir=$(brew --repository fleet-release/check)
           cp Formula/fleet.rb Formula/fleet-agent.rb "$tap_dir/Formula/"
