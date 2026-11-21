@@ -1,28 +1,28 @@
 class Fleet < Formula
   desc "Operator CLI for Fleet Manager"
   homepage "https://github.com/jcarcaboso/fleet-manager"
-  version "0.15.0"
+  version "0.15.1"
   license "MIT"
 
   on_macos do
     depends_on macos: :ventura
 
     if Hardware::CPU.arm?
-      url "https://github.com/jcarcaboso/fleet-manager/releases/download/v0.15.0/fleet-macos-arm64.tar.gz"
-      sha256 "4fbd134e875700b93491153047a0fc3e70ec5797ad1ab1330e4b6840d706f780"
+      url "https://github.com/jcarcaboso/fleet-manager/releases/download/v0.15.1/fleet-macos-arm64.tar.gz"
+      sha256 "b60b5f2ba9f5d27a918fd49cb1f4d836787a2e576197034b00374e189f69a6cd"
     else
-      url "https://github.com/jcarcaboso/fleet-manager/releases/download/v0.15.0/fleet-macos-amd64.tar.gz"
-      sha256 "cd36830fd56a15b08f72e0770d81e6885cd6b7f98c1d2fc567149e3aae2c1f74"
+      url "https://github.com/jcarcaboso/fleet-manager/releases/download/v0.15.1/fleet-macos-amd64.tar.gz"
+      sha256 "18aa8eea327e20fbc3d16118f850a99e8c20b3980c4e8458e4a3183b55ab0e3e"
     end
   end
 
   on_linux do
     if Hardware::CPU.arm?
-      url "https://github.com/jcarcaboso/fleet-manager/releases/download/v0.15.0/fleet-linux-arm64.tar.gz"
-      sha256 "875d8bacfc456758949a328edec5b09499493098f4aab747f1e674c7bef8801d"
+      url "https://github.com/jcarcaboso/fleet-manager/releases/download/v0.15.1/fleet-linux-arm64.tar.gz"
+      sha256 "29ae91b3f4e9d022bfd1910af3f526097387f2b154b73309b55f77ef90b13d51"
     else
-      url "https://github.com/jcarcaboso/fleet-manager/releases/download/v0.15.0/fleet-linux-amd64.tar.gz"
-      sha256 "959af1c5ff19b1306ec171ab37e5a97ffa1093ce0ef3b5c8ac1dd6143fa607e9"
+      url "https://github.com/jcarcaboso/fleet-manager/releases/download/v0.15.1/fleet-linux-amd64.tar.gz"
+      sha256 "3afe9ad39f5e3d027b2c4a69398df23cdf06bfb39896ce3e903a9a23672b1228"
     end
   end
 
@@ -31,7 +31,7 @@ class Fleet < Formula
   end
 
   test do
-    assert_match "fleet 0.15.0", shell_output("#{bin}/fleet --version")
+    assert_match "fleet 0.15.1", shell_output("#{bin}/fleet --version")
     system "#{bin}/fleet", "--help"
   end
 end

@@ -1,28 +1,28 @@
 class FleetAgent < Formula
   desc "Node agent for Fleet Manager"
   homepage "https://github.com/jcarcaboso/fleet-manager"
-  version "0.15.0"
+  version "0.15.1"
   license "MIT"
 
   on_macos do
     depends_on macos: :ventura
 
     if Hardware::CPU.arm?
-      url "https://github.com/jcarcaboso/fleet-manager/releases/download/v0.15.0/fleet-agent-macos-arm64.tar.gz"
-      sha256 "d71f96b2fc5e8e9167128bb514900d96994b64f25559a08b7a96f949a74113a8"
+      url "https://github.com/jcarcaboso/fleet-manager/releases/download/v0.15.1/fleet-agent-macos-arm64.tar.gz"
+      sha256 "f6222647e55acbc97c83a0a32304770f01f40e1beff9592b97358269e51c7b8c"
     else
-      url "https://github.com/jcarcaboso/fleet-manager/releases/download/v0.15.0/fleet-agent-macos-amd64.tar.gz"
-      sha256 "e6f0dd4f48a2b40a1ba1062c198ec41ba954f38e84ac4176a15d81193320be23"
+      url "https://github.com/jcarcaboso/fleet-manager/releases/download/v0.15.1/fleet-agent-macos-amd64.tar.gz"
+      sha256 "b7e6ea7b8ba219fcf98d67b6b4a751c1642c6d666e0fe372103b323a34411ec2"
     end
   end
 
   on_linux do
     if Hardware::CPU.arm?
-      url "https://github.com/jcarcaboso/fleet-manager/releases/download/v0.15.0/fleet-agent-linux-arm64.tar.gz"
-      sha256 "b49d025e4e1c9ff65ee8d348d66016f6cf62528247a0e7d0631b3b9331dbb27d"
+      url "https://github.com/jcarcaboso/fleet-manager/releases/download/v0.15.1/fleet-agent-linux-arm64.tar.gz"
+      sha256 "0f56d21bea0e12db967822affa9a2769ed528c6739cfaffa0f1ed8926e92c343"
     else
-      url "https://github.com/jcarcaboso/fleet-manager/releases/download/v0.15.0/fleet-agent-linux-amd64.tar.gz"
-      sha256 "fc79a65cb6516897732d84bf59d90c8033cd638cdd8069002c41838dcc7fa160"
+      url "https://github.com/jcarcaboso/fleet-manager/releases/download/v0.15.1/fleet-agent-linux-amd64.tar.gz"
+      sha256 "9a03bed2f8e769e05c58d6cda60732985549448a9a30d35d89ca0f0e618986e8"
     end
   end
 
@@ -45,7 +45,7 @@ class FleetAgent < Formula
   end
 
   test do
-    assert_match "fleet-agent 0.15.0", shell_output("#{bin}/fleet-agent --version")
+    assert_match "fleet-agent 0.15.1", shell_output("#{bin}/fleet-agent --version")
     system "#{bin}/fleet-agent", "--help"
   end
 end
