@@ -815,7 +815,7 @@ mod tests {
 
         let path = reconciler.config_path("claude").unwrap();
         fs::create_dir_all(path.parent().unwrap()).unwrap();
-        let native = serde_json::json!({ "modelPicker": { "options": [{ "value": "native" }] } });
+        let native = serde_json::json!({ "modelPicker": { "options": [{ "model": "native" }] } });
         fs::write(&path, serde_json::to_vec(&native).unwrap()).unwrap();
         for (client, models) in [
             ("claude", &["ClAuDe-one"][..]),
@@ -837,7 +837,7 @@ mod tests {
         );
         assert_eq!(
             state::read_json::<Value>(&path).unwrap().unwrap()["modelPicker"]["options"],
-            serde_json::json!([{ "value": "ClAuDe-one" }])
+            serde_json::json!([{ "model": "ClAuDe-one" }])
         );
 
         response["clientRouting"]["other"] = serde_json::json!(["claude", "opencode"]);
@@ -851,7 +851,7 @@ mod tests {
         assert_eq!(
             settings["modelPicker"],
             serde_json::json!({
-                "options": [{ "value": "gemini-one" }, { "value": "ClAuDe-one" }],
+                "options": [{ "model": "gemini-one" }, { "model": "ClAuDe-one" }],
                 "replaceBuiltInOptions": true,
             })
         );

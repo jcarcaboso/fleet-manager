@@ -23,7 +23,7 @@ fn helper(key_path: &str) -> String {
 
 fn model_picker(models: &[String]) -> Value {
     serde_json::json!({
-        "options": models.iter().map(|id| serde_json::json!({ "value": id })).collect::<Vec<_>>(),
+        "options": models.iter().map(|id| serde_json::json!({ "model": id })).collect::<Vec<_>>(),
         "replaceBuiltInOptions": true,
     })
 }
