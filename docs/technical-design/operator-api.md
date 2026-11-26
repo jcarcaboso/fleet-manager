@@ -729,7 +729,7 @@ design and the [client update guide](client-updates.md) the operation.
 ### Capability and poll
 
 - Every poll request carries
-  `X-Fleet-Agent-Capabilities: disk-usage,agent-update,claude-skills`.
+  `X-Fleet-Agent-Capabilities: disk-usage,agent-update,claude-skills,antigravity`.
   The Server records on each poll whether `agent-update` was present
   (`agent.selfUpdate`), and only then may it add
   `"agentUpdate": { "version": "0.12.0", "updateId": "<uuid>" }` to the poll
@@ -739,9 +739,11 @@ design and the [client update guide](client-updates.md) the operation.
   response with or without it. `agentUpdate` has no other members; a new one
   needs a new capability.
 - The Server delivers `skills/claude` Assignments only when `claude-skills` is
-  present. On older Agents the Target remains pending, while other supported
-  Assignments continue to be delivered. Upgrading the Agent enables delivery
-  without another source publication.
+  present, and `skills/antigravity`, `ai-client/antigravity`, and
+  `agent-file/antigravity` Assignments only when `antigravity` is present. On
+  older Agents those Targets remain pending, while other supported Assignments
+  continue to be delivered. Upgrading the Agent enables delivery without another
+  source publication.
 - The Agent finishes the cycle, then reports `downloading`. Only a 204 starts
   the download; a 409 means the request was cancelled meanwhile. When the
   report gets no answer the Agent tries the same request again after its next

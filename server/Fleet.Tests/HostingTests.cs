@@ -553,6 +553,13 @@ public sealed class HostingTests : IAsyncLifetime
             Assert.Equal(["claude", "codex", "opencode"], routing.GetProperty("claude").Deserialize<string[]>()!);
             Assert.Equal(["codex", "opencode"], routing.GetProperty("gpt").Deserialize<string[]>()!);
             Assert.Equal(["opencode"], routing.GetProperty("other").Deserialize<string[]>()!);
+            // An Agent that announces antigravity also receives the Gemini group and the antigravity client.
+            var antigravityRouted = await SendNodeAsync($"{route}?clientRouting=true", assigned.Certificate,
+                method: "GET", capabilities: "antigravity");
+            Assert.Equal(200, antigravityRouted.Response.StatusCode);
+            var antigravityRouting = (await JsonSerializer.DeserializeAsync<JsonElement>(antigravityRouted.Response.Body)).GetProperty("clientRouting");
+            Assert.Equal(4, antigravityRouting.EnumerateObject().Count());
+            Assert.Equal(["antigravity"], antigravityRouting.GetProperty("gemini").Deserialize<string[]>()!);
         }
         Assert.Equal("no-store", allowed.Response.Headers.CacheControl.ToString());
         Assert.Equal(403, (await SendNodeAsync(route, unassigned.Certificate, method: "GET")).Response.StatusCode);
@@ -588,7 +595,8 @@ public sealed class HostingTests : IAsyncLifetime
     [InlineData("opencode", ".config/opencode", "ClAuDe-one", "claude", 409)]
     [InlineData("claude", ".claude", "ClAuDe-one", "claude", 200)]
     [InlineData("claude", ".claude", "GpT-one", "gpt", 409)]
-    [InlineData("codex", ".codex", "gemini-one", "other", 409)]
+    [InlineData("codex", ".codex", "gemini-one", "gemini", 409)]
+    [InlineData("antigravity", ".gemini", "gemini-one", "gemini", 200)]
     public async Task Routing_checks_pinned_models_for_the_assigned_client(string client, string path, string model, string group, int expectedStatus)
     {
         var node = await EnrollNode("claude-policy");
@@ -671,7 +679,8 @@ public sealed class HostingTests : IAsyncLifetime
         Assert.Equal(HttpStatusCode.OK, (await _operator.PostAsJsonAsync("/agent/v1/enroll", new { token, certificateRequestPem = csr, nodeName = "valid-node", platform = "linux" })).StatusCode);
     }
 
-    private async Task<HttpContext> SendNodeAsync(string path, X509Certificate2 certificate, object? body = null, string method = "POST")
+    private async Task<HttpContext> SendNodeAsync(string path, X509Certificate2 certificate, object? body = null, string method = "POST",
+        string? capabilities = null)
     {
         using var client = new HttpClient(_factory.Server.CreateHandler(context =>
         {
@@ -681,6 +690,7 @@ public sealed class HostingTests : IAsyncLifetime
         { BaseAddress = new Uri("https://localhost") };
         using var request = new HttpRequestMessage(new HttpMethod(method), path);
         if (body is not null) request.Content = JsonContent.Create(body);
+        if (capabilities is not null) request.Headers.TryAddWithoutValidation("X-Fleet-Agent-Capabilities", capabilities);
         using var response = await client.SendAsync(request);
         var result = new DefaultHttpContext();
         result.Response.StatusCode = (int)response.StatusCode;

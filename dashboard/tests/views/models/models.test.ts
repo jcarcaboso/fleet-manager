@@ -106,8 +106,8 @@ describe('Models page: the selection editor', () => {
     expect(w().findAll('fieldset.fam .fam-head .muted').map(n => n.text())).toEqual(['3 of 4 selected', '1 of 2 selected', '2 of 2 selected']);
     expect(routes('Claude models')).toEqual(['claude']);
     expect(routes('GPT models')).toEqual(['codex', 'opencode']);
-    expect(routes('Other models')).toEqual(['opencode']);
-    expect(route('Other models', 'opencode').element.disabled).toBe(true);
+    expect(routes('Gemini models')).toEqual(['antigravity']);
+    expect(route('Gemini models', 'antigravity').element.disabled).toBe(true);
     expect(w().find('fieldset.fam legend').text()).toBe('Claude models');
     expect(checked('claude-opus-4-1')).toBe(true);
     expect(checked('claude-sonnet-4-20250514')).toBe(false);
@@ -164,7 +164,7 @@ describe('Models page: the selection editor', () => {
   it('publishing to all and changing the family default count as changes and reset together', async () => {
     app = await mountApp({ path: '/models' });
     await group('Claude models').find('.model-routes button').trigger('click');
-    expect(routes('Claude models')).toEqual(['claude', 'codex', 'opencode']);
+    expect(routes('Claude models')).toEqual(['claude', 'codex', 'opencode', 'antigravity']);
     await sw('Enable newly discovered families by default').trigger('click');
     expect(sw('Enable newly discovered families by default').attributes('aria-checked')).toBe('false');
     expect(bar().text()).toContain('2 unsaved changes');
@@ -185,7 +185,7 @@ describe('Models page: the selection editor', () => {
     expect(tabs().map(t => t.attributes('aria-pressed'))).toEqual(['false', 'true']);
     expect(box('claude-opus-4-1').exists() && !checked('claude-opus-4-1')).toBe(true);
     expect(bar().text()).toContain('All changes saved');
-    expect(routes('Claude models')).toEqual(['claude', 'codex', 'opencode']); // legacy sharing
+    expect(routes('Claude models')).toEqual(['claude', 'codex', 'opencode', 'antigravity']); // legacy sharing
     await tabs()[0]!.trigger('click');
     expect(checked('gemini-2.5-pro')).toBe(false);
     expect(bar().text()).toContain('1 unsaved change for proxy.lab.internal');
@@ -195,11 +195,11 @@ describe('Models page: the selection editor', () => {
 describe('Models page: saving (models)', () => {
   it('saves a specific extra client and refuses to unroute a pinned model', async () => {
     app = await mountApp({ path: '/models' });
-    await route('Other models', 'codex').setValue(true);
+    await route('Gemini models', 'codex').setValue(true);
     await saveBtn().trigger('click');
     await waitFor(() => bar().text().includes('All changes saved'));
-    expect((await selection())[0]!.policy.clientRouting?.other).toEqual(['opencode', 'codex']);
-    expect(routes('Other models')).toEqual(['codex', 'opencode']);
+    expect((await selection())[0]!.policy.clientRouting?.gemini).toEqual(['antigravity', 'codex']);
+    expect(routes('Gemini models')).toEqual(['codex', 'antigravity']);
 
     await route('GPT models', 'codex').setValue(false);
     await saveBtn().trigger('click');

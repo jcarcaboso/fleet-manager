@@ -109,8 +109,12 @@ user's originals; provide an orphan receipt so native mode can remove them.
 
 An Agent adapter alone does not make a client available in `fleet.yml`. Add
 the corresponding Server validation and publication support, and test both
-ends. Deploy compatible Agents before publishing assignments for the new
-client. Do not put provider credentials in manifests, assignments, or logs.
+ends. If the client's Targets must be held back from old Agents, define a
+capability token, announce it in `X-Fleet-Agent-Capabilities`, and gate those
+Targets in the poll filter; if it reads personal Skills from its own directory,
+publish a duplicate `skills/<client>` Target with its own exclusion flag. Deploy
+compatible Agents before publishing assignments for the new client. Do not put
+provider credentials in manifests, assignments, or logs.
 
 Test adapter lookup, unknown-client rejection, render/restore round trips,
 existing-file preservation, external changes and deletion of the Fleet-owned

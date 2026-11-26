@@ -108,7 +108,7 @@ public sealed class CliProxySelectionTests : IAsyncLifetime
 
         foreach (var invalid in new Dictionary<string, string[]>[]
         {
-            new() { ["gemini"] = ["codex"] },
+            new() { ["unknown-group"] = ["codex"] },
             new() { ["gpt"] = ["unknown"] },
             new() { ["other"] = [] },
             new() { ["other"] = ["codex", "codex"] }
@@ -129,6 +129,35 @@ public sealed class CliProxySelectionTests : IAsyncLifetime
         selected = (await store.GetSelectedCatalogAsync(BaseUrl, default, includeRouting: true))!;
         Assert.Equal(["claude", "codex", "opencode"], selected.ClientRouting!["claude"]);
         Assert.Equal(["opencode"], selected.ClientRouting!["other"]);
+    }
+
+    [Fact]
+    public async Task Gemini_models_route_only_to_antigravity_and_legacy_agents_get_a_three_key_catalog()
+    {
+        upstream.Body = """{"data":[{"id":"claude-one"},{"id":"gpt-one"},{"id":"gemini-one"},{"id":"misc-one"}]}""";
+        var catalog = NewCatalog();
+        await catalog.SyncAsync([BaseUrl], true, default);
+        await using var db = Database();
+        var store = new CliProxySelectionStore(db, catalog);
+        Assert.Equal(200, (await store.SaveAsync(BaseUrl, 0,
+            new CliProxySelectionPolicy(true, [], new(StringComparer.Ordinal), []), default)).Status);
+
+        // An Agent that announced the antigravity capability gets all four groups, with Gemini split out.
+        var modern = (await store.GetSelectedCatalogAsync(BaseUrl, default, includeRouting: true, antigravity: true))!;
+        Assert.Equal(4, modern.ClientRouting!.Count);
+        Assert.Equal(["claude"], modern.ClientRouting!["claude"]);
+        Assert.Equal(["codex", "opencode"], modern.ClientRouting!["gpt"]);
+        Assert.Equal(["antigravity"], modern.ClientRouting!["gemini"]);
+        Assert.Equal(["opencode"], modern.ClientRouting!["other"]);
+
+        // A legacy Agent keeps the three-key catalog: no gemini group and never antigravity.
+        var legacy = (await store.GetSelectedCatalogAsync(BaseUrl, default, includeRouting: true))!;
+        Assert.Equal(3, legacy.ClientRouting!.Count);
+        Assert.False(legacy.ClientRouting!.ContainsKey("gemini"));
+        Assert.Equal(["claude"], legacy.ClientRouting!["claude"]);
+        Assert.Equal(["codex", "opencode"], legacy.ClientRouting!["gpt"]);
+        Assert.Equal(["opencode"], legacy.ClientRouting!["other"]);
+        Assert.DoesNotContain(legacy.ClientRouting!, pair => pair.Value.Contains("antigravity"));
     }
 
     [Fact]

@@ -16,7 +16,7 @@ Implemented:
 - source adapters for bounded Git inspection, manifest parsing, discovered
   Skill groups, duplicate warnings, complete nested Skill Bundle encoding,
   discovered agent sources, per-Node Managed-file resolution for Codex,
-  OpenCode, and Claude Code, and startup/periodic source scanning;
+  OpenCode, Claude Code, and Antigravity, and startup/periodic source scanning;
 - separate Operator bearer-token and Node mTLS authentication policies, with
   route groups for `/operator/v1` and `/agent/v1`;
 - Rust 2024 `fleet` CLI workspace with bearer-token operator requests;

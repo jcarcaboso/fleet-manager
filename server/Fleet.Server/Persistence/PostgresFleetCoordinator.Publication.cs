@@ -223,7 +223,7 @@ public sealed partial class PostgresFleetCoordinator
                 throw Error("invalid_target_descriptor", "Target must be a non-empty relative path below home.");
             if (target.Skills.Count > 10_000 || target.Skills.Select(x => x.Name).Distinct(StringComparer.Ordinal).Count() != target.Skills.Count)
                 throw Error("invalid_skills", "Target Skills exceed the limit or contain duplicate names.");
-            var isSkills = target.TargetName is "skills" or "skills/claude";
+            var isSkills = target.TargetName is "skills" or "skills/claude" or "skills/antigravity";
             var isFile = target.TargetName.StartsWith("agent-file/", StringComparison.Ordinal);
             var isAiClient = target.TargetName.StartsWith("ai-client/", StringComparison.Ordinal);
             if ((isSkills ? 1 : 0) + (isFile ? 1 : 0) + (isAiClient ? 1 : 0) != 1 ||

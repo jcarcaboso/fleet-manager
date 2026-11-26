@@ -198,7 +198,7 @@ public sealed class SourceGitSourceScannerTests : IDisposable
 
         var defaults = Assert.IsType<SourceScanResult.Snapshot>(await scanner.ScanAsync(null, CancellationToken.None));
         var defaultFiles = defaults.Value.Targets.Where(x => x.File is not null).ToArray();
-        Assert.Equal(3, defaultFiles.Length);
+        Assert.Equal(4, defaultFiles.Length);
         Assert.All(defaultFiles, target => Assert.NotNull(target.File!.BundleDigest));
 
         Write(repository, "fleet.yml", Manifest([]).Replace(
@@ -208,7 +208,7 @@ public sealed class SourceGitSourceScannerTests : IDisposable
         Commit(repository, "clear all agent files");
         var cleared = Assert.IsType<SourceScanResult.Snapshot>(await scanner.ScanAsync(defaults.Value.SourceRevision, CancellationToken.None));
         var clearedFiles = cleared.Value.Targets.Where(x => x.File is not null).ToArray();
-        Assert.Equal(3, clearedFiles.Length);
+        Assert.Equal(4, clearedFiles.Length);
         Assert.All(clearedFiles, target => Assert.NotNull(target.File!.BundleDigest));
         var emptyBundle = Assert.Single(cleared.Value.Bundles, bundle => bundle.Content.Length == 0);
         Assert.Empty(emptyBundle.Content);
@@ -380,10 +380,13 @@ public sealed class SourceGitSourceScannerTests : IDisposable
         var snapshot = Assert.IsType<SourceScanResult.Snapshot>(
             await Scanner(repository).ScanAsync(null, CancellationToken.None));
 
-        var target = Assert.Single(snapshot.Value.Targets, target => target.File is null);
-        Assert.Equal("skills", target.TargetName);
+        var target = Assert.Single(snapshot.Value.Targets, target => target.TargetName == "skills");
         Assert.Equal(".claude/skills", target.Descriptor.Path);
         Assert.Equal(excludeClaude ? [] : ["review"], target.Skills.Select(skill => skill.Name));
+        // The Claude directory is already the source, so no duplicate skills/claude target is emitted.
+        Assert.DoesNotContain(snapshot.Value.Targets, target => target.TargetName == "skills/claude");
+        var antigravity = Assert.Single(snapshot.Value.Targets, target => target.TargetName == "skills/antigravity");
+        Assert.Equal(".gemini/config/skills", antigravity.Descriptor.Path);
     }
 
     [Fact]
@@ -418,7 +421,7 @@ public sealed class SourceGitSourceScannerTests : IDisposable
             await Scanner(repository).ScanAsync(null, CancellationToken.None));
 
         Assert.Equal(
-            ["skills", "skills/claude", "agent-file/claude", "agent-file/codex", "ai-client/codex"],
+            ["skills", "skills/claude", "skills/antigravity", "agent-file/claude", "agent-file/codex", "ai-client/codex"],
             snapshot.Value.Targets.Select(target => target.TargetName));
     }
 
@@ -717,7 +720,7 @@ public sealed class SourceGitSourceScannerTests : IDisposable
 
         Assert.Equal(["deploy"], Assert.Single(Targets(second), target => target.TargetName == "skills").Skills.Select(skill => skill.Name));
         var emptyFiles = Targets(second).Where(target => target.File is not null).ToArray();
-        Assert.Equal(3, emptyFiles.Length);
+        Assert.Equal(4, emptyFiles.Length);
         var emptyBundle = Assert.Single(snapshot.Value.Bundles, bundle => bundle.Digest == emptyFiles.Select(target => target.File!.BundleDigest).Distinct().Single());
         Assert.Equal(0, emptyBundle.Size);
         Assert.DoesNotContain(Targets(second), target => target.AiClient is not null);

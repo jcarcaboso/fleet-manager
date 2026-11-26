@@ -22,11 +22,12 @@ public sealed class CliProxySelectionStore(FleetDbContext database, CliProxyCata
     private const string InvalidSelection = "The selection is malformed or leaves no model selected.";
     private static readonly JsonSerializerOptions JsonOptions = new(JsonSerializerDefaults.Web);
     private static readonly Regex GptFamily = new("^gpt-(\\d+)(?:\\.\\d+)?(?:-|$)", RegexOptions.IgnoreCase | RegexOptions.CultureInvariant | RegexOptions.Compiled);
-    private static readonly string[] AllClients = ["claude", "codex", "opencode"];
+    private static readonly string[] AllClients = ["claude", "codex", "opencode", "antigravity"];
     private static readonly Dictionary<string, string[]> DefaultRouting = new(StringComparer.Ordinal)
     {
         ["claude"] = ["claude"],
         ["gpt"] = ["codex", "opencode"],
+        ["gemini"] = ["antigravity"],
         ["other"] = ["opencode"]
     };
 
@@ -62,7 +63,7 @@ public sealed class CliProxySelectionStore(FleetDbContext database, CliProxyCata
             policy.DisabledFamilies.Intersect(policy.EnabledFamilies, StringComparer.Ordinal).Any() ||
             policy.ModelOverrides.Any(pair => !CliProxyRules.IsValidModelId(pair.Key)) ||
             policy.ClientRouting?.Any(pair => !DefaultRouting.ContainsKey(pair.Key) ||
-                pair.Value is not { Length: > 0 and <= 3 } ||
+                pair.Value is not { Length: > 0 and <= 4 } ||
                 pair.Value.Except(AllClients, StringComparer.Ordinal).Any() ||
                 pair.Value.Distinct(StringComparer.Ordinal).Count() != pair.Value.Length) == true)
             return (400, new { code = "invalid_selection", message = InvalidSelection });
@@ -128,16 +129,30 @@ public sealed class CliProxySelectionStore(FleetDbContext database, CliProxyCata
     public async Task<IReadOnlyList<CliProxyModel>?> GetSelectedAsync(string baseUrl, CancellationToken ct) =>
         (await GetSelectedCatalogAsync(baseUrl, ct))?.Models;
 
-    public async Task<CliProxySelectedCatalog?> GetSelectedCatalogAsync(string baseUrl, CancellationToken ct, bool includeRouting = false)
+    // An Agent that has not announced the antigravity capability keeps the three-key catalog:
+    // Gemini models fall back to the "other" route and antigravity is never one of its clients.
+    public async Task<CliProxySelectedCatalog?> GetSelectedCatalogAsync(string baseUrl, CancellationToken ct,
+        bool includeRouting = false, bool antigravity = false)
     {
         var models = await catalog.GetAsync(baseUrl, ct);
         if (models is null) return null;
         var policy = await GetPolicyAsync(baseUrl, ct);
         var selected = models.Where(model => Describe(model, policy).Selected).ToArray();
         var routing = ResolveRouting(policy);
+        var clientRouting = includeRouting ? (antigravity ? routing : LegacyRouting(routing)) : null;
         return selected.Length == 0 ? null : new(baseUrl, selected,
-            routing["claude"].Length != AllClients.Length, includeRouting ? routing : null);
+            routing["claude"].Length != AllClients.Length, clientRouting);
     }
+
+    private static Dictionary<string, string[]> LegacyRouting(Dictionary<string, string[]> routing) =>
+        DefaultRouting.Keys.Where(key => key != "gemini").ToDictionary(
+            key => key,
+            key =>
+            {
+                var clients = routing[key].Where(client => client != "antigravity").ToArray();
+                return clients.Length > 0 ? clients : DefaultRouting[key].Where(client => client != "antigravity").ToArray();
+            },
+            StringComparer.Ordinal);
 
     private async Task<CliProxySelectionPolicy> GetPolicyAsync(string baseUrl, CancellationToken ct) =>
         ReadPolicy(await database.CliProxySelections.AsNoTracking()
@@ -152,7 +167,8 @@ public sealed class CliProxySelectionStore(FleetDbContext database, CliProxyCata
     // The Agent uses the same prefixes when applying the catalog's routes.
     private static string RoutingGroup(string model) =>
         model.StartsWith("claude-", StringComparison.OrdinalIgnoreCase) ? "claude" :
-        model.StartsWith("gpt-", StringComparison.OrdinalIgnoreCase) ? "gpt" : "other";
+        model.StartsWith("gpt-", StringComparison.OrdinalIgnoreCase) ? "gpt" :
+        model.StartsWith("gemini-", StringComparison.OrdinalIgnoreCase) ? "gemini" : "other";
 
     private static CliProxySelectionPolicy ReadPolicy(string? json)
     {

@@ -11,8 +11,10 @@ use std::{
 };
 
 pub fn validate(assignment: &Assignment) -> Result<()> {
-    if !matches!(assignment.target_name.as_str(), "skills" | "skills/claude")
-        || assignment.target.base != "home"
+    if !matches!(
+        assignment.target_name.as_str(),
+        "skills" | "skills/claude" | "skills/antigravity"
+    ) || assignment.target.base != "home"
         || assignment.file.is_some()
         || assignment.ai_client.is_some()
         || assignment.skills.len() > 10_000

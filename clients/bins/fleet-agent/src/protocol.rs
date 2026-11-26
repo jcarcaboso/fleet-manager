@@ -31,7 +31,7 @@ const SIDE_REPORT_TIMEOUT: Duration = Duration::from_secs(10);
 /// Tells the Server which optional features this Agent understands. Only then
 /// may the poll response carry the matching fields or Target kinds.
 const CAPABILITIES_HEADER: &str = "x-fleet-agent-capabilities";
-const CAPABILITIES: &str = "disk-usage,agent-update,claude-skills";
+const CAPABILITIES: &str = "disk-usage,agent-update,claude-skills,antigravity";
 /// Largest signed release manifest the Agent reads.
 pub const MAX_RELEASE_MANIFEST_BYTES: usize = 64 * 1024;
 /// Size of an Ed25519 signature, the whole content of the signature file.
@@ -424,6 +424,7 @@ impl Api {
         let response = self
             .authenticated()?
             .get(url?)
+            .header(CAPABILITIES_HEADER, CAPABILITIES)
             .send()
             .await
             .map_err(ProtocolError::Transport)?;
@@ -749,7 +750,7 @@ mod tests {
             );
             assert_eq!(
                 request.header("x-fleet-agent-capabilities"),
-                Some("disk-usage,agent-update,claude-skills")
+                Some("disk-usage,agent-update,claude-skills,antigravity")
             );
         }
     }

@@ -1,8 +1,8 @@
 # CLIProxyAPI operations
 
-Fleet can configure Codex, OpenCode, and Claude Code to use one Workspace CLIProxyAPI
-endpoint. The source repository selects the endpoint and which Nodes receive
-its model catalog. A default model is optional. The API key
+Fleet can configure Codex, OpenCode, Claude Code, and Antigravity to use one
+Workspace CLIProxyAPI endpoint. The source repository selects the endpoint and
+which Nodes receive its model catalog. A default model is optional. The API key
 stays outside Git and reaches assigned Nodes through their existing mTLS
 connection to the Server.
 
@@ -151,6 +151,22 @@ proxy. Shell environment overrides must also be cleared locally. Switching to
 Upgrade both Server and Agent to a build with Claude connection support before
 adding `ai-clients.claude` to the manifest.
 
+Antigravity uses `~/.gemini/config/config.json`. Fleet owns the top-level
+`gateway` and `models` keys and preserves every other setting in the file. With
+`wireProtocol: "openai"`, the gateway posts to `/v1/chat/completions`, so Fleet
+strips `/v1` from the base URL for `gateway.url`. Antigravity cannot read a key
+file, expand variables, or run a helper command: Fleet injects the literal proxy
+key from its private `state/api-key` file as `gateway.apiKey` into a 0600 config,
+and excludes the key from drift comparison so a rotation rewrites the file
+without a false ownership conflict. Fleet marks the block with
+`customHeaders.X-Fleet-Managed: cliproxy`, and returning to `native` restores
+the previous settings. Google's Enterprise Gateway docs name
+`~/.antigravity/settings.json` as the user gateway file, while the App's general
+user config and the Router proxy integration use `~/.gemini/config/config.json`.
+Fleet writes the latter so the gateway config sits beside the personal Skills
+directory `~/.gemini/config/skills`; confirm which file your Antigravity build
+reads, since a later version may mirror the block to both.
+
 Older proxies that return only model identifiers still work, but Fleet does not
 invent effort choices when the proxy omits them. The upstream response behavior
 is defined by CLIProxy's [model handler](https://github.com/router-for-me/CLIProxyAPI/blob/main/sdk/api/handlers/openai/openai_handlers.go).
@@ -160,20 +176,25 @@ omitted, Fleet keeps the locally selected proxy model if available, otherwise
 selects the first advertised model. Users can change the selection without a
 Fleet ownership conflict. Reasoning effort selection remains local to the client.
 
-Model routing has three groups, matched by case-insensitive model ID prefixes:
+Model routing has four groups, matched by case-insensitive model ID prefixes:
 
 | Group | Default clients |
 |---|---|
 | Claude (`claude-`) | Claude Code |
 | GPT (`gpt-`) | Codex and OpenCode |
+| Gemini (`gemini-`) | Antigravity |
 | Other (all remaining IDs) | OpenCode |
 
-Use the client checkboxes to change a group's destinations, or **Publish to all**
-to select every client. Models still need to be selected within the group.
+Gemini models form a separate group that defaults to Antigravity only: until its
+route is edited, they are not offered to Codex, OpenCode, or Claude Code. Use the
+client checkboxes to change a group's destinations, or **Publish to all** to
+select every client. Models still need to be selected within the group.
 A saved setting that previously shared Claude models continues to share those
-models unless the Claude route is edited. Agents cache routing with the model
-catalog for offline use. If a client has no eligible models, reconciliation
-reports an error and keeps its previous settings.
+models unless the Claude route is edited. Agents that have not announced the
+`antigravity` capability keep the legacy three-key catalog: Gemini models fall
+back to the `other` route, and Antigravity is never one of their clients. Agents
+cache routing with the model catalog for offline use. If a client has no eligible
+models, reconciliation reports an error and keeps its previous settings.
 
 Upgrade both Server and Agents to apply these routes. Before upgrading, check
 for `fleet.yml` pins that need a non-default route. Older Agents still use the
@@ -251,12 +272,16 @@ that check still requires service logs on the affected machine.
   `fleet-agent --version`. An upgraded Homebrew binary does not replace an
   already running process; restart its service. Older binaries earlier on
   `PATH` can also hide the installed version.
-- Confirm the Node has a current `ai-client/opencode` or `ai-client/codex`
-  Assignment, and inspect its latest attempt result and Agent logs.
+- Confirm the Node has a current `ai-client/opencode`, `ai-client/codex`,
+  `ai-client/claude`, or `ai-client/antigravity` Assignment, and inspect its
+  latest attempt result and Agent logs. Antigravity Assignments are delivered
+  only to Agents that announce the `antigravity` capability.
 - Check model-sync status. `credential_unavailable` means the Server has no
   `Fleet:CliProxyApiKey`; a repository assignment alone cannot supply it.
 - Check `~/.config/opencode/opencode.jsonc` as well as `.json`. The JSONC file
   takes precedence. Fleet ownership conflicts leave both files intact.
+- For Antigravity, check `~/.gemini/config/config.json` and confirm which gateway
+  file the running App build actually reads (see the config-path caveat above).
 
 ## Failure and recovery checks
 

@@ -36,6 +36,7 @@ internal sealed class FleetManifestV3Parser : IManifestSchemaParser
             Path = node.Skills?.Path ?? defaults.Skills?.Path,
             Groups = node.Skills?.Groups ?? defaults.Skills?.Groups,
             ExcludeClaude = node.Skills?.ExcludeClaude ?? defaults.Skills?.ExcludeClaude,
+            ExcludeAntigravity = node.Skills?.ExcludeAntigravity ?? defaults.Skills?.ExcludeAntigravity,
         },
         Agents = ManifestYaml.Map(node.HasAgents ? node.Agents : defaults.Agents),
         AiClients = ResolveAiClients(defaults.AiClients, node.HasAiClients, node.AiClients),

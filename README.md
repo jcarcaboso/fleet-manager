@@ -191,12 +191,16 @@ precedence. The `skills/` and `agents/` roots are independent and optional. An
 absent root contributes no content of that type.
 
 Fleet also publishes each Node's resolved Skills to
-`~/.claude/skills/<skill-name>/SKILL.md`, independently of agent instruction files
-and AI client connections. In every manifest version, the boolean
-`targets.skills.excludeClaude` defaults to `false`. Set it to `true` to remove
-Fleet-managed Claude Skills while preserving personal Skills and other unowned
-content. A Node's `targets.skills.excludeClaude` overrides the top-level default.
-The shared Skills Target is unchanged unless it also points at `.claude/skills`.
+`~/.claude/skills/<skill-name>/SKILL.md` and
+`~/.gemini/config/skills/<skill-name>/SKILL.md`, independently of agent
+instruction files and AI client connections. In every manifest version, the
+booleans `targets.skills.excludeClaude` and `targets.skills.excludeAntigravity`
+default to `false`. Set either to `true` to remove that client's Fleet-managed
+Skills while preserving personal Skills and other unowned content. A Node's value
+overrides the top-level default. The shared Skills Target is unchanged unless it
+already points at one of these destinations. Agents apply the duplicate Claude
+and Antigravity Skills Targets only after announcing the `claude-skills` and
+`antigravity` capabilities.
 Skills removed from an accepted source revision or a Node's resolved selection
 are also removed from its managed destinations.
 
@@ -224,8 +228,9 @@ nodes:
 ```
 
 The Server writes the selected content to `.codex/AGENTS.md`,
-`.config/opencode/AGENTS.md`, or `.claude/CLAUDE.md` relative to the Node user's
-home. Omit `targets.agents` to leave agent files unmanaged. Use `agents: []` to
+`.config/opencode/AGENTS.md`, `.claude/CLAUDE.md`, or `.gemini/GEMINI.md`
+relative to the Node user's home. Omit `targets.agents` to leave agent files
+unmanaged. Use `agents: []` to
 create or replace every supported client's instruction file with an empty file.
 A nonempty list changes only its selected clients and leaves the others as they
 are.
@@ -234,7 +239,7 @@ Upgrade `fleet-agent` on managed Nodes before committing instruction sources;
 older Agents do not understand Managed-file Assignments.
 
 `fleet/v2` can also select `native` or `cliproxy` connections for Codex,
-OpenCode, and Claude Code. Configure the Server's `Fleet:CliProxyApiKey` setting and upgrade
+OpenCode, Claude Code, and Antigravity. Configure the Server's `Fleet:CliProxyApiKey` setting and upgrade
 every selected Agent before publishing those entries. The key stays out of Git
 and client configuration. See the
 [CLIProxyAPI operations guide](docs/technical-design/cliproxy-operations.md)
