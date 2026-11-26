@@ -147,34 +147,39 @@ filename:
 | Codex | `.codex/AGENTS.md` |
 | OpenCode | `.config/opencode/AGENTS.md` |
 | Claude Code | `.claude/CLAUDE.md` |
+| Antigravity | `.gemini/GEMINI.md` |
 
 Every Node also receives its resolved Skills at
-`~/.claude/skills/<skill-name>/SKILL.md`, through a separate `skills/claude`
-Target. This does not require `agents` or `ai-clients.claude` configuration.
-In every manifest version, `targets.skills.excludeClaude` is a boolean that
-defaults to `false`. A Node's value overrides the top-level default; an omitted
-Node value inherits it. Set it to `true` to publish an empty Claude Skills map.
-The Agent removes Skills recorded in its ownership receipt and preserves
-personal Skills and other unowned content, including existing `synced/` content.
-Setting it back to `false` restores the Node's resolved Skills.
-The configured shared `skills` Target remains unchanged for other clients.
-If it already points at `.claude/skills`, no second Target is created, and the
-same exclusion rule empties that Target instead. An empty `agents: []` only
-clears instruction files and does not disable Claude Skills.
+`~/.claude/skills/<skill-name>/SKILL.md` and
+`~/.gemini/config/skills/<skill-name>/SKILL.md`, through separate
+`skills/claude` and `skills/antigravity` Targets. These do not require `agents`
+or `ai-clients` configuration. In every manifest version,
+`targets.skills.excludeClaude` and `targets.skills.excludeAntigravity` are
+booleans that default to `false`. A Node's value overrides the top-level
+default; an omitted Node value inherits it. Set either to `true` to publish an
+empty Skills map for that client. The Agent removes Skills recorded in its
+ownership receipt and preserves personal Skills and other unowned content,
+including existing `synced/` content. Setting it back to `false` restores the
+Node's resolved Skills. The configured shared `skills` Target remains unchanged
+for other clients. If it already points at `.claude/skills` or
+`.gemini/config/skills`, no second Target is created for that destination, and
+the same exclusion rule empties that Target instead. An empty `agents: []` only
+clears instruction files and does not disable the duplicate Skills Targets.
 Removing a Skill from an accepted source revision or a Node's resolved selection
 also removes its installed copy from each managed destination. This includes
 removing the last Skill or the optional `skills/` source root when no missing
 groups are explicitly selected. Invalid revisions leave the previous desired
 state active.
 The Server delivers `skills/claude` only to Agents announcing the
-`claude-skills` capability. Older Agents keep receiving their existing Targets;
-the Claude Skills Target remains pending until the Agent is upgraded.
-Existing accepted Desired revisions are not rewritten. Claude Skills Targets
-are added when a new source revision is published.
+`claude-skills` capability and `skills/antigravity` only to Agents announcing
+the `antigravity` capability. Older Agents keep receiving their existing
+Targets; the duplicate Skills Targets remain pending until the Agent is upgraded.
+Existing accepted Desired revisions are not rewritten. The duplicate Skills
+Targets are added when a new source revision is published.
 
 For example, `source: personal` resolves exactly
-`agents/personal/AGENTS.md`. Omitting `clients` selects Codex, OpenCode, and
-Claude Code. When `clients` is present, the source applies only to those
+`agents/personal/AGENTS.md`. Omitting `clients` selects Codex, OpenCode,
+Claude Code, and Antigravity. When `clients` is present, the source applies only to those
 clients. A Node may use several sources as long as no client occurs in more
 than one entry. Overlapping client mappings, unknown clients, and unknown
 sources invalidate the source revision. An entry-level `clients: []` is also
@@ -193,7 +198,8 @@ accepted desired revision active. To retire a source, first update every Node
 that references it. Use `agents: []` and wait for that Rollout when all of its
 supported client files should be cleared.
 
-`fleet/v2` can additionally select how Codex and OpenCode connect:
+`fleet/v2` can additionally select how Codex, OpenCode, Claude Code, and
+Antigravity connect:
 
 ```yaml
 schema: fleet/v2

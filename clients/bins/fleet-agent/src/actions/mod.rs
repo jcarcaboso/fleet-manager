@@ -37,7 +37,10 @@ impl ActionKind {
 
     fn matches(self, target_name: &str) -> bool {
         match self {
-            Self::Skills => matches!(target_name, "skills" | "skills/claude"),
+            Self::Skills => matches!(
+                target_name,
+                "skills" | "skills/claude" | "skills/antigravity"
+            ),
             Self::ManagedFile => target_name.starts_with("agent-file/"),
             Self::AiClient => target_name.starts_with("ai-client/"),
         }

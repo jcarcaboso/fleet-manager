@@ -6,8 +6,8 @@ const cap = (s: unknown): string => String(s ?? '').replace(/^./, c => c.toUpper
 
 /* ------------------------------------------------------------------ Targets */
 
-const CLIENT: Record<string, string> = { claude: 'Claude Code', codex: 'Codex', opencode: 'OpenCode' };
-const CLIENT_SHORT: Record<string, string> = { claude: 'Claude', codex: 'Codex', opencode: 'OpenCode' };
+const CLIENT: Record<string, string> = { claude: 'Claude Code', codex: 'Codex', opencode: 'OpenCode', antigravity: 'Antigravity' };
+const CLIENT_SHORT: Record<string, string> = { claude: 'Claude', codex: 'Codex', opencode: 'OpenCode', antigravity: 'Antigravity' };
 export const clientName = (c: string | null | undefined): string => CLIENT[c ?? ''] || cap(c) || 'AI client';
 export const clientShort = (c: string | null | undefined): string => CLIENT_SHORT[c ?? ''] || cap(c) || 'AI client';
 

@@ -18,6 +18,9 @@ pub(super) const MAX_MODEL_RESPONSE_BYTES: usize = 4 * 1024 * 1024;
 pub(super) struct ClientRouting {
     claude: Vec<Adapter>,
     gpt: Vec<Adapter>,
+    // Older Servers send a three-key catalog; Gemini models then fall back to "other".
+    #[serde(default)]
+    gemini: Vec<Adapter>,
     other: Vec<Adapter>,
 }
 
@@ -28,6 +31,8 @@ impl ClientRouting {
             &self.claude
         } else if model.starts_with("gpt-") {
             &self.gpt
+        } else if model.starts_with("gemini-") && !self.gemini.is_empty() {
+            &self.gemini
         } else {
             &self.other
         };
@@ -40,6 +45,8 @@ impl ClientRouting {
             .all(|clients| {
                 !clients.is_empty() && clients.iter().collect::<HashSet<_>>().len() == clients.len()
             })
+            // An absent (empty) Gemini route is valid for an older Server.
+            && self.gemini.iter().collect::<HashSet<_>>().len() == self.gemini.len()
     }
 }
 
@@ -259,6 +266,27 @@ mod tests {
             )
             .is_err()
         );
+    }
+
+    #[test]
+    fn gemini_route_is_separate_and_only_allows_antigravity() {
+        let bytes = br#"{"baseUrl":"https://proxy.example/v1","models":[{"id":"gemini-2.5-pro","reasoningLevels":[]}],
+            "clientRouting":{"claude":["claude"],"gpt":["codex","opencode"],"gemini":["antigravity"],"other":["opencode"]}}"#;
+        let cache = parse_server_catalog(bytes, "https://proxy.example/v1").unwrap();
+        let routing = cache.client_routing.as_ref().unwrap();
+        assert!(routing.allows(Adapter::Antigravity, "gemini-2.5-pro"));
+        assert!(!routing.allows(Adapter::OpenCode, "gemini-2.5-pro"));
+        assert!(!routing.allows(Adapter::Claude, "gemini-2.5-pro"));
+        assert!(routing.allows(Adapter::Claude, "claude-opus-4-1"));
+        assert!(usable_cache(Some(cache), "https://proxy.example/v1", None).is_some());
+
+        // A three-key catalog from an older Server keeps Gemini models on "other".
+        let legacy = br#"{"baseUrl":"https://proxy.example/v1","models":[{"id":"gemini-2.5-pro","reasoningLevels":[]}],
+            "clientRouting":{"claude":["claude"],"gpt":["codex","opencode"],"other":["opencode"]}}"#;
+        let cache = parse_server_catalog(legacy, "https://proxy.example/v1").unwrap();
+        let routing = cache.client_routing.as_ref().unwrap();
+        assert!(routing.allows(Adapter::OpenCode, "gemini-2.5-pro"));
+        assert!(!routing.allows(Adapter::Antigravity, "gemini-2.5-pro"));
     }
 
     #[test]

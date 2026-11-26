@@ -9,7 +9,7 @@ public static class CliProxyRules
     public const string AiClientSchema = "fleet.ai-client/v1";
 
     /// <summary>The AI clients Fleet can configure; <c>ai-client/{name}</c> is the Target name.</summary>
-    public static readonly IReadOnlySet<string> AiClients = new HashSet<string>(StringComparer.Ordinal) { "codex", "opencode", "claude" };
+    public static readonly IReadOnlySet<string> AiClients = new HashSet<string>(StringComparer.Ordinal) { "codex", "opencode", "claude", "antigravity" };
 
     /// <summary>A model ID is 1 to 200 printable ASCII characters, without spaces.</summary>
     public static bool IsValidModelId(string value) => value.Length is > 0 and <= 200 &&

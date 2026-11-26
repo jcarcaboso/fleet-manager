@@ -294,7 +294,7 @@ export function buildDataset(): Dataset {
         path: '~/.claude/settings.json', excerpt: ['12 |   "permissions": {', '13 |     "allow": ["Bash(git:*)"],', '14 |   },', '   |   ^ trailing comma', '15 | }'] } } },
     { alias: 'homelab-nuc', os: 'Fedora Linux 44', platform: 'linux', arch: 'amd64', hostname: 'nuc.lab.internal', user: 'ops', agent: '0.8.1', install: 'homebrew',
       contact: 9e3, enrolled: 52 * day, groups: ['core', 'infra'], agentSource: 'work',
-      clients: { codex: { mode: 'cliproxy', baseUrl: proxy, model: 'gpt-6-codex', version: '0.71.0' }, opencode: { mode: 'cliproxy', baseUrl: proxy, model: 'gemini-2.5-pro', version: '1.3.2' } },
+      clients: { codex: { mode: 'cliproxy', baseUrl: proxy, model: 'gpt-6-codex', version: '0.71.0' }, antigravity: { mode: 'cliproxy', baseUrl: proxy, model: 'gemini-2.5-pro', version: '1.3.2' } },
       states: {} },
     { alias: 'fedora-ws', os: 'Fedora Linux 44', platform: 'linux', arch: 'amd64', hostname: 'fedora-ws', user: 'joan', agent: '0.8.0', install: 'archive',
       contact: 34e3, enrolled: 47 * day, groups: [], agentSource: 'personal',
@@ -327,7 +327,7 @@ export function buildDataset(): Dataset {
       } },
     { alias: 'gpu-box', os: 'Arch Linux (6.17)', platform: 'linux', arch: 'amd64', hostname: 'gpu-box', user: 'joan', agent: '0.8.1', install: 'archive',
       contact: 4e3, enrolled: 18 * day, groups: ['core', 'backend', 'experimental'], agentSource: 'personal',
-      clients: { opencode: { mode: 'cliproxy', baseUrl: backupProxy, model: 'gemini-2.5-flash', version: '1.3.2' } },
+      clients: { antigravity: { mode: 'cliproxy', baseUrl: backupProxy, model: 'gemini-2.5-flash', version: '1.3.2' } },
       states: { skills: 'applying' },
       retry: { skills: { code: 'bundle_digest_mismatch', ago: 70e3,
         diagnostic: 'postgres-migrations: received sha256:7c1e9a…f402, expected sha256:4b90d3…11ac. Download discarded; retrying.' } } },
@@ -420,13 +420,13 @@ export function buildDataset(): Dataset {
     add('skills', 'skills', 'home', '.agents/skills', { skills: skillsFor(spec.groups) });
     if (spec.agentSource) {
       for (const client of Object.keys(spec.clients)) {
-        const file = client === 'claude' ? 'CLAUDE.md' : 'AGENTS.md';
-        const dir = ({ codex: '.codex', opencode: '.config/opencode', claude: '.claude' } as Record<string, string>)[client]!;
+        const file = client === 'claude' ? 'CLAUDE.md' : client === 'antigravity' ? 'GEMINI.md' : 'AGENTS.md';
+        const dir = ({ codex: '.codex', opencode: '.config/opencode', claude: '.claude', antigravity: '.gemini' } as Record<string, string>)[client]!;
         add(`agent-file/${client}`, 'agent-file', 'home', dir, { file, agentSource: spec.agentSource });
       }
     }
     for (const [client, cfg] of Object.entries(spec.clients)) {
-      const dir = ({ codex: '.codex', opencode: '.config/opencode', claude: '.claude' } as Record<string, string>)[client]!;
+      const dir = ({ codex: '.codex', opencode: '.config/opencode', claude: '.claude', antigravity: '.gemini' } as Record<string, string>)[client]!;
       add(`ai-client/${client}`, 'ai-client', 'home', dir, { aiClient: { client, mode: cfg.mode, baseUrl: cfg.baseUrl ?? null, model: cfg.model ?? null, clientVersion: cfg.version } });
     }
 

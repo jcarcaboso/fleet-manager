@@ -136,7 +136,7 @@ public sealed class SourcePublicationTests : IAsyncLifetime
         Assert.Equal(PublicationOutcome.Unchanged, repeated.Outcome);
         Assert.Equal(publication.DesiredRevisionId, repeated.DesiredRevisionId);
         Assert.Equal(2, await database.DesiredRevisions.CountAsync());
-        Assert.Equal(2, await database.Assignments.CountAsync());
+        Assert.Equal(3, await database.Assignments.CountAsync());
         Assert.Null((await coordinator.PollAsync(
             authentication, DateTimeOffset.UtcNow, AgentCapabilities.ClaudeSkills)).Assignment);
     }
@@ -182,7 +182,7 @@ public sealed class SourcePublicationTests : IAsyncLifetime
         var cleanup = Assert.IsType<SourceScanResult.Snapshot>(
             await scanner.ScanAsync(initial.Value.SourceRevision, CancellationToken.None));
         var publication = await coordinator.AcceptSourceSnapshotAsync(cleanup.Value);
-        Assert.Equal(excludeClaude ? 1 : 2, publication.ChangedAssignmentCount);
+        Assert.Equal(excludeClaude ? 1 : 3, publication.ChangedAssignmentCount);
         string[] targets = excludeClaude ? ["skills/claude"] : ["skills", "skills/claude"];
         foreach (var target in targets)
         {

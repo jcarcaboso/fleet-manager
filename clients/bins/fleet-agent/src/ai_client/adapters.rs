@@ -2,11 +2,17 @@ use super::{ModelCache, Receipt, Reconciler};
 use anyhow::{Result, bail};
 use std::path::{Path, PathBuf};
 
+mod antigravity;
 mod claude;
 mod codex;
 pub(super) mod opencode;
 
-const REGISTERED: [Adapter; 3] = [Adapter::Codex, Adapter::OpenCode, Adapter::Claude];
+const REGISTERED: [Adapter; 4] = [
+    Adapter::Codex,
+    Adapter::OpenCode,
+    Adapter::Claude,
+    Adapter::Antigravity,
+];
 
 /// A client config with the Fleet settings applied, its receipt, and whether
 /// Fleet-owned settings had been changed outside Fleet and were overwritten.
@@ -23,6 +29,7 @@ pub(super) enum Adapter {
     Codex,
     OpenCode,
     Claude,
+    Antigravity,
 }
 
 impl Adapter {
@@ -38,6 +45,7 @@ impl Adapter {
             Self::Codex => "codex",
             Self::OpenCode => "opencode",
             Self::Claude => "claude",
+            Self::Antigravity => "antigravity",
         }
     }
 
@@ -48,6 +56,7 @@ impl Adapter {
             Self::Codex => ".codex",
             Self::OpenCode => ".config/opencode",
             Self::Claude => ".claude",
+            Self::Antigravity => ".gemini",
         }
     }
 
@@ -56,6 +65,7 @@ impl Adapter {
         match self {
             Self::Codex => directory.join("config.toml"),
             Self::Claude => directory.join("settings.json"),
+            Self::Antigravity => directory.join("config/config.json"),
             Self::OpenCode => {
                 let jsonc = directory.join("opencode.jsonc");
                 // OpenCode loads JSONC after JSON, so update the overriding file.
@@ -135,6 +145,9 @@ impl Adapter {
                 &key_path,
                 routing.is_some(),
             ),
+            Self::Antigravity => {
+                antigravity::render_antigravity(old, previous, base_url, model, models, &key_path)
+            }
         }
     }
 
@@ -179,6 +192,7 @@ impl Adapter {
             }
             Self::OpenCode => opencode::orphan_receipt(old),
             Self::Claude => claude::orphan_receipt(old, &reconciler.state.join("api-key")),
+            Self::Antigravity => antigravity::orphan_receipt(old),
         }
     }
 
@@ -187,14 +201,17 @@ impl Adapter {
             Self::Codex => codex::restore_codex(old, receipt),
             Self::OpenCode => opencode::restore_opencode(old, receipt),
             Self::Claude => claude::restore_claude(old, receipt),
+            Self::Antigravity => antigravity::restore_antigravity(old, receipt),
         }
     }
 
     pub(super) fn config_is_empty(self, bytes: &[u8]) -> Result<bool> {
         match self {
-            Self::Claude => Ok(serde_json::from_slice::<serde_json::Value>(bytes)?
-                .as_object()
-                .is_some_and(|object| object.is_empty())),
+            Self::Claude | Self::Antigravity => {
+                Ok(serde_json::from_slice::<serde_json::Value>(bytes)?
+                    .as_object()
+                    .is_some_and(|object| object.is_empty()))
+            }
             Self::Codex => Ok(codex::parse_document(std::str::from_utf8(bytes)?)?.is_empty()),
             Self::OpenCode => {
                 let root = jsonc_parser::cst::CstRootNode::parse(
@@ -213,7 +230,7 @@ impl Adapter {
             Self::Codex => super::config_file::remove_state_file(
                 &reconciler.state.join("codex-model-catalog.json"),
             ),
-            Self::OpenCode | Self::Claude => Ok(()),
+            Self::OpenCode | Self::Claude | Self::Antigravity => Ok(()),
         }
     }
 }
@@ -227,10 +244,11 @@ mod tests {
         assert_eq!(Adapter::find("codex").unwrap(), Adapter::Codex);
         assert_eq!(Adapter::find("opencode").unwrap(), Adapter::OpenCode);
         assert_eq!(Adapter::find("claude").unwrap(), Adapter::Claude);
+        assert_eq!(Adapter::find("antigravity").unwrap(), Adapter::Antigravity);
         assert!(Adapter::find("unknown").is_err());
         assert_eq!(
             REGISTERED.map(Adapter::name),
-            ["codex", "opencode", "claude"]
+            ["codex", "opencode", "claude", "antigravity"]
         );
     }
 
@@ -239,6 +257,7 @@ mod tests {
         assert!(crate::ai_client::supports("codex", ".codex"));
         assert!(crate::ai_client::supports("opencode", ".config/opencode"));
         assert!(crate::ai_client::supports("claude", ".claude"));
+        assert!(crate::ai_client::supports("antigravity", ".gemini"));
         assert!(!crate::ai_client::supports("codex", ".claude"));
         assert!(!crate::ai_client::supports("unknown", ".codex"));
     }

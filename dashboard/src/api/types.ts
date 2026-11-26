@@ -553,8 +553,8 @@ export interface CliProxyStatus {
   errorCode: string | null;
   catalogs: CatalogStatus[];
 }
-export type ModelRoutingGroup = 'claude' | 'gpt' | 'other';
-export type ModelClient = 'claude' | 'codex' | 'opencode';
+export type ModelRoutingGroup = 'claude' | 'gpt' | 'gemini' | 'other';
+export type ModelClient = 'claude' | 'codex' | 'opencode' | 'antigravity';
 export interface SelectionPolicy {
   includeNew: boolean;
   disabledFamilies: string[];

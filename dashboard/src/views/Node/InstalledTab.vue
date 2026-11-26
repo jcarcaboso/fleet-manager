@@ -13,7 +13,7 @@ const skillsTargets = computed(() => props.node.targets.filter(t => targetKind(t
 const files = computed(() => props.node.targets.filter(t => targetKind(t.name) === 'agent-file'));
 const clients = computed(() => props.node.targets.filter(t => targetKind(t.name) === 'ai-client'));
 const other = computed(() => props.node.targets.filter(t => !['skills', 'agent-file', 'ai-client'].includes(targetKind(t.name))));
-const monoClass = (c: string | null): string => `m-${c && ['claude', 'codex', 'opencode'].includes(c) ? c : 'other'}`;
+const monoClass = (c: string | null): string => `m-${c && ['claude', 'codex', 'opencode', 'antigravity'].includes(c) ? c : 'other'}`;
 const connection = (mode: string): string => (mode === 'cliproxy' ? 'CLIProxy' : mode === 'native' ? 'Native login' : mode);
 </script>
 

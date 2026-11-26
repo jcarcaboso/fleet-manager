@@ -11,6 +11,7 @@ internal static class SourceTargetPublishers
             ["codex"] = new(".codex", "AGENTS.md"),
             ["opencode"] = new(".config/opencode", "AGENTS.md"),
             ["claude"] = new(".claude", "CLAUDE.md"),
+            ["antigravity"] = new(".gemini", "GEMINI.md"),
         };
 
     internal static readonly SnapshotBundle EmptyAgentInstructions = AgentInstructionsBundle([]);
@@ -47,13 +48,21 @@ internal static class SourceTargetPublishers
             var descriptor = new TargetDescriptor("home", target.Path ?? publication.Manifest.Targets.Skills.Path!);
             var resolvedSkills = skills.Values.ToArray();
             var excludeClaude = target.ExcludeClaude ?? publication.Manifest.Targets.Skills.ExcludeClaude ?? false;
+            var excludeAntigravity = target.ExcludeAntigravity ?? publication.Manifest.Targets.Skills.ExcludeAntigravity ?? false;
             var claudeSkills = excludeClaude ? [] : resolvedSkills;
-            yield return new SnapshotTarget(publication.NodeAliases[pair.Key], "skills", descriptor,
-                descriptor.Path == ".claude/skills" ? claudeSkills : resolvedSkills);
+            var antigravitySkills = excludeAntigravity ? [] : resolvedSkills;
+            var primarySkills = descriptor.Path == ".claude/skills" ? claudeSkills :
+                descriptor.Path == ".gemini/config/skills" ? antigravitySkills : resolvedSkills;
+            yield return new SnapshotTarget(publication.NodeAliases[pair.Key], "skills", descriptor, primarySkills);
 
             if (descriptor.Path != ".claude/skills")
                 yield return new SnapshotTarget(publication.NodeAliases[pair.Key], "skills/claude",
                     new TargetDescriptor("home", ".claude/skills"), claudeSkills);
+
+            // Antigravity reads personal Skills from ~/.gemini/config/skills, not ~/.agents/skills.
+            if (descriptor.Path != ".gemini/config/skills")
+                yield return new SnapshotTarget(publication.NodeAliases[pair.Key], "skills/antigravity",
+                    new TargetDescriptor("home", ".gemini/config/skills"), antigravitySkills);
         }
     }
 

@@ -34,6 +34,7 @@ internal sealed class ManifestTarget
     public string? Path { get; init; }
     public List<string>? Groups { get; init; }
     public bool? ExcludeClaude { get; init; }
+    public bool? ExcludeAntigravity { get; init; }
 }
 
 internal sealed class ManifestNode

@@ -82,7 +82,8 @@ public static class FleetEndpoints
         {
             var baseUrl = await coordinator.AuthorizeCliProxyCredentialAsync(Node(context), ct);
             context.Response.Headers.CacheControl = "no-store";
-            var catalog = await selection.GetSelectedCatalogAsync(baseUrl, ct, includeRouting: clientRouting == true);
+            var catalog = await selection.GetSelectedCatalogAsync(baseUrl, ct, includeRouting: clientRouting == true,
+                antigravity: HasCapability(context, AntigravityCapability));
             return catalog is null
                 ? Results.Json(new { code = "cliproxy_models_unavailable" }, statusCode: StatusCodes.Status503ServiceUnavailable)
                 : Results.Ok(catalog);
@@ -182,11 +183,13 @@ public static class FleetEndpoints
     public const string DiskUsageCapability = "disk-usage";
     public const string AgentUpdateCapability = "agent-update";
     public const string ClaudeSkillsCapability = "claude-skills";
+    public const string AntigravityCapability = "antigravity";
 
     private static AgentCapabilities Capabilities(HttpContext context) =>
         (HasCapability(context, DiskUsageCapability) ? AgentCapabilities.DiskUsage : AgentCapabilities.None) |
         (HasCapability(context, AgentUpdateCapability) ? AgentCapabilities.AgentUpdate : AgentCapabilities.None) |
-        (HasCapability(context, ClaudeSkillsCapability) ? AgentCapabilities.ClaudeSkills : AgentCapabilities.None);
+        (HasCapability(context, ClaudeSkillsCapability) ? AgentCapabilities.ClaudeSkills : AgentCapabilities.None) |
+        (HasCapability(context, AntigravityCapability) ? AgentCapabilities.Antigravity : AgentCapabilities.None);
 
     // Only the Server's own version is served: it is the only release an update request can name.
     private static async Task<AgentRelease> ReleaseAsync(string version, AgentReleaseMirror mirror, LatestAgentVersion latest, CancellationToken ct) =>

@@ -34,7 +34,7 @@ _Avoid_: Client, worker, CLI
 
 **AI client**:
 A supported coding assistant that reads a Node-local instruction file, such as
-Codex, OpenCode, or Claude Code.
+Codex, OpenCode, Claude Code, or Antigravity.
 _Avoid_: Agent
 
 **AI client connection**:

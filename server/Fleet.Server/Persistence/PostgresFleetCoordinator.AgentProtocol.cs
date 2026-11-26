@@ -156,9 +156,11 @@ public sealed partial class PostgresFleetCoordinator
     {
         await RetryFailedAiAssignment(authentication.NodeId.Value, targetName, cancellationToken);
         var claudeSkills = capabilities.HasFlag(AgentCapabilities.ClaudeSkills);
+        var antigravity = capabilities.HasFlag(AgentCapabilities.Antigravity);
         var assignment = await db.Assignments.AsNoTracking().Where(x => x.NodeId == authentication.NodeId.Value && x.IsCurrent &&
                 (x.State == (int)ConvergenceState.Pending || x.State == (int)ConvergenceState.Applying) &&
                 (claudeSkills || x.TargetName != "skills/claude") &&
+                (antigravity || (x.TargetName != "skills/antigravity" && x.TargetName != "ai-client/antigravity" && x.TargetName != "agent-file/antigravity")) &&
                 (targetName == null || x.TargetName == targetName))
             .OrderBy(x => x.TargetName).FirstOrDefaultAsync(cancellationToken);
         if (assignment is null) return new(null);

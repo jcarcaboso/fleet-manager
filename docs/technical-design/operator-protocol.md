@@ -206,12 +206,12 @@ current policy, and posts `{"baseUrl", "version", "policy": {"includeNew",
 "skipClaudeModelsForOtherClients", "clientRouting?"}}`.
 
 Use the dashboard to set routes, or send `clientRouting` as a map from `claude`,
-`gpt`, or `other` to one or more distinct client IDs (`claude`, `codex`,
-`opencode`). This map replaces all explicit routes. Omit it to keep existing
-overrides; send `{}` to clear them. The
-defaults are Claude Code for `claude`, Codex and OpenCode for `gpt`, and OpenCode
-for `other`. The legacy skip flag still determines the Claude route when it has
-no explicit override.
+`gpt`, `gemini`, or `other` to one or more distinct client IDs (`claude`, `codex`,
+`opencode`, `antigravity`). This map replaces all explicit routes. Omit it to
+keep existing overrides; send `{}` to clear them. The defaults are Claude Code
+for `claude`, Codex and OpenCode for `gpt`, Antigravity for `gemini`, and OpenCode
+for `other`. Gemini models route only to Antigravity by default. The legacy skip
+flag still determines the Claude route when it has no explicit override.
 
 | Flag | Effect |
 |---|---|

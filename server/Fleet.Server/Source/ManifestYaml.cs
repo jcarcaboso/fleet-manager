@@ -15,6 +15,7 @@ internal static class ManifestYaml
         Path = source?.Path,
         Groups = source?.Groups,
         ExcludeClaude = source?.ExcludeClaude,
+        ExcludeAntigravity = source?.ExcludeAntigravity,
     };
 
     public static ManifestCliProxy? Map(ManifestCliProxyYaml? source) =>
@@ -58,4 +59,5 @@ internal sealed class ManifestTargetYaml
     [YamlMember(Alias = "path")] public string? Path { get; init; }
     [YamlMember(Alias = "groups")] public List<string>? Groups { get; init; }
     [YamlMember(Alias = "excludeClaude")] public bool? ExcludeClaude { get; init; }
+    [YamlMember(Alias = "excludeAntigravity")] public bool? ExcludeAntigravity { get; init; }
 }
