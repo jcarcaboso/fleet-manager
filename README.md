@@ -36,8 +36,8 @@ migrations with Docker Compose. The dashboard is its own image and container
 7444 next to the Server's 7443. Follow the
 [homelab setup](deploy/homelab/README.md) for a first installation.
 
-The amd64 images are `skorcius/fleet-manager:0.15.1` and
-`skorcius/fleet-manager:dashboard-0.15.1`.
+The amd64 images are `skorcius/fleet-manager:0.15.2` and
+`skorcius/fleet-manager:dashboard-0.15.2`.
 For an existing installation, back up PostgreSQL and private configuration,
 replace `compose.yaml` with the current release copy, and preserve `.env`, `secrets/`,
 `operator.env`, `ssh/`, and Docker volumes. Set both image tags in `.env`, then run:
@@ -372,6 +372,7 @@ The main design references are:
 - [Fleet Manager 0.14.0 release notes](docs/releases/0.14.0.md)
 - [Fleet Manager 0.15.0 release notes](docs/releases/0.15.0.md)
 - [Fleet Manager 0.15.1 release notes](docs/releases/0.15.1.md)
+- [Fleet Manager 0.15.2 release notes](docs/releases/0.15.2.md)
 - [Project release skill](.agents/skills/fleet-release/SKILL.md)
 - [Fleet Manager 0.6.5 release notes](docs/releases/0.6.5.md)
 - [Fleet Manager 0.5.0 release notes](docs/releases/0.5.0.md)
