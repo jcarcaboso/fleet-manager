@@ -160,8 +160,8 @@ it in Git or PostgreSQL. Set `FLEET_CLIPROXY_API_KEY` in the environment used to
 start Compose:
 
 ```sh
-sed -i 's|^FLEET_IMAGE=.*|FLEET_IMAGE=skorcius/fleet-manager:0.15.1|' .env
-sed -i 's|^FLEET_DASHBOARD_IMAGE=.*|FLEET_DASHBOARD_IMAGE=skorcius/fleet-manager:dashboard-0.15.1|' .env
+sed -i 's|^FLEET_IMAGE=.*|FLEET_IMAGE=skorcius/fleet-manager:0.15.2|' .env
+sed -i 's|^FLEET_DASHBOARD_IMAGE=.*|FLEET_DASHBOARD_IMAGE=skorcius/fleet-manager:dashboard-0.15.2|' .env
 export FLEET_CLIPROXY_API_KEY='replace-with-a-dedicated-proxy-key'
 docker compose up -d --wait
 ```
@@ -244,8 +244,8 @@ The Server terminates HTTPS itself to validate Node client certificates. A proxy
 in front must preserve TLS with TCP passthrough; ordinary HTTP termination does
 not preserve this authentication.
 
-The pinned images are `skorcius/fleet-manager:0.15.1` and
-`skorcius/fleet-manager:dashboard-0.15.1`. To upgrade, back up PostgreSQL and
+The pinned images are `skorcius/fleet-manager:0.15.2` and
+`skorcius/fleet-manager:dashboard-0.15.2`. To upgrade, back up PostgreSQL and
 the private configuration, set `FLEET_IMAGE` and `FLEET_DASHBOARD_IMAGE` in
 `.env`, then run `docker compose pull` and
 `docker compose up -d --force-recreate --wait`.
@@ -309,8 +309,8 @@ session cookie, the two addresses are not on the same site.
 When upgrading from `0.2.0`, first replace `compose.yaml` with this release's
 copy so it supplies the Server's public URL. Preserve `.env`, `secrets/`,
 `operator.env`, `ssh/`, and Docker volumes. Set `FLEET_IMAGE` to
-`skorcius/fleet-manager:0.15.1` and `FLEET_DASHBOARD_IMAGE` to
-`skorcius/fleet-manager:dashboard-0.15.1` in `.env`. Do not rerun the plain
+`skorcius/fleet-manager:0.15.2` and `FLEET_DASHBOARD_IMAGE` to
+`skorcius/fleet-manager:dashboard-0.15.2` in `.env`. Do not rerun the plain
 `setup.py` on an existing installation; run `setup.py --add-dashboard` as described above. The
 dashboard uses the existing CA. Sign in as `fleet` / `fleet` and choose a new
 password; the Operator token in `operator.env` stays the `fleet` CLI's credential.
@@ -322,7 +322,7 @@ and the dashboard as `dashboard-VERSION`. From a clean checkout of the tested
 release commit, build the versioned images:
 
 ```sh
-VERSION=0.15.1
+VERSION=0.15.2
 SHA=$(git rev-parse HEAD)
 docker build --platform linux/amd64 \
   --label "org.opencontainers.image.revision=$SHA" \
